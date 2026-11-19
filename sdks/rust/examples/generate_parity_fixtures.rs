@@ -582,7 +582,8 @@ fn assert_complete_fixture_coverage(coverage: &FixtureCoverage) {
         "QueryParamType",
         &coverage.query_param_types,
         &[
-            "Bool", "I64", "F64", "F32", "String", "DateTime", "Value", "Object", "Array",
+            "Bool", "I64", "F64", "F32", "String", "DateTime", "Value", "Object", "Record",
+            "Array", "Nullable",
         ],
     );
     assert_variants(
@@ -1451,8 +1452,18 @@ fn visit_query_param_type(param_type: &QueryParamType, coverage: &mut FixtureCov
         QueryParamType::Object => {
             coverage.query_param_types.insert("Object");
         }
+        QueryParamType::Record(fields) => {
+            coverage.query_param_types.insert("Record");
+            fields
+                .iter()
+                .for_each(|(_, field)| visit_query_param_type(field, coverage));
+        }
         QueryParamType::Array(inner) => {
             coverage.query_param_types.insert("Array");
+            visit_query_param_type(inner, coverage);
+        }
+        QueryParamType::Nullable(inner) => {
+            coverage.query_param_types.insert("Nullable");
             visit_query_param_type(inner, coverage);
         }
     }
@@ -1884,6 +1895,7 @@ fn runtime_fixtures() -> Vec<Fixture> {
                                         ("eventId", PropertyInput::param("eventId")),
                                         ("kind", PropertyInput::param("kind")),
                                         ("score", PropertyInput::param("score")),
+                                        ("seenAt", PropertyInput::param("seenAt")),
                                     ],
                                 ),
                             ),
@@ -1897,17 +1909,27 @@ fn runtime_fixtures() -> Vec<Fixture> {
                             ("eventId", string("event-1")),
                             ("kind", string("click")),
                             ("score", i64_value(10)),
+                            ("seenAt", string("2026-06-01T05:00:00+09:00")),
                         ]),
                         object(vec![
                             ("eventId", string("event-2")),
                             ("kind", string("view")),
                             ("score", i64_value(5)),
+                            ("seenAt", string("2026-06-01T00:00:00.250Z")),
                         ]),
                     ]),
                 )],
                 vec![(
                     "rows",
-                    QueryParamType::Array(Box::new(QueryParamType::Object)),
+                    QueryParamType::Array(Box::new(QueryParamType::Record(
+                        ObjectFields::new([
+                            ("eventId", QueryParamType::String),
+                            ("kind", QueryParamType::String),
+                            ("score", QueryParamType::I64),
+                            ("seenAt", QueryParamType::DateTime),
+                        ])
+                        .expect("fixture fields are distinct"),
+                    ))),
                 )],
             ),
         ),
@@ -2817,6 +2839,22 @@ fn json_only_fixtures() -> Vec<Fixture> {
                     ("string", string("value")),
                     ("array", array(vec![i64_value(1), string("two")])),
                     ("object", object(vec![("nested", QueryValue::Bool(true))])),
+                    (
+                        "record",
+                        object(vec![
+                            ("at", string("2026-06-01T05:00:00+09:00")),
+                            ("nested", object(vec![("flag", QueryValue::Bool(true))])),
+                        ]),
+                    ),
+                    (
+                        "nullable",
+                        array(vec![
+                            object(vec![("at", QueryValue::Null)]),
+                            // An omitted nullable field stays absent.
+                            object(vec![]),
+                            object(vec![("at", string("2026-06-01T05:00:00+09:00"))]),
+                        ]),
+                    ),
                 ],
                 vec![
                     ("null", QueryParamType::Value),
@@ -2830,6 +2868,32 @@ fn json_only_fixtures() -> Vec<Fixture> {
                         QueryParamType::Array(Box::new(QueryParamType::Value)),
                     ),
                     ("object", QueryParamType::Object),
+                    (
+                        "record",
+                        QueryParamType::Record(
+                            ObjectFields::new([
+                                ("at", QueryParamType::DateTime),
+                                (
+                                    "nested",
+                                    QueryParamType::Record(
+                                        ObjectFields::new([("flag", QueryParamType::Bool)])
+                                            .expect("one field"),
+                                    ),
+                                ),
+                            ])
+                            .expect("distinct fields"),
+                        ),
+                    ),
+                    (
+                        "nullable",
+                        QueryParamType::Array(Box::new(QueryParamType::Record(
+                            ObjectFields::new([(
+                                "at",
+                                QueryParamType::Nullable(Box::new(QueryParamType::DateTime)),
+                            )])
+                            .expect("one field"),
+                        ))),
+                    ),
                 ],
             ),
         ),

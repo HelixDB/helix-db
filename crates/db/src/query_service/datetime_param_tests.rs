@@ -288,3 +288,635 @@ async fn typed_datetime_params_match_equality_and_enforce_uniqueness_by_instant(
         "{error:?}"
     );
 }
+
+/// `rows`: an array of objects whose `at` and `audit.seen_at` fields are
+/// declared `date_time`, as the documented bulk import declares them.
+fn row_type() -> QueryParamType {
+    let fields = |fields: Vec<(&str, QueryParamType)>| {
+        QueryParamType::Record(helix_ast::query::ObjectFields::new(fields).unwrap())
+    };
+    QueryParamType::Array(Box::new(fields(vec![
+        ("name", QueryParamType::String),
+        ("at", QueryParamType::DateTime),
+        ("audit", fields(vec![("seen_at", QueryParamType::DateTime)])),
+    ])))
+}
+
+fn import_request() -> QueryRequest {
+    QueryRequest::write(write_batch().for_each_param(
+        "rows",
+        write_batch().var_as(
+            "event",
+            g().add_n(
+                "Event",
+                vec![
+                    ("name", PropertyInput::param("name")),
+                    ("at", PropertyInput::param("at")),
+                    ("audit", PropertyInput::param("audit")),
+                ],
+            ),
+        ),
+    ))
+}
+
+/// The bulk-import JSON body for `rows`, declared with `parameter_types`.
+fn import_json(rows: serde_json::Value, parameter_types: serde_json::Value) -> Vec<u8> {
+    let mut request = serde_json::to_value(import_request()).unwrap();
+    request["parameters"] = json!({ "rows": rows });
+    request["parameter_types"] = json!({ "rows": parameter_types });
+    serde_json::to_vec(&request).unwrap()
+}
+
+fn import_row(name: &str, at: &str) -> serde_json::Value {
+    json!({ "name": name, "at": at, "audit": { "seen_at": "2026-06-01T09:00:00+09:00" } })
+}
+
+/// The same four instants `seed_events` writes, imported in one request
+/// through the wire format every SDK sends.
+async fn import_events(db: &HelixDB) {
+    let rows = json!([
+        import_row("literal", "2026-01-01T00:00:00Z"),
+        import_row("param", "2026-06-01T00:00:00Z"),
+        import_row("half_second_later", "2026-06-01T00:00:00.500Z"),
+        import_row("offset_earlier", "2026-06-01T05:00:00+09:00"),
+    ]);
+    db.query_json(&import_json(
+        rows,
+        serde_json::to_value(row_type()).unwrap(),
+    ))
+    .await
+    .unwrap();
+}
+
+async fn event_count(db: &HelixDB) -> serde_json::Value {
+    db.query(QueryRequest::read(
+        read_batch()
+            .var_as("count", g().n_with_label("Event").count())
+            .returning(["count"]),
+    ))
+    .await
+    .unwrap()["count"]
+        .clone()
+}
+
+async fn assert_imported_rows_share_the_datetime_domain(db: Arc<HelixDB>, indexed: bool) {
+    import_events(&db).await;
+    let service = HelixQueryService::new(Arc::clone(&db));
+    for request in [
+        after_param("2025-01-01T00:00:00Z"),
+        after_literal("2025-01-01T00:00:00Z"),
+    ] {
+        let response = service.execute_query(request).await.unwrap();
+        assert_eq!(
+            sorted_names(&response.json()),
+            ["half_second_later", "literal", "offset_earlier", "param"],
+            "indexed={indexed}"
+        );
+        let served_by_index = !response.diagnostics().insights.iter().any(|insight| {
+            matches!(
+                insight,
+                helix_planner::diagnostics::PlannerInsight::MissingIndex(_)
+            )
+        });
+        assert_eq!(served_by_index, indexed);
+    }
+    // Instants order, not spellings, exactly as for top-level parameters.
+    for request in [
+        after_param("2026-06-01T00:00:00Z"),
+        after_literal("2026-06-01T00:00:00Z"),
+    ] {
+        assert_eq!(
+            sorted_names(&db.query(request).await.unwrap()),
+            ["half_second_later"],
+            "indexed={indexed}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn foreach_rows_with_typed_datetime_fields_match_range_filters_without_an_index() {
+    assert_imported_rows_share_the_datetime_domain(open("datetime-rows-scan").await, false).await;
+}
+
+#[tokio::test]
+async fn foreach_rows_with_typed_datetime_fields_match_range_filters_through_a_range_index() {
+    let db = open("datetime-rows-range-index").await;
+    db.install_index_for_tests(
+        SecondaryIndexDefinition::node_range("Event", "at")
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_imported_rows_share_the_datetime_domain(db, true).await;
+}
+
+#[tokio::test]
+async fn foreach_rows_store_typed_datetime_fields_canonically_at_every_level() {
+    let db = open("datetime-rows-stored-shape").await;
+    import_events(&db).await;
+    // A row built in process, with no JSON in between, stores the same values.
+    db.query(
+        import_request()
+            .with_typed_parameter(
+                "rows",
+                row_type(),
+                QueryValue::Array(vec![serde_json::from_value(import_row(
+                    "in_process",
+                    "2026-01-02T00:00:00Z",
+                ))
+                .unwrap()]),
+            )
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let stored = db
+        .query(QueryRequest::read(
+            read_batch()
+                .var_as(
+                    "events",
+                    g().n_with_label("Event")
+                        .value_map(Some(vec!["name", "at", "audit"])),
+                )
+                .returning(["events"]),
+        ))
+        .await
+        .unwrap();
+    let mut events = stored["events"].as_array().unwrap().clone();
+    events.sort_by_key(|event| event["name"].as_str().unwrap().to_owned());
+    // The nested field renders as a datetime, so it was not kept as the
+    // `+09:00` text it was sent as.
+    let audit = json!({ "seen_at": "2026-06-01T00:00:00.000Z" });
+    assert_eq!(
+        events,
+        [
+            json!({ "name": "half_second_later", "at": "2026-06-01T00:00:00.500Z", "audit": audit }),
+            json!({ "name": "in_process", "at": "2026-01-02T00:00:00.000Z", "audit": audit }),
+            json!({ "name": "literal", "at": "2026-01-01T00:00:00.000Z", "audit": audit }),
+            json!({ "name": "offset_earlier", "at": "2026-05-31T20:00:00.000Z", "audit": audit }),
+            json!({ "name": "param", "at": "2026-06-01T00:00:00.000Z", "audit": audit }),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn foreach_rows_with_invalid_datetime_or_mismatched_fields_write_nothing() {
+    let db = open("datetime-rows-rejected").await;
+    let declared = serde_json::to_value(row_type()).unwrap();
+    let valid = import_row("valid", "2026-01-01T00:00:00Z");
+    let with = |field: &str, value: serde_json::Value| {
+        let mut row = import_row("invalid", "2026-01-01T00:00:00Z");
+        row[field] = value;
+        row
+    };
+    let without = |field: &str| {
+        let mut row = import_row("invalid", "2026-01-01T00:00:00Z");
+        row.as_object_mut().unwrap().remove(field);
+        row
+    };
+    for (row, expected) in [
+        // An invalid RFC3339 string is an error, never a stored string.
+        (
+            with("at", json!("2026-01-01")),
+            "'rows[1].at' expected date_time",
+        ),
+        (
+            with("at", json!("yesterday")),
+            "'rows[1].at' expected date_time",
+        ),
+        (with("at", json!(null)), "'rows[1].at' expected date_time"),
+        (
+            with("at", json!(1_767_225_600_000_i64)),
+            "'rows[1].at' expected date_time",
+        ),
+        (
+            with("audit", json!({ "seen_at": "not a datetime" })),
+            "'rows[1].audit.seen_at' expected date_time",
+        ),
+        (without("at"), r#"missing: [\"at\"]"#),
+        (
+            with("audit", json!({})),
+            r#"'rows[1].audit' fields do not match"#,
+        ),
+        // A misspelled field is rejected rather than stored untyped.
+        (
+            with("createdAt", json!("2026-01-01T00:00:00Z")),
+            r#"undeclared: [\"createdAt\"]"#,
+        ),
+        (
+            json!("not an object"),
+            "'rows[1]' expected object with declared fields",
+        ),
+    ] {
+        let error = db
+            .query_json(&import_json(json!([valid, row]), declared.clone()))
+            .await
+            .expect_err("an invalid row rejects the whole request")
+            .to_string();
+        assert!(error.contains(expected), "{expected}: {error}");
+    }
+    assert_eq!(event_count(&db).await, json!(0));
+
+    // A declaration without fields is rejected before any row is read.
+    let error = db
+        .query_json(&import_json(
+            json!([valid]),
+            json!({ "array": { "object": {} } }),
+        ))
+        .await
+        .expect_err("an empty field declaration is invalid")
+        .to_string();
+    assert!(error.contains("at least one field"), "{error}");
+    assert_eq!(event_count(&db).await, json!(0));
+}
+
+/// Rows declared as a bare `object` keep RFC3339 text as strings: only a
+/// declared `date_time` field becomes a datetime.
+#[tokio::test]
+async fn foreach_rows_declared_as_untyped_objects_keep_rfc3339_strings() {
+    let db = open("datetime-rows-untyped").await;
+    db.query_json(&import_json(
+        json!([import_row("untyped", "2026-06-01T05:00:00+09:00")]),
+        json!({ "array": "object" }),
+    ))
+    .await
+    .unwrap();
+    let stored = db
+        .query(QueryRequest::read(
+            read_batch()
+                .var_as(
+                    "events",
+                    g().n_with_label("Event").value_map(Some(vec!["at"])),
+                )
+                .returning(["events"]),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        stored["events"],
+        json!([{ "at": "2026-06-01T05:00:00+09:00" }])
+    );
+}
+
+/// A nullable `date_time` field, such as an optional timestamp column: rows
+/// where it is set store datetimes that typed and literal range filters
+/// match, and rows where it is `null` store `null` and match neither.
+#[tokio::test]
+async fn foreach_rows_with_nullable_datetime_fields_store_datetimes_or_null() {
+    let db = open("datetime-rows-nullable").await;
+    db.query_json(&import_json(
+        json!([
+            unset_row("unset_first"),
+            import_row("param", "2026-06-01T00:00:00Z"),
+            import_row("offset_earlier", "2026-06-01T05:00:00+09:00"),
+            unset_row("unset_last"),
+        ]),
+        nullable_row_type(),
+    ))
+    .await
+    .unwrap();
+    for request in [
+        after_param("2025-01-01T00:00:00Z"),
+        after_literal("2025-01-01T00:00:00Z"),
+    ] {
+        assert_eq!(
+            sorted_names(&db.query(request).await.unwrap()),
+            ["offset_earlier", "param"]
+        );
+    }
+    assert_eq!(
+        sorted_names(&db.query(after_param("2026-05-31T23:00:00Z")).await.unwrap()),
+        ["param"]
+    );
+    let stored = db
+        .query(QueryRequest::read(
+            read_batch()
+                .var_as(
+                    "events",
+                    g().n_with_label("Event")
+                        .value_map(Some(vec!["name", "at", "audit"])),
+                )
+                .returning(["events"]),
+        ))
+        .await
+        .unwrap();
+    let mut events = stored["events"].as_array().unwrap().clone();
+    events.sort_by_key(|event| event["name"].as_str().unwrap().to_owned());
+    let audit = json!({ "seen_at": "2026-06-01T00:00:00.000Z" });
+    let null_audit = json!({ "seen_at": null });
+    assert_eq!(
+        events,
+        [
+            json!({ "name": "offset_earlier", "at": "2026-05-31T20:00:00.000Z", "audit": audit }),
+            json!({ "name": "param", "at": "2026-06-01T00:00:00.000Z", "audit": audit }),
+            json!({ "name": "unset_first", "at": null, "audit": null_audit }),
+            json!({ "name": "unset_last", "at": null, "audit": null_audit }),
+        ]
+    );
+
+    // A set value must still be a valid datetime, and a field that is not
+    // nullable present. An omitted nullable row field passes validation, but
+    // the body still reads it, so the import fails as unbound like an
+    // untyped row missing it.
+    let db = open("datetime-rows-nullable-rejected").await;
+    for (row, expected) in [
+        (
+            json!({ "name": "bad", "at": "2026-06-01", "audit": { "seen_at": null } }),
+            "'rows[0].at' expected date_time",
+        ),
+        (
+            json!({ "at": null, "audit": { "seen_at": null } }),
+            r#"missing: [\"name\"]"#,
+        ),
+        (
+            json!({ "name": "bad", "audit": { "seen_at": null } }),
+            "`at` is not bound",
+        ),
+    ] {
+        let error = db
+            .query_json(&import_json(json!([row]), nullable_row_type()))
+            .await
+            .expect_err("an invalid row rejects the whole request")
+            .to_string();
+        assert!(error.contains(expected), "{expected}: {error}");
+    }
+    assert_eq!(event_count(&db).await, json!(0));
+}
+
+/// A request body over `parameters` declared with `parameter_types`.
+fn request_json(
+    request: QueryRequest,
+    parameters: serde_json::Value,
+    parameter_types: serde_json::Value,
+) -> Vec<u8> {
+    let mut request = serde_json::to_value(request).unwrap();
+    request["parameters"] = parameters;
+    request["parameter_types"] = parameter_types;
+    serde_json::to_vec(&request).unwrap()
+}
+
+async fn stored(db: &HelixDB, label: &str, properties: Vec<&str>) -> Vec<serde_json::Value> {
+    let response = db
+        .query(QueryRequest::read(
+            read_batch()
+                .var_as("found", g().n_with_label(label).value_map(Some(properties)))
+                .returning(["found"]),
+        ))
+        .await
+        .unwrap();
+    response["found"].as_array().unwrap().clone()
+}
+
+/// A row that omits a declared nullable field leaves it unbound for that
+/// iteration even when a parameter of the same name is bound outside the
+/// loop: the outer value never stands in for the row's own field. A row that
+/// sends the field, even as `null`, binds it.
+#[tokio::test]
+async fn foreach_rows_omitting_a_nullable_field_do_not_read_a_same_named_parameter() {
+    let request = || {
+        QueryRequest::write(write_batch().for_each_param(
+            "rows",
+            write_batch().var_as(
+                "event",
+                g().add_n(
+                    "Event",
+                    vec![
+                        ("name", PropertyInput::param("name")),
+                        ("at", PropertyInput::param("at")),
+                        ("source", PropertyInput::param("source")),
+                    ],
+                ),
+            ),
+        ))
+    };
+    let types = json!({
+        "rows": { "array": { "object": {
+            "name": "string",
+            "at": { "nullable": "date_time" },
+        } } },
+        "at": "date_time",
+        "source": "string",
+    });
+    let parameters = |row: serde_json::Value| json!({ "rows": [row], "at": "2026-01-01T00:00:00Z", "source": "import" });
+
+    let db = open("datetime-rows-omitted-shadow").await;
+    let error = db
+        .query_json(&request_json(
+            request(),
+            parameters(json!({ "name": "omitted" })),
+            types.clone(),
+        ))
+        .await
+        .expect_err("the omitted row field is unbound")
+        .to_string();
+    assert!(error.contains("`at` is not bound"), "{error}");
+    assert_eq!(event_count(&db).await, json!(0));
+
+    // An outer parameter the rows do not declare stays readable, and a row
+    // field sent as `null` binds `null` over the outer value.
+    db.query_json(&request_json(
+        request(),
+        parameters(json!({ "name": "null", "at": null })),
+        types,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        stored(&db, "Event", vec!["name", "at", "source"]).await,
+        [json!({ "name": "null", "at": null, "source": "import" })]
+    );
+}
+
+/// The same holds one loop down: an inner row that omits a declared
+/// nullable field does not read the enclosing row's field of that name.
+#[tokio::test]
+async fn nested_foreach_rows_omitting_a_nullable_field_do_not_read_the_outer_row_field() {
+    let request = || {
+        QueryRequest::write(
+            write_batch().for_each_param(
+                "rows",
+                write_batch()
+                    .var_as(
+                        "event",
+                        g().add_n(
+                            "Event",
+                            vec![
+                                ("name", PropertyInput::param("name")),
+                                ("at", PropertyInput::param("at")),
+                            ],
+                        ),
+                    )
+                    .for_each_param(
+                        "items",
+                        write_batch().var_as(
+                            "item",
+                            g().add_n(
+                                "Item",
+                                vec![
+                                    ("label", PropertyInput::param("label")),
+                                    ("at", PropertyInput::param("at")),
+                                ],
+                            ),
+                        ),
+                    ),
+            ),
+        )
+    };
+    let types = json!({ "rows": { "array": { "object": {
+        "name": "string",
+        "at": "date_time",
+        "items": { "array": { "object": {
+            "label": "string",
+            "at": { "nullable": "date_time" },
+        } } },
+    } } } });
+    let parameters = |item: serde_json::Value| {
+        json!({ "rows": [{
+            "name": "outer",
+            "at": "2026-01-01T00:00:00Z",
+            "items": [item],
+        }] })
+    };
+
+    let db = open("datetime-rows-nested-omitted-shadow").await;
+    let error = db
+        .query_json(&request_json(
+            request(),
+            parameters(json!({ "label": "omitted" })),
+            types.clone(),
+        ))
+        .await
+        .expect_err("the omitted inner row field is unbound")
+        .to_string();
+    assert!(error.contains("`at` is not bound"), "{error}");
+    assert_eq!(event_count(&db).await, json!(0));
+
+    db.query_json(&request_json(
+        request(),
+        parameters(json!({ "label": "set", "at": "2026-06-01T00:00:00Z" })),
+        types,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        stored(&db, "Event", vec!["name", "at"]).await,
+        [json!({ "name": "outer", "at": "2026-01-01T00:00:00.000Z" })]
+    );
+    assert_eq!(
+        stored(&db, "Item", vec!["label", "at"]).await,
+        [json!({ "label": "set", "at": "2026-06-01T00:00:00.000Z" })]
+    );
+}
+
+/// A nullable field may be omitted: inside a stored object it stays absent
+/// rather than becoming `null`, and in another row the same field set is
+/// still stored as a datetime.
+#[tokio::test]
+async fn foreach_rows_omitting_nullable_object_fields_store_them_absent() {
+    let db = open("datetime-rows-nullable-omitted").await;
+    db.query_json(&import_json(
+        json!([
+            { "name": "omitted", "at": null, "audit": {} },
+            import_row("set", "2026-06-01T00:00:00Z"),
+        ]),
+        nullable_row_type(),
+    ))
+    .await
+    .unwrap();
+    let stored = db
+        .query(QueryRequest::read(
+            read_batch()
+                .var_as(
+                    "events",
+                    g().n_with_label("Event")
+                        .value_map(Some(vec!["name", "audit"])),
+                )
+                .returning(["events"]),
+        ))
+        .await
+        .unwrap();
+    let mut events = stored["events"].as_array().unwrap().clone();
+    events.sort_by_key(|event| event["name"].as_str().unwrap().to_owned());
+    assert_eq!(
+        events,
+        [
+            json!({ "name": "omitted", "audit": {} }),
+            json!({ "name": "set", "audit": { "seen_at": "2026-06-01T00:00:00.000Z" } }),
+        ]
+    );
+}
+
+/// Rows with every nullable datetime set match through a range index. A
+/// range index rejects any `null` value, however it was declared, so a
+/// `null` row rejects the whole import.
+#[tokio::test]
+async fn foreach_rows_with_nullable_datetime_fields_and_a_range_index() {
+    let db = open("datetime-rows-nullable-range-index").await;
+    db.install_index_for_tests(
+        SecondaryIndexDefinition::node_range("Event", "at")
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    for declared in [nullable_row_type(), json!({ "array": "object" })] {
+        let error = db
+            .query_json(&import_json(
+                json!([
+                    import_row("param", "2026-06-01T00:00:00Z"),
+                    unset_row("unset")
+                ]),
+                declared,
+            ))
+            .await
+            .expect_err("a range index rejects null")
+            .to_string();
+        assert!(
+            error.contains("unsupported range value type Null"),
+            "{error}"
+        );
+    }
+    assert_eq!(event_count(&db).await, json!(0));
+
+    db.query_json(&import_json(
+        json!([
+            import_row("param", "2026-06-01T00:00:00Z"),
+            import_row("offset_earlier", "2026-06-01T05:00:00+09:00"),
+        ]),
+        nullable_row_type(),
+    ))
+    .await
+    .unwrap();
+    let service = HelixQueryService::new(Arc::clone(&db));
+    for request in [
+        after_param("2026-05-31T23:00:00Z"),
+        after_literal("2026-05-31T23:00:00Z"),
+    ] {
+        let response = service.execute_query(request).await.unwrap();
+        assert_eq!(sorted_names(&response.json()), ["param"]);
+        assert!(!response
+            .diagnostics()
+            .insights
+            .iter()
+            .any(|insight| matches!(
+                insight,
+                helix_planner::diagnostics::PlannerInsight::MissingIndex(_)
+            )));
+    }
+}
+
+/// `rows` with `at` and `audit.seen_at` declared `{ "nullable": "date_time" }`.
+fn nullable_row_type() -> serde_json::Value {
+    json!({ "array": { "object": {
+        "name": "string",
+        "at": { "nullable": "date_time" },
+        "audit": { "object": { "seen_at": { "nullable": "date_time" } } },
+    } } })
+}
+
+fn unset_row(name: &str) -> serde_json::Value {
+    json!({ "name": name, "at": null, "audit": { "seen_at": null } })
+}

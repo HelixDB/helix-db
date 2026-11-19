@@ -93,7 +93,7 @@ This project authors HelixDB queries with the **TypeScript DSL** (`@helix-db/hel
 1. **Sketch entities and edges.** Helix has no schema file; labels and properties come into existence the first time you write them. Pick singular labels (`Contact`, not `contacts`). Pick edge labels that read as verbs (`WORKS_AT`, `LOGGED`). Write the sketch as a comment block at the top of `SCHEMA.md`.
 2. **Install the Next.js / React / Tailwind / TypeScript skills** before writing any code. See `<install_more_skills>`.
 3. **Scaffold the Next.js app** by running this exact command from the project root: `npx create-next-app@latest web --typescript --tailwind --app --eslint --src-dir --import-alias '@/*' --use-npm --yes`. If `web/` already exists from a previous run, delete it first. The scaffold creates `web/package.json`, `web/src/app/`, `web/tailwind.config.ts`, `web/tsconfig.json`, etc.
-4. **Install the query DSL:** `cd web && npm i @helix-db/helix-db`. This is how you author every query — typed builders, not hand-written JSON. Also `npm i tsx` (dev) if you want to run query scripts directly.
+4. **Install the query DSL:** `cd web && npm i {sdk_package}` (this exact version matches this CLI; do not install another). This is how you author every query — typed builders, not hand-written JSON. Also `npm i tsx` (dev) if you want to run query scripts directly.
 5. **Add the query runner** at `web/src/lib/helix.ts` — a tiny server-only helper that POSTs a built request to the local DB and returns the parsed JSON. Copy it verbatim from `<frontend>`.
 6. **Author your queries as TypeScript builder modules** under `web/src/lib/queries/` (group by entity, e.g. `contacts.ts`, `interactions.ts`). Each query is a function returning a `readBatch()` / `writeBatch()` built with `g()` and the builder steps; use `defineParams` + `param.*` for parameters. See `<typescript_dsl_quickref>` and `<patterns>`. For anything beyond them — `repeat`, `union`, `choose`, vector/text search, aggregations — invoke the `helix-query-typescript` skill. Do not guess.
 {seed_step}
@@ -223,7 +223,7 @@ const addContact = (p = params) =>
 
 **2. Bulk seed via `forEachParam` (write):** runs the body once per object in the `data` array.
 ```ts
-const params = defineParams({ data: param.array(param.object(param.value())) });
+const params = defineParams({ data: param.array(param.object({ name: param.string(), email: param.string() })) });
 const seed = (p = params) =>
   writeBatch()
     .forEachParam('data',
@@ -232,7 +232,7 @@ const seed = (p = params) =>
     .returning(['created']);
 // values: { data: [{ name: 'Ada', email: 'ada@example.com' }, { name: 'Grace', email: 'grace@example.com' }] }
 ```
-Inside the body, each object's fields (`name`, `email`) are scoped as params for the inner query.
+Inside the body, each object's fields (`name`, `email`) are scoped as params for the inner query. Declare every row field with its type; a row must not have undeclared fields, and must send every field the body reads (`null` for an unset `param.nullable(...)` field). A timestamp field needs `param.dateTime()` (or `param.nullable(param.dateTime())` when it can be `null`) to be stored as a datetime that range filters and indexes match.
 
 **3. Create an edge between two existing nodes by id (write):**
 ```ts
@@ -514,7 +514,7 @@ For memory / long-term-recall / RAG apps specifically, invoke the `helix-memory-
 The commands you should run while building:
 
 **Queries (TypeScript DSL — the default):**
-- `cd web && npm i @helix-db/helix-db` — install the query builder (once per project).
+- `cd web && npm i {sdk_package}` — install the query builder at the version this CLI pins (once per project).
 - `cd web && npx tsx scripts/<name>.ts` — run a query/seed script that imports a builder + `runQuery` (see `<frontend>`).
 
 **HelixDB CLI (raw-JSON fallback + DB control):**
@@ -591,7 +591,7 @@ Every long-lived process you left running, one bullet each, in the format `name 
 - `(extra service, if any) · http://localhost:4000 · workers.log · pkill -f 'worker'`
 
 ### Commands run
-Significant commands you executed during this run, in chronological order, one per line. Include skill installs, the `create-next-app` scaffold, `npm i @helix-db/helix-db`, the dev server start, every query/seed script run (`npx tsx ...`), every `curl http://localhost:3000/api/...`, and the browser-open. Skip filler like `ls`, `cat`, `pwd`. The user must be able to replay any one of these by copy-paste.
+Significant commands you executed during this run, in chronological order, one per line. Include skill installs, the `create-next-app` scaffold, `npm i {sdk_package}`, the dev server start, every query/seed script run (`npx tsx ...`), every `curl http://localhost:3000/api/...`, and the browser-open. Skip filler like `ls`, `cat`, `pwd`. The user must be able to replay any one of these by copy-paste.
 
 ### How to try it
 - The Next.js dev server is already running. The browser should be open at `http://localhost:3000` (chef will open it if you couldn't).
@@ -1375,7 +1375,17 @@ fn starter_prompt(build_intent: Option<&str>) -> String {
     } else {
         (SEED_STATE_DEMO, SEED_STEP_DEMO)
     };
+    // The prompt's builder API is the pinned SDK's, so it installs that exact
+    // version rather than whatever npm tags latest.
     AGENT_PROMPT_TEMPLATE
+        .replace(
+            "{sdk_package}",
+            &format!(
+                "{}@{}",
+                crate::ts_query::SDK_PACKAGE,
+                crate::ts_query::SDK_VERSION
+            ),
+        )
         .replace("{intent}", intent)
         .replace("{seed_state}", seed_state)
         .replace("{seed_step}", seed_step)
@@ -2346,6 +2356,35 @@ mod tests {
                 ["constant"]["string"],
             "User"
         );
+    }
+
+    /// The prompt teaches the pinned SDK's builder API, so every install it
+    /// asks for is that exact version (the one `ts_query` pins to the
+    /// checkout's `package.json`), never an unpinned latest.
+    #[test]
+    fn starter_prompt_installs_the_sdk_version_this_cli_pins() {
+        let pinned = format!(
+            "npm i {}@{}",
+            crate::ts_query::SDK_PACKAGE,
+            crate::ts_query::SDK_VERSION
+        );
+        for intent in [None, Some("Build a todo app")] {
+            let prompt = starter_prompt(intent);
+            assert!(!prompt.contains("{sdk_package}"), "{prompt}");
+            let installs = prompt.matches("npm i @helix-db/").count();
+            assert!(installs >= 2, "the prompt installs the SDK");
+            assert_eq!(prompt.matches(&pinned).count(), installs, "{prompt}");
+        }
+    }
+
+    /// The prompt's bulk-seed pattern declares typed row fields: the SDK
+    /// no longer accepts `param.object(<inner schema>)`.
+    #[test]
+    fn agent_prompt_seeds_rows_with_typed_fields() {
+        assert!(AGENT_PROMPT_TEMPLATE.contains(
+            "param.array(param.object({ name: param.string(), email: param.string() }))"
+        ));
+        assert!(!AGENT_PROMPT_TEMPLATE.contains("param.object(param."));
     }
 
     #[test]

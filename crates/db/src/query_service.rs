@@ -431,11 +431,7 @@ async fn execute_validated<B: ResponseBody>(
             batch,
             parameters,
             search_consistency,
-        } => (
-            BatchQuery::Read(batch),
-            query_param_bindings(parameters)?,
-            search_consistency,
-        ),
+        } => (BatchQuery::Read(batch), parameters, search_consistency),
         ValidatedQuery::Write { batch, parameters } => {
             if db.is_reader_mode() {
                 return Err(HelixDbError::WriterModeRequired {
@@ -445,7 +441,7 @@ async fn execute_validated<B: ResponseBody>(
             }
             (
                 BatchQuery::Write(batch),
-                query_param_bindings(parameters)?,
+                parameters,
                 helix_ast::query::SearchConsistency::Strong,
             )
         }
@@ -479,20 +475,21 @@ async fn execute_validated<B: ResponseBody>(
 enum ValidatedQuery {
     Read {
         batch: ReadBatch,
-        parameters: BTreeMap<String, QueryValue>,
+        parameters: ParamBindings,
         search_consistency: helix_ast::query::SearchConsistency,
     },
     /// Write batches always search strongly; the type carries no choice.
     Write {
         batch: WriteBatch,
-        parameters: BTreeMap<String, QueryValue>,
+        parameters: ParamBindings,
     },
 }
 
 impl ValidatedQuery {
     fn from_request(request: QueryRequest) -> std::result::Result<Self, QueryServiceError> {
         let search_consistency = request.search_consistency();
-        let (query, parameters) = request.into_query();
+        let (query, parameters, types) = request.into_query_with_types();
+        let parameters = query_param_bindings(parameters, types)?;
         match query {
             BatchQuery::Read(batch) => Ok(Self::Read {
                 batch,
@@ -539,21 +536,26 @@ impl QueryMode {
     }
 }
 
+/// Bind a request's values and the declared type of each typed one.
 fn query_param_bindings(
     parameters: BTreeMap<String, QueryValue>,
+    types: BTreeMap<String, helix_ast::query::QueryParamType>,
 ) -> std::result::Result<ParamBindings, QueryServiceError> {
-    let mut query_values = BTreeMap::new();
-    for (name, value) in parameters {
-        let Some(name) = NonEmptyString::new(name) else {
-            return Err(QueryServiceError::InvalidRequest(
-                "parameter name must not be empty".to_string(),
-            ));
-        };
-        query_values.insert(name, value);
-    }
+    let non_empty = |name: String| {
+        NonEmptyString::new(name).ok_or_else(|| {
+            QueryServiceError::InvalidRequest("parameter name must not be empty".to_string())
+        })
+    };
     Ok(ParamBindings {
         values: BTreeMap::new(),
-        query_values,
+        query_values: parameters
+            .into_iter()
+            .map(|(name, value)| non_empty(name).map(|name| (name, value)))
+            .collect::<std::result::Result<_, _>>()?,
+        query_types: types
+            .into_iter()
+            .map(|(name, ty)| non_empty(name).map(|name| (name, ty)))
+            .collect::<std::result::Result<_, _>>()?,
     })
 }
 
@@ -1052,10 +1054,20 @@ mod tests {
 
     #[test]
     fn query_param_bindings_reject_empty_names() {
-        let err = query_param_bindings(BTreeMap::from([(String::new(), QueryValue::Bool(true))]))
-            .expect_err("empty parameter name should be rejected");
-
-        assert!(matches!(err, QueryServiceError::InvalidRequest(_)));
+        for (values, types) in [
+            (
+                BTreeMap::from([(String::new(), QueryValue::Bool(true))]),
+                BTreeMap::new(),
+            ),
+            (
+                BTreeMap::new(),
+                BTreeMap::from([(String::new(), helix_ast::query::QueryParamType::Bool)]),
+            ),
+        ] {
+            let err = query_param_bindings(values, types)
+                .expect_err("empty parameter name should be rejected");
+            assert!(matches!(err, QueryServiceError::InvalidRequest(_)));
+        }
     }
 
     #[test]
@@ -2515,7 +2527,7 @@ mod tests {
     fn warm_mode_accepts_read_queries() {
         let query = ValidatedQuery::Read {
             batch: ReadBatch::new(),
-            parameters: BTreeMap::new(),
+            parameters: ParamBindings::default(),
             search_consistency: helix_ast::query::SearchConsistency::Strong,
         };
 
@@ -2531,7 +2543,7 @@ mod tests {
                 entries: Vec::new(),
                 returns: Vec::new(),
             },
-            parameters: BTreeMap::new(),
+            parameters: ParamBindings::default(),
         };
         let err = query
             .validate_mode(QueryMode::Warm)

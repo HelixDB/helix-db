@@ -1470,6 +1470,374 @@ mod tests {
         ));
     }
 
+    #[query]
+    #[allow(unused_variables)] // `for_each_param` names the parameter rather than reading it
+    fn q_rows(rows: Vec<ParamObject>) {
+        write_batch().for_each_param(
+            "rows",
+            write_batch().var_as(
+                "event",
+                g().add_n(
+                    "Event",
+                    vec![
+                        ("name", PropertyInput::param("name")),
+                        ("at", PropertyInput::param("at")),
+                    ],
+                ),
+            ),
+        )
+    }
+    #[query]
+    fn q_datetime_map(times: BTreeMap<String, DateTime>) {
+        read_batch()
+            .var_as("v", g().n_where(SourcePredicate::eq("field", times)))
+            .returning(["v"])
+    }
+
+    /// Typed fields for `#[query]` parameters follow the converted value, and
+    /// survive the JSON a remote server parses.
+    fn declared_and_reparsed(request: &QueryRequest, name: &str) -> QueryParamType {
+        let reparsed =
+            QueryRequest::from_json_slice(request.to_json_string().unwrap().as_bytes()).unwrap();
+        assert_eq!(reparsed.parameters(), request.parameters());
+        request.parameter_types().unwrap()[name].clone()
+    }
+
+    #[test]
+    fn datetimes_inside_maps_values_and_rows_are_declared_date_time() {
+        let fields = |fields: Vec<(&str, QueryParamType)>| {
+            QueryParamType::Record(ObjectFields::new(fields).unwrap())
+        };
+        let row = |name: &str, at: Option<i64>| {
+            ParamObject::from([
+                ("name".to_string(), PropertyValue::from(name)),
+                (
+                    "at".to_string(),
+                    at.map_or(PropertyValue::Null, PropertyValue::DateTime),
+                ),
+            ])
+        };
+
+        let rows = q_rows(vec![row("a", Some(0)), row("b", Some(1_000))]).unwrap();
+        assert_eq!(
+            declared_and_reparsed(&rows, "rows"),
+            QueryParamType::Array(Box::new(fields(vec![
+                ("at", QueryParamType::DateTime),
+                ("name", QueryParamType::Value),
+            ])))
+        );
+        assert!(matches!(
+            &rows.parameters().unwrap()["rows"],
+            QueryValue::Array(values) if matches!(
+                &values[1],
+                QueryValue::Object(fields) if fields["at"] == QueryValue::DateTime(1_000)
+            )
+        ));
+        // Rows without datetimes keep the untyped declaration.
+        let untyped = q_rows(vec![row("a", None), row("b", None)]).unwrap();
+        assert_eq!(
+            declared_and_reparsed(&untyped, "rows"),
+            QueryParamType::Array(Box::new(QueryParamType::Object))
+        );
+        assert_eq!(
+            declared_and_reparsed(&q_rows(Vec::new()).unwrap(), "rows"),
+            QueryParamType::Array(Box::new(QueryParamType::Object))
+        );
+        // A datetime column that is null in some rows is declared nullable,
+        // so the other rows still store datetimes.
+        let nullable_row = fields(vec![
+            (
+                "at",
+                QueryParamType::Nullable(Box::new(QueryParamType::DateTime)),
+            ),
+            ("name", QueryParamType::Value),
+        ]);
+        let nullable_at = QueryParamType::Array(Box::new(nullable_row.clone()));
+        for rows in [
+            vec![row("a", Some(0)), row("b", None)],
+            vec![row("a", None), row("b", Some(0)), row("c", None)],
+        ] {
+            let request = q_rows(rows).unwrap();
+            assert_eq!(declared_and_reparsed(&request, "rows"), nullable_at);
+        }
+        // An empty array fits any element type, in either order.
+        let tagged = |tags: Vec<PropertyValue>| {
+            let mut row = row("a", Some(0));
+            row.insert("tags".to_string(), PropertyValue::array(tags));
+            row
+        };
+        let tagged_type = QueryParamType::Array(Box::new(fields(vec![
+            ("at", QueryParamType::DateTime),
+            ("name", QueryParamType::Value),
+            (
+                "tags",
+                QueryParamType::Array(Box::new(QueryParamType::DateTime)),
+            ),
+        ])));
+        for rows in [
+            vec![tagged(Vec::new()), tagged(vec![PropertyValue::DateTime(1)])],
+            vec![tagged(vec![PropertyValue::DateTime(1)]), tagged(Vec::new())],
+        ] {
+            let request = q_rows(rows).unwrap();
+            assert_eq!(declared_and_reparsed(&request, "rows"), tagged_type);
+        }
+        // Array fields that conflict name the array and the array type the
+        // earlier rows need, in either order and through an object element.
+        let tagged_object =
+            |tag: PropertyValue| tagged(vec![PropertyValue::object(vec![("at", tag)])]);
+        for (rows, expected, actual) in [
+            (
+                vec![
+                    tagged(vec![PropertyValue::DateTime(1)]),
+                    tagged(vec![PropertyValue::from("x")]),
+                ],
+                QueryParamType::Array(Box::new(QueryParamType::DateTime)),
+                "an array whose elements do not fit it",
+            ),
+            (
+                vec![
+                    tagged(vec![PropertyValue::from("x")]),
+                    tagged(vec![PropertyValue::DateTime(1)]),
+                ],
+                QueryParamType::Value,
+                "an array holding datetimes where earlier elements hold none",
+            ),
+            (
+                vec![
+                    tagged_object(PropertyValue::DateTime(1)),
+                    tagged_object(PropertyValue::from("x")),
+                ],
+                QueryParamType::Array(Box::new(fields(vec![("at", QueryParamType::DateTime)]))),
+                "an array whose elements do not fit it",
+            ),
+        ] {
+            let error = q_rows(rows).unwrap_err();
+            assert!(
+                matches!(
+                    &error,
+                    QueryError::ParameterTypeMismatch { path, expected: found, actual: got }
+                        if path == "rows[1].tags" && *found == expected && *got == actual
+                ),
+                "{error:?}"
+            );
+        }
+        // Rows needing declarations no one type holds fail instead of
+        // sending a datetime as text, naming the field where they conflict.
+        let mut text = row("b", None);
+        text.insert("at".to_string(), PropertyValue::from("2026-07-28"));
+        assert!(matches!(
+            q_rows(vec![row("a", Some(0)), row("c", None), text.clone()]),
+            Err(QueryError::ParameterTypeMismatch { path, expected, actual })
+                if path == "rows[2].at"
+                    && expected == QueryParamType::DateTime
+                    && actual == "a value without datetimes"
+        ));
+        // In either order: text first, then a datetime under the same key.
+        assert!(matches!(
+            q_rows(vec![text, row("a", Some(0))]),
+            Err(QueryError::ParameterTypeMismatch { path, expected, actual })
+                if path == "rows[1].at"
+                    && expected == QueryParamType::Value
+                    && actual == "a datetime where earlier elements hold none"
+        ));
+        let mut listed = row("c", None);
+        listed.insert(
+            "at".to_string(),
+            PropertyValue::array(vec![PropertyValue::DateTime(0)]),
+        );
+        assert!(matches!(
+            q_rows(vec![row("a", Some(0)), listed]),
+            Err(QueryError::ParameterTypeMismatch { path, expected, actual })
+                if path == "rows[1].at" && expected == QueryParamType::DateTime && actual == "array"
+        ));
+        let mut extra = row("c", Some(0));
+        extra.insert("seen".to_string(), PropertyValue::DateTime(0));
+        let extra = q_rows(vec![row("a", Some(0)), extra]).unwrap();
+        assert_eq!(
+            declared_and_reparsed(&extra, "rows"),
+            QueryParamType::Array(Box::new(fields(vec![
+                ("at", QueryParamType::DateTime),
+                ("name", QueryParamType::Value),
+                (
+                    "seen",
+                    QueryParamType::Nullable(Box::new(QueryParamType::DateTime))
+                ),
+            ])))
+        );
+
+        let nested = q_value(PropertyValue::object(vec![
+            ("at", PropertyValue::DateTime(0)),
+            (
+                "history",
+                PropertyValue::array(vec![PropertyValue::DateTime(1), PropertyValue::DateTime(2)]),
+            ),
+            ("note", PropertyValue::from("x")),
+        ]))
+        .unwrap();
+        assert_eq!(
+            declared_and_reparsed(&nested, "val"),
+            fields(vec![
+                ("at", QueryParamType::DateTime),
+                (
+                    "history",
+                    QueryParamType::Array(Box::new(QueryParamType::DateTime))
+                ),
+                ("note", QueryParamType::Value),
+            ])
+        );
+        assert_eq!(
+            declared_and_reparsed(&q_value(PropertyValue::DateTime(5)).unwrap(), "val"),
+            QueryParamType::DateTime
+        );
+        assert!(matches!(
+            q_value(PropertyValue::array(vec![
+                PropertyValue::DateTime(1),
+                PropertyValue::from("x"),
+            ])),
+            Err(QueryError::ParameterTypeMismatch { path, .. }) if path == "val[1]"
+        ));
+
+        let times = q_datetime_map(BTreeMap::from([
+            ("start".to_string(), DateTime::from_millis(0)),
+            ("end".to_string(), DateTime::from_millis(1)),
+        ]))
+        .unwrap();
+        assert_eq!(
+            declared_and_reparsed(&times, "times"),
+            fields(vec![
+                ("end", QueryParamType::DateTime),
+                ("start", QueryParamType::DateTime),
+            ])
+        );
+        assert!(matches!(
+            q_datetime_map(BTreeMap::from([(
+                "bad".to_string(),
+                DateTime::from_millis(i64::MAX)
+            )])),
+            Err(QueryError::InvalidDateTimeParameter { path, .. }) if path == "times.bad"
+        ));
+    }
+
+    /// Rows that differ only by omitted keys are accepted: a key missing
+    /// from some rows is declared nullable, which the server accepts omitted
+    /// and keeps omitted, so every row is sent and stored as given.
+    #[test]
+    fn rows_omitting_keys_declare_those_fields_nullable() {
+        let fields = |fields: Vec<(&str, QueryParamType)>| {
+            QueryParamType::Record(ObjectFields::new(fields).unwrap())
+        };
+        let nullable = |inner: QueryParamType| QueryParamType::Nullable(Box::new(inner));
+        let row = |entries: Vec<(&str, PropertyValue)>| {
+            entries
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value))
+                .collect::<ParamObject>()
+        };
+        let named = |name: &str| ("name", PropertyValue::from(name));
+        let at = |millis: i64| ("at", PropertyValue::DateTime(millis));
+
+        // An omitted datetime, before, between and after set ones.
+        let expected = QueryParamType::Array(Box::new(fields(vec![
+            ("at", nullable(QueryParamType::DateTime)),
+            ("name", QueryParamType::Value),
+        ])));
+        for rows in [
+            vec![row(vec![named("a")]), row(vec![named("b"), at(1)])],
+            vec![
+                row(vec![named("a"), at(0)]),
+                row(vec![named("b")]),
+                row(vec![named("c"), at(2)]),
+            ],
+            vec![row(vec![named("a"), at(0)]), row(vec![named("b")])],
+            // Omitted in one row and null in another.
+            vec![
+                row(vec![named("a"), ("at", PropertyValue::Null)]),
+                row(vec![named("b")]),
+                row(vec![named("c"), at(2)]),
+            ],
+        ] {
+            let request = q_rows(rows.clone()).unwrap();
+            assert_eq!(declared_and_reparsed(&request, "rows"), expected);
+            // Each row is sent as given: an omitted key stays omitted, and a
+            // set datetime stays a datetime.
+            let QueryValue::Array(sent) = &request.parameters().unwrap()["rows"] else {
+                panic!("rows are an array");
+            };
+            for (sent, given) in sent.iter().zip(&rows) {
+                let QueryValue::Object(sent) = sent else {
+                    panic!("each row is an object");
+                };
+                assert_eq!(
+                    sent.keys().collect::<Vec<_>>(),
+                    given.keys().collect::<Vec<_>>()
+                );
+                let given_at = given.get("at").map(|at| match at {
+                    PropertyValue::DateTime(millis) => QueryValue::DateTime(*millis),
+                    _ => QueryValue::Null,
+                });
+                assert_eq!(sent.get("at"), given_at.as_ref());
+            }
+        }
+
+        // An omitted key without datetimes is declared nullable `value`, and
+        // so is one that is only ever null or omitted.
+        let request = q_rows(vec![
+            row(vec![named("a"), at(0), ("note", PropertyValue::from("x"))]),
+            row(vec![named("b"), at(1), ("gone", PropertyValue::Null)]),
+        ])
+        .unwrap();
+        assert_eq!(
+            declared_and_reparsed(&request, "rows"),
+            QueryParamType::Array(Box::new(fields(vec![
+                ("at", QueryParamType::DateTime),
+                ("gone", nullable(QueryParamType::Value)),
+                ("name", QueryParamType::Value),
+                ("note", nullable(QueryParamType::Value)),
+            ])))
+        );
+
+        // Nested objects: an omitted inner key, and an omitted inner object.
+        let audited = |seen: Option<i64>| {
+            (
+                "audit",
+                PropertyValue::object(
+                    seen.map(|millis| ("seen_at", PropertyValue::DateTime(millis))),
+                ),
+            )
+        };
+        let request = q_rows(vec![
+            row(vec![named("a"), at(0), audited(Some(5))]),
+            row(vec![named("b"), at(1), audited(None)]),
+            row(vec![named("c"), at(2)]),
+        ])
+        .unwrap();
+        assert_eq!(
+            declared_and_reparsed(&request, "rows"),
+            QueryParamType::Array(Box::new(fields(vec![
+                ("at", QueryParamType::DateTime),
+                (
+                    "audit",
+                    nullable(fields(vec![(
+                        "seen_at",
+                        nullable(QueryParamType::DateTime)
+                    )]))
+                ),
+                ("name", QueryParamType::Value),
+            ])))
+        );
+
+        // A conflict under an omitted-elsewhere key still names its path.
+        assert!(matches!(
+            q_rows(vec![
+                row(vec![named("a"), audited(Some(5))]),
+                row(vec![named("b")]),
+                row(vec![named("c"), ("audit", PropertyValue::object(vec![("seen_at", PropertyValue::from("x"))]))]),
+            ]),
+            Err(QueryError::ParameterTypeMismatch { path, expected, .. })
+                if path == "rows[2].audit.seen_at" && expected == QueryParamType::DateTime
+        ));
+    }
+
     #[test]
     fn bytes_param_returns_error_without_panicking() {
         // Bytes cannot be represented by the query JSON route

@@ -184,7 +184,7 @@ cargo add helix-db@3.0.0 tokio serde_json
 ```
 
 ```bash TypeScript
-npm install @helix-db/helix-db@3.1.0
+npm install @helix-db/helix-db@4.0.0
 ```
 
 ```bash Go
@@ -192,7 +192,7 @@ go get github.com/helixdb/helix-db/sdks/go@v0.3.1
 ```
 
 ```bash Python
-python -m pip install helix-db==0.3.4
+python -m pip install helix-db==0.4.0
 ```
 
 Continue with the full setup guide for your language:
@@ -1109,7 +1109,7 @@ Execute example and print `response`. A new database returns an empty `users` ar
 
 Page type: Guide
 
-The published `@helix-db/helix-db` 3.1.0 package targets Node.js 20 or newer and
+The `@helix-db/helix-db` 4.0.0 package targets Node.js 20 or newer and
 emits the same operation-tree AST as the Rust, Go, and Python SDKs.
 
 The package is ESM and requires Node.js 20 or newer.
@@ -1117,7 +1117,7 @@ The package is ESM and requires Node.js 20 or newer.
 ## Install
 
 ```bash
-npm install @helix-db/helix-db@3.1.0
+npm install @helix-db/helix-db@4.0.0
 ```
 
 The package is ESM. Set `"type": "module"` or compile to ESM.
@@ -1284,7 +1284,7 @@ Execute example and print `response.Users`. A new database returns an empty slic
 
 Page type: Guide
 
-The Python SDK is published on PyPI as `helix-db` 0.3.4 and imported as `helixdb`.
+The Python SDK is published on PyPI as `helix-db` and imported as `helixdb`.
 Its builder methods use `snake_case` and produce the same operation-tree AST as
 the other HelixDB v3 SDKs.
 
@@ -1296,7 +1296,7 @@ the other HelixDB v3 SDKs.
 The SDK requires Python 3.10 or later.
 
 ```bash
-python -m pip install helix-db==0.3.4
+python -m pip install helix-db==0.4.0
 ```
 
 ## Define a query
@@ -2739,15 +2739,26 @@ VALUES (?, ?, '2026-07-24');
 parameter. Inside the body, each field of the current row is a parameter:
 `PropertyInput.param("email")` reads that row's `email`.
 
+Declare each row's fields so every value gets its type. Here `joinedAt` is a
+`date_time` field, so it is stored as a datetime that range filters and range indexes
+match, not as RFC3339 text. See
+[Typed object fields](/database/helix-db/query-guides/parameters#typed-object-fields).
+
 ```rust Rust
 use std::collections::BTreeMap;
 
-let row = |email: &str, name: &str| {
+let row = |email: &str, name: &str, joined_at: &str| {
     QueryValue::Object(BTreeMap::from([
         ("email".to_string(), QueryValue::String(email.to_string())),
         ("name".to_string(), QueryValue::String(name.to_string())),
+        ("joinedAt".to_string(), QueryValue::String(joined_at.to_string())),
     ]))
 };
+let row_type = QueryParamType::Record(ObjectFields::new([
+    ("email", QueryParamType::String),
+    ("name", QueryParamType::String),
+    ("joinedAt", QueryParamType::DateTime),
+])?);
 
 let request = QueryRequest::write(write_batch().for_each_param(
     "rows",
@@ -2758,6 +2769,7 @@ let request = QueryRequest::write(write_batch().for_each_param(
             vec![
                 ("email", PropertyInput::param("email")),
                 ("name", PropertyInput::param("name")),
+                ("joinedAt", PropertyInput::param("joinedAt")),
             ],
         ),
     ),
@@ -2765,16 +2777,24 @@ let request = QueryRequest::write(write_batch().for_each_param(
 .with_query_name("import_users")
 .with_typed_parameter(
     "rows",
-    QueryParamType::Array(Box::new(QueryParamType::Object)),
+    QueryParamType::Array(Box::new(row_type)),
     QueryValue::Array(vec![
-        row("alice@example.com", "Alice"),
-        row("bob@example.com", "Bob"),
+        row("alice@example.com", "Alice", "2026-01-05T09:30:00Z"),
+        row("bob@example.com", "Bob", "2026-02-11T17:00:00+01:00"),
     ]),
 )?;
 ```
 
 ```ts TypeScript
-const params = defineParams({ rows: param.array(param.object()) });
+const params = defineParams({
+  rows: param.array(
+    param.object({
+      email: param.string(),
+      name: param.string(),
+      joinedAt: param.dateTime(),
+    }),
+  ),
+});
 
 const query = writeBatch().forEachParam(
   "rows",
@@ -2783,6 +2803,7 @@ const query = writeBatch().forEachParam(
     g().addN("User", {
       email: PropertyInput.param("email"),
       name: PropertyInput.param("name"),
+      joinedAt: PropertyInput.param("joinedAt"),
     }),
   ),
 );
@@ -2791,8 +2812,8 @@ const request = query.toQueryRequest(
   params,
   {
     rows: [
-      { email: "alice@example.com", name: "Alice" },
-      { email: "bob@example.com", name: "Bob" },
+      { email: "alice@example.com", name: "Alice", joinedAt: "2026-01-05T09:30:00Z" },
+      { email: "bob@example.com", name: "Bob", joinedAt: DateTime.parseRfc3339("2026-02-11T17:00:00+01:00") },
     ],
   },
   { queryName: "import_users" },
@@ -2802,20 +2823,37 @@ const request = query.toQueryRequest(
 ```go Go
 q := helix.WriteQuery("import_users")
 q.ParamArray("rows", []any{
-	map[string]any{"email": "alice@example.com", "name": "Alice"},
-	map[string]any{"email": "bob@example.com", "name": "Bob"},
-}, helix.ParamTypeObject())
+	map[string]any{"email": "alice@example.com", "name": "Alice", "joinedAt": "2026-01-05T09:30:00Z"},
+	map[string]any{"email": "bob@example.com", "name": "Bob", "joinedAt": time.Date(2026, 2, 11, 16, 0, 0, 0, time.UTC)},
+}, helix.ParamTypeObjectFields(map[string]helix.QueryParamType{
+	"email":    helix.ParamTypeString(),
+	"name":     helix.ParamTypeString(),
+	"joinedAt": helix.ParamTypeDateTime(),
+}))
 
 request := q.
 	ForEachParam("rows", helix.Write().VarAs("user", helix.G().AddN("User", helix.Props{
 		helix.Prop("email", helix.ExprParam("email")),
 		helix.Prop("name", helix.ExprParam("name")),
+		helix.Prop("joinedAt", helix.ExprParam("joinedAt")),
 	}))).
 	Returning()
 ```
 
 ```python Python
-params = define_params({"rows": param.array(param.object())})
+params = define_params(
+    {
+        "rows": param.array(
+            param.object(
+                {
+                    "email": param.string(),
+                    "name": param.string(),
+                    "joinedAt": param.date_time(),
+                }
+            )
+        )
+    }
+)
 
 query = write_batch().for_each_param(
     "rows",
@@ -2826,6 +2864,7 @@ query = write_batch().for_each_param(
             {
                 "email": PropertyInput.param("email"),
                 "name": PropertyInput.param("name"),
+                "joinedAt": PropertyInput.param("joinedAt"),
             },
         ),
     ),
@@ -2835,8 +2874,12 @@ request = query.to_query_request(
     params,
     {
         "rows": [
-            {"email": "alice@example.com", "name": "Alice"},
-            {"email": "bob@example.com", "name": "Bob"},
+            {"email": "alice@example.com", "name": "Alice", "joinedAt": "2026-01-05T09:30:00Z"},
+            {
+                "email": "bob@example.com",
+                "name": "Bob",
+                "joinedAt": datetime(2026, 2, 11, 16, 0, tzinfo=timezone.utc),
+            },
         ]
     },
     query_name="import_users",
@@ -2862,7 +2905,8 @@ request = query.to_query_request(
                       "label": "User",
                       "properties": [
                         ["email", { "expr": { "param": "email" } }],
-                        ["name", { "expr": { "param": "name" } }]
+                        ["name", { "expr": { "param": "name" } }],
+                        ["joinedAt", { "expr": { "param": "joinedAt" } }]
                       ]
                     }
                   }
@@ -2877,12 +2921,16 @@ request = query.to_query_request(
   },
   "parameters": {
     "rows": [
-      { "email": "alice@example.com", "name": "Alice" },
-      { "email": "bob@example.com", "name": "Bob" }
+      { "email": "alice@example.com", "name": "Alice", "joinedAt": "2026-01-05T09:30:00.000Z" },
+      { "email": "bob@example.com", "name": "Bob", "joinedAt": "2026-02-11T16:00:00.000Z" }
     ]
   },
   "parameter_types": {
-    "rows": { "array": "object" }
+    "rows": {
+      "array": {
+        "object": { "email": "string", "name": "string", "joinedAt": "date_time" }
+      }
+    }
   }
 }
 ```
@@ -2890,6 +2938,19 @@ request = query.to_query_request(
 - The parameter must be an array of objects. Any other value fails type validation
   before the query runs when typed as here (`invalid_query_json` over HTTP), or with
   `invalid_query` when untyped. An empty array runs the body zero times.
+- Every row must have the declared fields, except nullable ones, which a row may omit. A
+  missing field that is not nullable, an undeclared field, a wrong-typed value, an invalid
+  RFC3339 string in a `date_time` field, or `null` in any field not declared `value` or
+  nullable rejects the whole request before anything is written. Declare a column that can
+  be `null`, such as a `deletedAt` timestamp, as `param.nullable(param.dateTime())`
+  (`{ "nullable": "date_time" }`); see
+  [Nullable fields](/database/helix-db/query-guides/parameters#nullable-fields). A row
+  that omits a field the body reads, such as `PropertyInput.param("deletedAt")`, fails as
+  an unbound parameter, even when another parameter or an enclosing row has a field of
+  that name, so send `null` for a column the body writes.
+- Rows declared as a bare `{ "array": "object" }` (`param.object()`,
+  `QueryParamType::Object`, `ParamTypeObject()`) are not checked field by field, and
+  their RFC3339 strings stay strings.
 - Variables are not per-iteration: after the loop, `user` holds only the last row's
   result, so this request returns nothing.
 - All rows commit in one transaction. Split very large imports into several requests,
@@ -6874,10 +6935,12 @@ placeholders instead, `parameters` is a list bound in written order. See
 - `date_time`
 - `bytes`
 - generic property `value`, which accepts any JSON value
-- `object`, sent as `"object"` with no element type. TypeScript and Python check an
-  element type passed to `param.object(...)` client-side only; Go's `ParamObject`
-  rejects one.
+- `object`, sent as `"object"`: any object, its fields checked like `value`
+- an object with declared fields, sent as `{ "object": { "<field>": "<type>", ... } }`;
+  see [Typed object fields](#typed-object-fields)
 - arrays of any family, sent as `{ "array": "<element type>" }`
+- `null` or a value of any family, sent as `{ "nullable": "<type>" }`; see
+  [Nullable fields](#nullable-fields)
 
 Query JSON cannot represent bytes, and no SDK provides a byte request encoder. Every SDK rejects a
 bytes parameter with an `UnsupportedBytesParameter` error when it serializes the request, so bytes
@@ -6893,14 +6956,15 @@ It is stored, compared, and indexed exactly like a datetime literal or `now()`, 
 `2026-06-01T09:00:00+09:00` and `2026-06-01T00:00:00Z` are equal and range filters order by
 instant. Responses render datetimes as `YYYY-MM-DDTHH:MM:SS.sssZ`, and
 [Cypher](/database/helix-db/query-guides/cypher#datetimes) and SQL read and render them the same
-way. Only a declared `date_time`
-turns a string into a datetime: an untyped parameter, a `value` or `string` parameter, and the
-fields of an `object` parameter (including `forEachParam` rows) keep RFC3339 text as a string.
+way. Only a declared `date_time` turns a string into a datetime, including a `date_time` field of a
+[typed object](#typed-object-fields) such as a `forEachParam` row. An untyped parameter, a
+`value` or `string` parameter, and the fields of a bare `object` keep RFC3339 text as a string.
 
 Before this, `date_time` parameters were stored as their raw strings. A writer that opens such data
 converts it once in the background: each property whose every value is a datetime or an RFC3339
 string with at most millisecond precision becomes datetimes, and any other property is left as
-stored and named in the server log.
+stored and named in the server log. That conversion runs once: rows imported later through a bare
+`object` keep their strings, so declare their `date_time` fields.
 
 After the conversion, a Cypher or SQL filter that compares such a property with text fails with
 `type_error` (`datetime_text_comparison`), because text is never read as a datetime. This covers
@@ -6908,6 +6972,152 @@ string literals (`WHERE e.at > '2026-01-01'`) and string parameters, including e
 parameter, which has no datetime form. Read the text as a datetime instead: `datetime('…')` or
 `datetime($since)` in [Cypher](/database/helix-db/query-guides/cypher#datetimes), and
 `TIMESTAMP '…'` or `CAST(? AS TIMESTAMP)` in [SQL](/database/helix-db/query-guides/sql).
+
+## Typed object fields
+
+An object parameter can declare its fields. Each field is checked and normalized to its own
+type, recursively, so a `date_time` field inside `array(object{...})` rows, or inside a nested
+object, binds as a datetime. This is how bulk imports with
+[`forEachParam`](/database/helix-db/query-guides/writing-data#insert-many-rows) keep their
+datetimes queryable by typed range filters and range indexes.
+
+```rust Rust
+let row = QueryParamType::Record(ObjectFields::new([
+    ("email", QueryParamType::String),
+    ("createdAt", QueryParamType::DateTime),
+    ("audit", QueryParamType::Record(ObjectFields::new([("seenAt", QueryParamType::DateTime)])?)),
+])?);
+let rows = QueryParamType::Array(Box::new(row));
+```
+
+```ts TypeScript
+const params = defineParams({
+  rows: param.array(
+    param.object({
+      email: param.string(),
+      createdAt: param.dateTime(),
+      audit: param.object({ seenAt: param.dateTime() }),
+    }),
+  ),
+});
+```
+
+```go Go
+rows := helix.ParamTypeArray(helix.ParamTypeObjectFields(map[string]helix.QueryParamType{
+	"email":     helix.ParamTypeString(),
+	"createdAt": helix.ParamTypeDateTime(),
+	"audit": helix.ParamTypeObjectFields(map[string]helix.QueryParamType{
+		"seenAt": helix.ParamTypeDateTime(),
+	}),
+}))
+```
+
+```python Python
+params = define_params(
+    {
+        "rows": param.array(
+            param.object(
+                {
+                    "email": param.string(),
+                    "createdAt": param.date_time(),
+                    "audit": param.object({"seenAt": param.date_time()}),
+                }
+            )
+        )
+    }
+)
+```
+
+```json JSON
+{
+  "parameter_types": {
+    "rows": {
+      "array": {
+        "object": {
+          "email": "string",
+          "createdAt": "date_time",
+          "audit": { "object": { "seenAt": "date_time" } }
+        }
+      }
+    }
+  }
+}
+```
+
+- A declaration names at least one field, each once; `{ "object": {} }` and a repeated field
+  name are rejected when the request is parsed.
+- A value must have the declared fields. A missing field that is not
+  [nullable](#nullable-fields), or an undeclared one (such as a misspelled `createdAt`),
+  rejects the request, naming the object's path, for example `rows[3]`. To accept free-form
+  fields, use a bare `object`, or declare a field as `value`.
+- A wrong-typed field, including an invalid RFC3339 string in a `date_time` field, rejects
+  the request with the field's path, such as `rows[3].createdAt`. Nothing is written.
+- `null` satisfies only a `value` or [nullable](#nullable-fields) field, as for top-level
+  parameters.
+- Parameters count toward the request's 255-level JSON nesting limit as they are written:
+  the body and its `parameters` or `parameter_types` map take 2 levels, each array, object
+  or `nullable` value level 1, and each declared object level 2 (`{ "object": { ... } }`),
+  so a declared object nests at most 126 levels. The Rust SDK counts the same levels when
+  it builds a request, so a request it builds also parses.
+
+In Rust, `#[query]` functions declare this for you: a `DateTime` inside a `ParamObject`,
+`ParamValue` or `BTreeMap<String, DateTime>` argument is declared `date_time` where it sits.
+One array declares one element type that fits all its elements: a field that is `null` or
+omitted in some rows is declared nullable (a datetime one `{ "nullable": "date_time" }`), so
+rows may differ by omitted keys and each is sent as given, and an empty array fits any
+element type. Rows that no single type fits, such as a datetime in one row and text in
+another under the same key, fail with `ParameterTypeMismatch` naming that field, for
+example `rows[2].at`.
+
+### Nullable fields
+
+`{ "nullable": "<type>" }` accepts `null` or a value of the inner type, normalized as that
+type. Declare an optional datetime column, such as `deletedAt`, this way: rows where it is
+set store a datetime, rows where it is `null` store `null`, and rows that omit it leave it
+unset.
+
+```rust Rust
+let row = QueryParamType::Record(ObjectFields::new([
+    ("name", QueryParamType::String),
+    ("deletedAt", QueryParamType::Nullable(Box::new(QueryParamType::DateTime))),
+])?);
+```
+
+```ts TypeScript
+const params = defineParams({
+  rows: param.array(param.object({ name: param.string(), deletedAt: param.nullable(param.dateTime()) })),
+});
+```
+
+```go Go
+rows := helix.ParamTypeArray(helix.ParamTypeObjectFields(map[string]helix.QueryParamType{
+	"name":      helix.ParamTypeString(),
+	"deletedAt": helix.ParamTypeNullable(helix.ParamTypeDateTime()),
+}))
+```
+
+```python Python
+params = define_params(
+    {
+        "rows": param.array(
+            param.object({"name": param.string(), "deletedAt": param.nullable(param.date_time())})
+        )
+    }
+)
+```
+
+```json JSON
+{
+  "parameter_types": {
+    "rows": { "array": { "object": { "name": "string", "deletedAt": { "nullable": "date_time" } } } }
+  }
+}
+```
+
+A nullable field may also be omitted from an object. It then stays absent rather than
+becoming `null`, so a row stores exactly the fields it has. Every field that is not nullable
+must be present. In TypeScript an `undefined` field counts as omitted, as JSON drops it; in
+Go a nil pointer, map or slice is `null`, so a `*time.Time` column works as is.
 
 ## Query names
 
@@ -15769,7 +15979,7 @@ reach with an application key) directly.
 ### TypeScript input
 
 - `-e` and `--ts-file` need Node.js 20+ on `PATH`. The expression must evaluate to a `readBatch()` or `writeBatch()` builder. No running instance is needed to build the request.
-- The first run `npm install`s the pinned `@helix-db/helix-db@3.1.0` SDK into `ts-runtime/` under the Helix cache directory (override with `HELIX_CACHE_DIR`), so it needs npm and npm registry access. Later runs reuse it.
+- The first run `npm install`s the pinned `@helix-db/helix-db@4.0.0` SDK into `ts-runtime/` under the Helix cache directory (override with `HELIX_CACHE_DIR`), so it needs npm and npm registry access. Later runs reuse it.
 - Without Node.js the command fails with `Node.js is required to run TypeScript queries`; without npm on the first run, with `npm is required to install the TypeScript query runtime`. Use `--file` or `--body` instead.
 
 ### Output

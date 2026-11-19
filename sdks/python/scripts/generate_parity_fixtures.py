@@ -278,6 +278,17 @@ def query_value_shapes() -> Fixture:
                 ("string", QueryValue.string("value")),
                 ("array", QueryValue.array([1, "two"])),
                 ("object", QueryValue.object({"nested": True})),
+                (
+                    "record",
+                    QueryValue.object(
+                        {"at": "2026-06-01T05:00:00+09:00", "nested": {"flag": True}}
+                    ),
+                ),
+                (
+                    "nullable",
+                    # An omitted nullable field stays absent.
+                    QueryValue.array([{"at": None}, {}, {"at": "2026-06-01T05:00:00+09:00"}]),
+                ),
             ],
             [
                 ("null", QueryParamType.value()),
@@ -288,6 +299,23 @@ def query_value_shapes() -> Fixture:
                 ("string", QueryParamType.string()),
                 ("array", QueryParamType.array(QueryParamType.value())),
                 ("object", QueryParamType.object()),
+                (
+                    "record",
+                    QueryParamType.object(
+                        {
+                            "at": QueryParamType.date_time(),
+                            "nested": QueryParamType.object({"flag": QueryParamType.bool()}),
+                        }
+                    ),
+                ),
+                (
+                    "nullable",
+                    QueryParamType.array(
+                        QueryParamType.object(
+                            {"at": QueryParamType.nullable(QueryParamType.date_time())}
+                        )
+                    ),
+                ),
             ],
         ),
     )

@@ -407,6 +407,7 @@ def base_runtime_fixtures() -> list[RuntimeFixture]:
                                     ("eventId", PropertyInput.param("eventId")),
                                     ("kind", PropertyInput.param("kind")),
                                     ("score", PropertyInput.param("score")),
+                                    ("seenAt", PropertyInput.param("seenAt")),
                                 ],
                             ),
                         ),
@@ -417,12 +418,36 @@ def base_runtime_fixtures() -> list[RuntimeFixture]:
                     (
                         "rows",
                         [
-                            {"eventId": "event-1", "kind": "click", "score": 10},
-                            {"eventId": "event-2", "kind": "view", "score": 5},
+                            {
+                                "eventId": "event-1",
+                                "kind": "click",
+                                "score": 10,
+                                "seenAt": "2026-06-01T05:00:00+09:00",
+                            },
+                            {
+                                "eventId": "event-2",
+                                "kind": "view",
+                                "score": 5,
+                                "seenAt": "2026-06-01T00:00:00.250Z",
+                            },
                         ],
                     )
                 ],
-                [("rows", QueryParamType.array(QueryParamType.object()))],
+                [
+                    (
+                        "rows",
+                        QueryParamType.array(
+                            QueryParamType.object(
+                                {
+                                    "eventId": QueryParamType.string(),
+                                    "kind": QueryParamType.string(),
+                                    "score": QueryParamType.i64(),
+                                    "seenAt": QueryParamType.date_time(),
+                                }
+                            )
+                        ),
+                    )
+                ],
             ),
         ),
         (

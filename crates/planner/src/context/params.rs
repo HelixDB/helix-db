@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use helix_ast::query::QueryValue;
+use helix_ast::query::{QueryParamType, QueryValue};
 use helix_ast::value::PropertyValue;
 use serde::{Deserialize, Serialize};
 
@@ -29,6 +29,12 @@ pub struct ParamBindings {
     pub values: BTreeMap<ir::NonEmptyString, PropertyValue>,
     /// JSON-compatible query parameters retained for executor use.
     pub query_values: BTreeMap<ir::NonEmptyString, QueryValue>,
+    /// The declared type of each typed query parameter, keyed like
+    /// `query_values`; untyped parameters have none. A `forEach` over rows
+    /// declared with fields binds each field's type for its iteration and
+    /// leaves a declared field the row omits unbound.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub query_types: BTreeMap<ir::NonEmptyString, QueryParamType>,
 }
 
 impl ParamBindings {

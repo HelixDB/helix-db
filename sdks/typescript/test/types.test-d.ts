@@ -24,11 +24,13 @@ const readParams = defineParams({
   limit: param.i64(),
   createdAfter: param.dateTime(),
   scores: param.array(param.f64()),
-  labels: param.object(param.string()),
+  labels: param.object({ status: param.string() }),
 });
 
 const writeParams = defineParams({
-  values: param.array(param.object(param.value())),
+  values: param.array(param.object()),
+  rows: param.array(param.object({ at: param.dateTime(), n: param.i64() })),
+  optional: param.array(param.object({ deletedAt: param.nullable(param.dateTime()) })),
 });
 
 function directFindUsers(p: typeof readParams) {
@@ -63,6 +65,8 @@ writeBatch()
   .varAs("users", g().addN("User", { payload: writeParams.values }))
   .toQueryBytes(writeParams, {
     values: [{ id: 1, nested: { ok: true } }],
+    rows: [{ at: DateTime.fromMillis(0), n: 1 }],
+    optional: [{ deletedAt: null }, { deletedAt: DateTime.fromMillis(0) }, {}],
   });
 readBatch().varAs("count", g().nWithLabel("User").count()).toQueryJson();
 readBatch()
@@ -86,13 +90,28 @@ readBatch()
 directBatch.toQueryJson(readParams, { tenant: "acme" });
 
 // @ts-expect-error unknown direct query parameter
-directBatch.toQueryJson(readParams, { tenant: "acme", limit: 10, createdAfter: 0, scores: [], labels: {}, extra: true });
+directBatch.toQueryJson(readParams, { tenant: "acme", limit: 10, createdAfter: 0, scores: [], labels: { status: "a" }, extra: true });
 
 // @ts-expect-error wrong direct query object parameter
 directBatch.toQueryJson(readParams, { tenant: "acme", limit: 10, createdAfter: 0, scores: [], labels: { status: 1 } });
 
 // @ts-expect-error wrong direct query array parameter
-directBatch.toQueryJson(readParams, { tenant: "acme", limit: 10, createdAfter: 0, scores: ["bad"], labels: {} });
+directBatch.toQueryJson(readParams, { tenant: "acme", limit: 10, createdAfter: 0, scores: ["bad"], labels: { status: "a" } });
+
+// @ts-expect-error typed object fields are required
+directBatch.toQueryJson(readParams, { tenant: "acme", limit: 10, createdAfter: 0, scores: [], labels: {} });
+
+// @ts-expect-error a typed datetime field rejects a boolean
+writeBatch().toQueryJson(writeParams, { values: [], rows: [{ at: true, n: 1 }], optional: [] });
+
+// @ts-expect-error a datetime field rejects null unless declared nullable
+writeBatch().toQueryJson(writeParams, { values: [], rows: [{ at: null, n: 1 }], optional: [] });
+
+// @ts-expect-error only a nullable field may be omitted
+writeBatch().toQueryJson(writeParams, { values: [], rows: [{ n: 1 }], optional: [] });
+
+// @ts-expect-error an omittable field still rejects an undeclared one beside it
+writeBatch().toQueryJson(writeParams, { values: [], rows: [], optional: [{ extra: 1 }] });
 
 // @ts-expect-error write traversal is rejected by read batches
 readBatch().varAs("created", g().addN("User", {}));

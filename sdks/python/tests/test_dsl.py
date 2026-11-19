@@ -191,6 +191,257 @@ class DslAstTests(unittest.TestCase):
         self.assertEqual(raised.exception.millis, 253_402_300_800_000)
         self.assertIn("bad_millis", raised.exception.path)
 
+    def test_typed_object_fields_normalize_and_declare_each_field(self) -> None:
+        rows = define_params(
+            {
+                "rows": param.array(
+                    param.object(
+                        {
+                            "email": param.string(),
+                            "at": param.date_time(),
+                            "audit": param.object(
+                                {"seen_at": param.date_time(), "note": param.value()}
+                            ),
+                        }
+                    )
+                )
+            }
+        )
+        body = parsed(
+            write_batch().to_query_request(
+                rows,
+                {
+                    "rows": [
+                        {
+                            "email": "a@example.com",
+                            "at": "2026-06-01T05:00:00+09:00",
+                            "audit": {"seen_at": DateTime.from_millis(0), "note": None},
+                        },
+                        {
+                            "email": "b@example.com",
+                            "at": 1_000,
+                            "audit": {"seen_at": "2026-06-01T00:00:00.250Z", "note": "text"},
+                        },
+                    ]
+                },
+            )
+        )
+        self.assertEqual(
+            body["parameter_types"],
+            {
+                "rows": {
+                    "array": {
+                        "object": {
+                            "email": "string",
+                            "at": "date_time",
+                            "audit": {"object": {"seen_at": "date_time", "note": "value"}},
+                        }
+                    }
+                }
+            },
+        )
+        self.assertEqual(
+            body["parameters"]["rows"],
+            [
+                {
+                    "email": "a@example.com",
+                    "at": "2026-05-31T20:00:00.000Z",
+                    "audit": {"seen_at": "1970-01-01T00:00:00.000Z", "note": None},
+                },
+                {
+                    "email": "b@example.com",
+                    "at": "1970-01-01T00:00:01.000Z",
+                    "audit": {"seen_at": "2026-06-01T00:00:00.250Z", "note": "text"},
+                },
+            ],
+        )
+
+        valid = {
+            "email": "a@example.com",
+            "at": "2026-06-01T00:00:00Z",
+            "audit": {"seen_at": "2026-06-01T00:00:00Z", "note": 1},
+        }
+
+        def build(row: object) -> None:
+            write_batch().to_query_request(rows, {"rows": [row]})
+
+        for row, message in [
+            ({**valid, "at": "2026-06-01"}, ""),
+            ({**valid, "at": None}, ""),
+            (
+                {key: value for key, value in valid.items() if key != "at"},
+                "parameter 'rows[0]' fields do not match its declared fields "
+                "(missing: ['at'], undeclared: [])",
+            ),
+            ({**valid, "createdAt": "2026-06-01T00:00:00Z"}, "undeclared: ['createdAt']"),
+            ({**valid, "audit": {"seen_at": "2026-06-01T00:00:00Z"}}, "'rows[0].audit'"),
+            ("not an object", "'rows[0]' must be object"),
+        ]:
+            with self.subTest(row=row):
+                with self.assertRaises((TypeError, QueryError)) as raised:
+                    build(row)
+                self.assertIn(message, str(raised.exception))
+
+        typed_rows = QueryParamType.array(
+            QueryParamType.object({"at": QueryParamType.date_time(), "n": QueryParamType.i64()})
+        )
+        self.assertEqual(parsed(typed_rows), {"array": {"object": {"at": "date_time", "n": "i64"}}})
+        self.assertEqual(typed_rows.inner.variant, "Record")
+        self.assertEqual(list(typed_rows.inner.fields), ["at", "n"])
+        typed = QueryRequest.write(write_batch()).with_typed_parameter(
+            "rows", typed_rows, [{"at": "2026-06-01T05:00:00+09:00", "n": 1}]
+        )
+        self.assertEqual(
+            parsed(typed)["parameters"], {"rows": [{"at": "2026-05-31T20:00:00.000Z", "n": 1}]}
+        )
+        with self.assertRaises(TypeError):
+            QueryRequest.write(write_batch()).with_typed_parameter(
+                "rows", typed_rows, [{"at": "nope", "n": 1}]
+            )
+        with self.assertRaisesRegex(TypeError, r"missing: \['n'\]"):
+            QueryRequest.write(write_batch()).with_typed_parameter(
+                "rows", typed_rows, [{"at": "2026-06-01T00:00:00Z"}]
+            )
+        for invalid in [{}, {"at": "date_time"}, ["at"]]:
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(TypeError):
+                    QueryParamType.object(invalid)  # type: ignore[arg-type]
+                with self.assertRaises(TypeError):
+                    param.object(invalid)  # type: ignore[arg-type]
+        with self.assertRaises(TypeError):
+            param.object(param.string())  # type: ignore[arg-type]
+        self.assertEqual(parsed(QueryParamType.object()), "object")
+        self.assertEqual(parsed(param.object()), "object")
+        with self.assertRaises(FrozenInstanceError):
+            typed_rows.inner.fields = {}  # type: ignore[misc]
+        with self.assertRaises(TypeError):
+            typed_rows.inner.fields["x"] = QueryParamType.i64()  # type: ignore[index]
+        # Field-declared types hash like every other type, by value.
+        same_rows = QueryParamType.array(
+            QueryParamType.object({"n": QueryParamType.i64(), "at": QueryParamType.date_time()})
+        )
+        self.assertEqual(hash(typed_rows), hash(same_rows))
+        self.assertEqual(len({typed_rows, same_rows, QueryParamType.object()}), 2)
+        schema = param.array(param.object({"at": param.date_time()}))
+        self.assertEqual({schema: 1}[param.array(param.object({"at": param.date_time()}))], 1)
+
+    def test_nullable_fields_accept_none_or_their_inner_type(self) -> None:
+        # The bulk-seed pattern with an optional datetime column.
+        rows = define_params(
+            {
+                "data": param.array(
+                    param.object(
+                        {"name": param.string(), "deleted_at": param.nullable(param.date_time())}
+                    )
+                )
+            }
+        )
+        body = parsed(
+            write_batch().to_query_request(
+                rows,
+                {
+                    "data": [
+                        {"name": "Ada", "deleted_at": None},
+                        {"name": "Grace", "deleted_at": "2026-06-01T05:00:00+09:00"},
+                    ]
+                },
+            )
+        )
+        self.assertEqual(
+            body["parameter_types"],
+            {
+                "data": {
+                    "array": {"object": {"name": "string", "deleted_at": {"nullable": "date_time"}}}
+                }
+            },
+        )
+        self.assertEqual(
+            body["parameters"]["data"],
+            [
+                {"name": "Ada", "deleted_at": None},
+                {"name": "Grace", "deleted_at": "2026-05-31T20:00:00.000Z"},
+            ],
+        )
+        # A nullable field may be omitted and stays absent, as the server keeps
+        # it; a field that is not nullable must be present, an undeclared one
+        # is rejected, and a set value is still checked.
+        omitted = parsed(
+            write_batch().to_query_request(
+                rows,
+                {
+                    "data": [
+                        {"name": "Ada"},
+                        {"name": "Grace", "deleted_at": "2026-06-01T05:00:00+09:00"},
+                    ]
+                },
+            )
+        )
+        self.assertEqual(
+            omitted["parameters"]["data"],
+            [{"name": "Ada"}, {"name": "Grace", "deleted_at": "2026-05-31T20:00:00.000Z"}],
+        )
+        with self.assertRaisesRegex(TypeError, r"missing: \['name'\], undeclared: \[\]"):
+            write_batch().to_query_request(rows, {"data": [{"deleted_at": None}]})
+        with self.assertRaisesRegex(TypeError, r"missing: \[\], undeclared: \['note'\]"):
+            write_batch().to_query_request(rows, {"data": [{"name": "Ada", "note": 1}]})
+        optional_rows = QueryParamType.array(
+            QueryParamType.object(
+                {
+                    "at": QueryParamType.nullable(QueryParamType.date_time()),
+                    "n": QueryParamType.i64(),
+                }
+            )
+        )
+        self.assertEqual(
+            parsed(
+                QueryRequest.write(write_batch()).with_typed_parameter(
+                    "rows", optional_rows, [{"n": 1}, {"at": None, "n": 2}]
+                )
+            )["parameters"],
+            {"rows": [{"n": 1}, {"at": None, "n": 2}]},
+        )
+        with self.assertRaisesRegex(TypeError, r"missing: \['n'\]"):
+            QueryRequest.write(write_batch()).with_typed_parameter(
+                "rows", optional_rows, [{"at": None}]
+            )
+        with self.assertRaises((TypeError, QueryError)):
+            write_batch().to_query_request(
+                rows, {"data": [{"name": "Ada", "deleted_at": "2026-06-01"}]}
+            )
+
+        # With several bad fields, the first in name order is reported, as the
+        # server and every other SDK report it, whatever the declared order.
+        with self.assertRaisesRegex(TypeError, r"parameter 'row\.a' must be string"):
+            QueryRequest.read(read_batch()).with_typed_parameter(
+                "row",
+                QueryParamType.object(
+                    {"z": QueryParamType.string(), "a": QueryParamType.string()}
+                ),
+                {"z": 1, "a": 1},
+            )
+        with self.assertRaisesRegex(TypeError, r"parameter 'row\.a' must be string"):
+            read_batch().to_query_request(
+                define_params({"row": param.object({"z": param.string(), "a": param.string()})}),
+                {"row": {"z": 1, "a": 1}},
+            )
+
+        nullable = QueryParamType.nullable(QueryParamType.date_time())
+        self.assertEqual(parsed(nullable), {"nullable": "date_time"})
+        self.assertEqual(nullable.inner, QueryParamType.date_time())
+        self.assertEqual(param.nullable(param.i64()).to_json(), {"nullable": "i64"})
+        typed = (
+            QueryRequest.read(read_batch())
+            .with_typed_parameter("a", nullable, None)
+            .with_typed_parameter(
+                "b", QueryParamType.array(nullable), [None, "2026-06-01T05:00:00+09:00"]
+            )
+        )
+        self.assertEqual(
+            parsed(typed)["parameters"], {"a": None, "b": [None, "2026-05-31T20:00:00.000Z"]}
+        )
+        with self.assertRaises((TypeError, QueryError)):
+            QueryRequest.read(read_batch()).with_typed_parameter("a", nullable, "2026-06-01")
+
     def test_index_lifecycle_response_decoders_are_strict_and_additive(self) -> None:
         operation_id = "018f0c58-6bc7-7c56-8d3d-9c5f18a0f001"
         receipt = parse_index_ddl_receipt(
@@ -811,7 +1062,7 @@ class DslAstTests(unittest.TestCase):
 
     def test_query_requests(self) -> None:
         params = define_params({"tenant_id": param.string(), "limit": param.i64()})
-        write_params = define_params({"data": param.array(param.object(param.value()))})
+        write_params = define_params({"data": param.array(param.object())})
 
         def read_query(p):
             return (

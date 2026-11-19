@@ -79,15 +79,20 @@ impl ParamTypeSpec {
                     ::helix_db::QueryError,
                 >::Ok(::helix_db::QueryValue::String(#value))
             },
+            // A datetime stays one inside maps and arrays too; the request
+            // declares its position `date_time`, so it renders as RFC3339 on
+            // the wire and parses back into a datetime on the server.
             Self::DateTime => quote! {
-                ::std::result::Result::<
-                    ::helix_db::QueryValue,
-                    ::helix_db::QueryError,
-                >::Ok(::helix_db::QueryValue::String(
-                    (#value)
-                        .to_rfc3339()
-                        .ok_or_else(|| ::helix_db::QueryError::invalid_datetime(#path, (#value).millis()))?
-                ))
+                {
+                    let __helix_datetime = #value;
+                    __helix_datetime.to_rfc3339().ok_or_else(|| {
+                        ::helix_db::QueryError::invalid_datetime(#path, __helix_datetime.millis())
+                    })?;
+                    ::std::result::Result::<
+                        ::helix_db::QueryValue,
+                        ::helix_db::QueryError,
+                    >::Ok(::helix_db::QueryValue::DateTime(__helix_datetime.millis()))
+                }
             },
             Self::Bytes => quote! {
                 ::std::result::Result::<
@@ -443,15 +448,25 @@ pub fn query(attr: TokenStream, item: TokenStream) -> TokenStream {
                             .ty
                             .to_query_value_tokens(quote! { #ident }, quote! { #name }, 0);
                     let type_tokens = param.ty.to_tokens();
+                    // The declared type follows the converted value, so a
+                    // datetime inside a map, `ParamValue` or `ParamObject` is
+                    // declared `date_time` where it sits.
                     quote! {
-                        request.try_insert_typed_parameter(
-                            #name,
-                            #type_tokens,
-                            (|| -> ::std::result::Result<
+                        {
+                            let __helix_value = (|| -> ::std::result::Result<
                                 ::helix_db::QueryValue,
                                 ::helix_db::QueryError,
-                            > { #value_tokens })()?,
-                        )?;
+                            > { #value_tokens })()?;
+                            request.try_insert_typed_parameter(
+                                #name,
+                                ::helix_db::__private::declared_type(
+                                    #type_tokens,
+                                    &__helix_value,
+                                    #name,
+                                )?,
+                                __helix_value,
+                            )?;
+                        }
                     }
                 });
 

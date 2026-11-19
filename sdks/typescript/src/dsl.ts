@@ -2725,7 +2725,43 @@ export function writeBatch(): WriteBatch {
 
 type QueryParamTypeState =
   | { readonly variant: "Bool" | "I64" | "F64" | "F32" | "String" | "DateTime" | "Bytes" | "Value" | "Object" }
-  | { readonly variant: "Array"; readonly inner: QueryParamType };
+  | { readonly variant: "Record"; readonly fields: Readonly<Record<string, QueryParamType>> }
+  | { readonly variant: "Array" | "Nullable"; readonly inner: QueryParamType };
+
+/** Copy declared fields, rejecting an empty declaration. */
+function declaredFields<T>(fields: Record<string, T>, isField: (field: unknown) => field is T): Readonly<Record<string, T>> {
+  if (typeof fields !== "object" || fields === null || Array.isArray(fields)) throw new TypeError("object fields must be a plain object");
+  const entries = Object.entries(fields);
+  if (entries.length === 0) throw new TypeError("an object parameter type must declare at least one field");
+  for (const [name, field] of entries) if (!isField(field)) throw new TypeError(`object field '${name}' must be a parameter type`);
+  return Object.freeze(Object.fromEntries(entries));
+}
+
+/** Whether `value` holds `name`; `undefined` counts as omitted, as JSON drops it. */
+function holdsField(value: Readonly<Record<string, unknown>>, name: string): boolean {
+  return Object.hasOwn(value, name) && value[name] !== undefined;
+}
+
+/**
+ * Fail unless every field of `value` is declared and every declared field is
+ * present, except a nullable one (`nullable(field)`), which may be omitted
+ * and then stays absent.
+ */
+function checkDeclaredFields<T>(
+  declared: Readonly<Record<string, T>>,
+  nullable: (field: T) => boolean,
+  value: Record<string, unknown>,
+  path: string,
+): void {
+  const missing = Object.entries(declared)
+    .filter(([name, field]) => !nullable(field) && !holdsField(value, name))
+    .map(([name]) => name);
+  const extra = Object.keys(value).filter((name) => holdsField(value, name) && !Object.hasOwn(declared, name));
+  if (missing.length > 0 || extra.length > 0)
+    throw new TypeError(
+      `parameter '${path}' fields do not match its declared fields (missing: ${JSON.stringify(missing.sort())}, undeclared: ${JSON.stringify(extra.sort())})`,
+    );
+}
 
 export class QueryParamType implements Encodable {
   private constructor(private readonly state: QueryParamTypeState) {
@@ -2736,7 +2772,11 @@ export class QueryParamType implements Encodable {
     return this.state.variant;
   }
   get inner(): QueryParamType | undefined {
-    return this.state.variant === "Array" ? this.state.inner : undefined;
+    return this.state.variant === "Array" || this.state.variant === "Nullable" ? this.state.inner : undefined;
+  }
+  /** Declared fields of an object type created with `object(fields)`. */
+  get fields(): Readonly<Record<string, QueryParamType>> | undefined {
+    return this.state.variant === "Record" ? this.state.fields : undefined;
   }
   static bool(): QueryParamType {
     return new QueryParamType({ variant: "Bool" });
@@ -2762,26 +2802,69 @@ export class QueryParamType implements Encodable {
   static value(): QueryParamType {
     return new QueryParamType({ variant: "Value" });
   }
-  static object(): QueryParamType {
-    return new QueryParamType({ variant: "Object" });
+  /**
+   * Any object with no argument, sent as `"object"`. With `fields`, an object
+   * with those fields, each normalized to its type and sent as
+   * `{ "object": { field: type } }`, so a `dateTime()` field binds as a
+   * datetime on the server. An undeclared field is rejected, and so is a
+   * missing one unless it is `nullable(...)`; `null` satisfies only a
+   * `value()` or `nullable(...)` field.
+   */
+  static object(fields?: Record<string, QueryParamType>): QueryParamType {
+    if (fields === undefined) return new QueryParamType({ variant: "Object" });
+    return new QueryParamType({
+      variant: "Record",
+      fields: declaredFields(fields, (field): field is QueryParamType => field instanceof QueryParamType),
+    });
   }
   static array(inner: QueryParamType): QueryParamType {
     return new QueryParamType({ variant: "Array", inner });
   }
+  /**
+   * `null`, or a value of `inner`, sent as `{ "nullable": inner }`: an optional
+   * datetime column in bulk rows stays a datetime where it is set. As an
+   * object field it may also be omitted (or `undefined`), and then stays
+   * absent rather than becoming `null`.
+   */
+  static nullable(inner: QueryParamType): QueryParamType {
+    return new QueryParamType({ variant: "Nullable", inner });
+  }
   toJSON(): JsonValue {
-    return this.state.variant === "Array" ? astNewtype("Array", this.state.inner) : astUnit(this.state.variant);
+    switch (this.state.variant) {
+      case "Array":
+      case "Nullable":
+        return astNewtype(this.state.variant, this.state.inner);
+      case "Record":
+        return astNewtype("Object", this.state.fields);
+      default:
+        return astUnit(this.state.variant);
+    }
   }
 }
 
-type ParamKind = "Bool" | "I64" | "F64" | "F32" | "String" | "DateTime" | "Bytes" | "Value" | "Object" | "Array";
+type ParamKind = "Bool" | "I64" | "F64" | "F32" | "String" | "DateTime" | "Bytes" | "Value" | "Object" | "Record" | "Array" | "Nullable";
 
 export type ParamSchemaInput<T> = T extends ParamSchema<infer Input> ? Input : never;
+/** Declared object fields: each field's schema by name. */
+export type ParamFields = Record<string, ParamSchema>;
+declare const NULLABLE: unique symbol;
+/** A schema from `param.nullable(inner)`, whose object field may be omitted. */
+export type NullableParamSchema<Input> = ParamSchema<Input | null> & { readonly [NULLABLE]: true };
+/** The fields of `F` declared nullable. */
+type OmittableFields<F extends ParamFields> = { [K in keyof F]: F[K] extends { readonly [NULLABLE]: true } ? K : never }[keyof F];
+/**
+ * The input an object with `F` fields accepts: those fields, where a nullable
+ * one may be omitted.
+ */
+export type ParamFieldsInput<F extends ParamFields> = {
+  [K in Exclude<keyof F, OmittableFields<F>>]: ParamSchemaInput<F[K]>;
+} & { [K in OmittableFields<F>]?: ParamSchemaInput<F[K]> };
 const PARAMS_METADATA: unique symbol = Symbol("@helixdb/enterprise-ql/params-metadata");
 
 type ParamSchemaState =
-  | { readonly kind: "Bool" | "I64" | "F64" | "F32" | "String" | "DateTime" | "Bytes" | "Value" }
-  | { readonly kind: "Object"; readonly objectInner: ParamSchema }
-  | { readonly kind: "Array"; readonly inner: ParamSchema };
+  | { readonly kind: "Bool" | "I64" | "F64" | "F32" | "String" | "DateTime" | "Bytes" | "Value" | "Object" }
+  | { readonly kind: "Record"; readonly fields: Readonly<ParamFields> }
+  | { readonly kind: "Array" | "Nullable"; readonly inner: ParamSchema };
 
 export class ParamSchema<Input = unknown> implements Encodable {
   declare readonly __input?: Input;
@@ -2793,10 +2876,11 @@ export class ParamSchema<Input = unknown> implements Encodable {
     return this.state.kind;
   }
   get inner(): ParamSchema | undefined {
-    return this.state.kind === "Array" ? this.state.inner : undefined;
+    return this.state.kind === "Array" || this.state.kind === "Nullable" ? this.state.inner : undefined;
   }
-  get objectInner(): ParamSchema | undefined {
-    return this.state.kind === "Object" ? this.state.objectInner : undefined;
+  /** Declared fields of an object schema created with `param.object(fields)`. */
+  get fields(): Readonly<ParamFields> | undefined {
+    return this.state.kind === "Record" ? this.state.fields : undefined;
   }
   static bool(): ParamSchema<boolean> {
     return new ParamSchema({ kind: "Bool" });
@@ -2822,11 +2906,21 @@ export class ParamSchema<Input = unknown> implements Encodable {
   static value(): ParamSchema<PropertyValueInput> {
     return new ParamSchema({ kind: "Value" });
   }
-  static object<Inner extends ParamSchema>(inner: Inner): ParamSchema<Record<string, ParamSchemaInput<Inner>>> {
-    return new ParamSchema({ kind: "Object", objectInner: inner });
+  static object(): ParamSchema<Record<string, PropertyValueInput>>;
+  static object<F extends ParamFields>(fields: F): ParamSchema<ParamFieldsInput<F>>;
+  static object(fields?: ParamFields): ParamSchema {
+    if (fields === undefined) return new ParamSchema({ kind: "Object" });
+    return new ParamSchema({
+      kind: "Record",
+      fields: declaredFields(fields, (field): field is ParamSchema => field instanceof ParamSchema),
+    });
   }
   static array<Inner extends ParamSchema>(inner: Inner): ParamSchema<ParamSchemaInput<Inner>[]> {
     return new ParamSchema({ kind: "Array", inner });
+  }
+  static nullable<Inner extends ParamSchema>(inner: Inner): NullableParamSchema<ParamSchemaInput<Inner>> {
+    // The brand is type-only: it marks the field omittable in `ParamFieldsInput`.
+    return new ParamSchema({ kind: "Nullable", inner }) as NullableParamSchema<ParamSchemaInput<Inner>>;
   }
   toParamType(): QueryParamType {
     switch (this.state.kind) {
@@ -2848,8 +2942,14 @@ export class ParamSchema<Input = unknown> implements Encodable {
         return QueryParamType.value();
       case "Object":
         return QueryParamType.object();
+      case "Record":
+        return QueryParamType.object(
+          Object.fromEntries(Object.entries(this.state.fields).map(([name, field]) => [name, field.toParamType()])),
+        );
       case "Array":
         return QueryParamType.array(this.state.inner.toParamType());
+      case "Nullable":
+        return QueryParamType.nullable(this.state.inner.toParamType());
     }
   }
   toJSON(): JsonValue {
@@ -2866,10 +2966,19 @@ export const param = {
   dateTime: ParamSchema.dateTime,
   bytes: ParamSchema.bytes,
   value: ParamSchema.value,
-  object: <Inner extends ParamSchema = ParamSchema<PropertyValueInput>>(
-    inner: Inner = ParamSchema.value() as Inner,
-  ): ParamSchema<Record<string, ParamSchemaInput<Inner>>> => ParamSchema.object(inner),
+  /**
+   * Any object with no argument. With `fields`, an object with exactly those
+   * fields, each converted by its schema: `param.object({ at: param.dateTime() })`
+   * sends `at` as a datetime the server stores, compares and indexes as one.
+   */
+  object: ParamSchema.object,
   array: ParamSchema.array,
+  /**
+   * `null`, or a value of `inner`: `param.object({ deletedAt: param.nullable(param.dateTime()) })`
+   * keeps a set `deletedAt` a datetime and accepts `null` or an omitted
+   * `deletedAt` where it is unset; an omitted one stays absent.
+   */
+  nullable: ParamSchema.nullable,
 };
 
 export class ParamRef<Input = unknown> implements Encodable {
@@ -2945,15 +3054,33 @@ function convertParamValue(schema: ParamSchema, value: unknown, path: string): J
       return queryValueFromPropertyValue(PropertyValue.from(value as PropertyValueInput), path);
     case "Object": {
       if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError(`parameter '${path}' must be object`);
-      const out: Record<string, JsonValue> = {};
-      for (const [key, entry] of Object.entries(value as Record<string, unknown>))
-        out[key] = convertParamValue(schema.objectInner ?? param.value(), entry, `${path}.${key}`);
-      return out;
+      return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>).map(([key, entry]) => [
+          key,
+          convertParamValue(param.value(), entry, `${path}.${key}`),
+        ]),
+      );
+    }
+    case "Record": {
+      if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError(`parameter '${path}' must be object`);
+      const fields = schema.fields!;
+      const row = value as Record<string, unknown>;
+      checkDeclaredFields(fields, (field) => field.kind === "Nullable", row, path);
+      // Name order, as the server and every other SDK check fields, so the
+      // first bad field reported is the same everywhere.
+      return Object.fromEntries(
+        Object.entries(fields)
+          .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+          .filter(([key]) => holdsField(row, key))
+          .map(([key, field]) => [key, convertParamValue(field, row[key], `${path}.${key}`)]),
+      );
     }
     case "Array": {
       if (!Array.isArray(value)) throw new TypeError(`parameter '${path}' must be array`);
       return value.map((entry, index) => convertParamValue(schema.inner!, entry, `${path}[${index}]`));
     }
+    case "Nullable":
+      return value === null ? null : convertParamValue(schema.inner!, value, path);
   }
 }
 
@@ -3006,9 +3133,25 @@ function normalizeTypedQueryValue(type: QueryParamType, value: JsonValue, path: 
       if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError(`parameter '${path}' must be object`);
       return validateJsonValue(value, path);
     }
+    case "Record": {
+      if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError(`parameter '${path}' must be object`);
+      const fields = type.fields!;
+      const row = value as Record<string, JsonValue>;
+      checkDeclaredFields(fields, (field) => field.variant === "Nullable", row, path);
+      // Name order, as the server and every other SDK check fields, so the
+      // first bad field reported is the same everywhere.
+      return Object.fromEntries(
+        Object.entries(fields)
+          .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+          .filter(([key]) => holdsField(row, key))
+          .map(([key, field]) => [key, normalizeTypedQueryValue(field, row[key], `${path}.${key}`)]),
+      );
+    }
     case "Array":
       if (!Array.isArray(value)) throw new TypeError(`parameter '${path}' must be array`);
       return value.map((entry, index) => normalizeTypedQueryValue(type.inner!, entry, `${path}[${index}]`));
+    case "Nullable":
+      return value === null ? null : normalizeTypedQueryValue(type.inner!, value, path);
   }
 }
 

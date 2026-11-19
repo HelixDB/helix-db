@@ -195,8 +195,14 @@ node scripts/package-smoke.mjs --package @helix-db/helix-db@3.1.0
 
 Supported schemas are `param.bool()`, `param.i64()`, `param.f64()`,
 `param.f32()`, `param.string()`, `param.dateTime()`, `param.bytes()`,
-`param.value()`, `param.object()`, `param.object(inner)`, and
-`param.array(inner)`.
+`param.value()`, `param.object()`, `param.object(fields)`,
+`param.array(inner)`, and `param.nullable(inner)`.
+
+`param.object()` accepts any object. `param.object({ at: param.dateTime(), name: param.string() })`
+accepts objects with those fields and converts each by its schema, so a
+`dateTime()` field inside `forEachParam` rows is stored as a datetime rather than text.
+`param.nullable(param.dateTime())` also accepts `null`, for a column that is not set in
+every row; a nullable field may also be omitted (or `undefined`), and then stays absent.
 
 Parameter values and types are inserted into the request together. Unknown
 parameters and invalid values are rejected before execution. JSON requests

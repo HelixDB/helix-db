@@ -48,6 +48,7 @@ pub fn param_bindings(parameters: BTreeMap<String, QueryValue>) -> ParamBindings
                 (name, value)
             })
             .collect(),
+        ..ParamBindings::default()
     }
 }
 

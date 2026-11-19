@@ -137,7 +137,7 @@ reach with an application key) directly.
 ### TypeScript input
 
 - `-e` and `--ts-file` need Node.js 20+ on `PATH`. The expression must evaluate to a `readBatch()` or `writeBatch()` builder. No running instance is needed to build the request.
-- The first run `npm install`s the pinned `@helix-db/helix-db@3.1.0` SDK into `ts-runtime/` under the Helix cache directory (override with `HELIX_CACHE_DIR`), so it needs npm and npm registry access. Later runs reuse it.
+- The first run `npm install`s the pinned `@helix-db/helix-db@4.0.0` SDK into `ts-runtime/` under the Helix cache directory (override with `HELIX_CACHE_DIR`), so it needs npm and npm registry access. Later runs reuse it.
 - Without Node.js the command fails with `Node.js is required to run TypeScript queries`; without npm on the first run, with `npm is required to install the TypeScript query runtime`. Use `--file` or `--body` instead.
 
 ### Output
