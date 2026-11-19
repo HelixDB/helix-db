@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use slatedb::{DbReadOps, DbTransaction};
 
-use crate::config::{RangeIndexDirection, SearchIndexBatchLimits};
+use crate::config::{IndexLifecycleScanTuning, RangeIndexDirection, SearchIndexBatchLimits};
 use crate::encoding::indexes::range::RangeIndexDirection as StorageRangeIndexDirection;
 use crate::encoding::property::property_value::PropertyValue;
 use crate::encoding::property::Property;
@@ -115,6 +115,7 @@ pub(crate) fn record_equality_point_read() {
 /// Family driver sharing the lifecycle scope gate.
 pub(crate) struct SecondaryIndexDriver {
     scope_gates: Arc<IndexScopeGates>,
+    scan_tuning: IndexLifecycleScanTuning,
     /// Consecutive preparations of each operation that found its build where
     /// the previous one left it, with that point.
     stalled_preparations: parking_lot::Mutex<HashMap<IndexOperationId, (StallPoint, u32)>>,
@@ -160,6 +161,7 @@ impl SecondaryIndexDriver {
     pub(crate) fn new(scope_gates: Arc<IndexScopeGates>) -> Self {
         Self {
             scope_gates,
+            scan_tuning: IndexLifecycleScanTuning::default(),
             stalled_preparations: parking_lot::Mutex::new(HashMap::new()),
             activation_drains: parking_lot::Mutex::new(HashMap::new()),
         }
@@ -213,6 +215,12 @@ impl SecondaryIndexDriver {
         }
         *entry = (backlog.unwrap_or(usize::MAX), entry.1 + 1);
         true
+    }
+
+    /// Applies runtime source-scan prefetching without admitting blocks to cache.
+    pub(crate) const fn with_scan_tuning(mut self, scan_tuning: IndexLifecycleScanTuning) -> Self {
+        self.scan_tuning = scan_tuning;
+        self
     }
 }
 
@@ -1441,7 +1449,17 @@ impl IndexOperationDriver for SecondaryIndexDriver {
         };
         let result = match operation.progress() {
             IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(stage)) => {
-                step_build(db, transaction, scope, operation, definition, stage, limits).await
+                step_build(
+                    db,
+                    transaction,
+                    scope,
+                    operation,
+                    definition,
+                    stage,
+                    limits,
+                    self.scan_tuning,
+                )
+                .await
             }
             IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Aborting(progress)) => {
                 step_cleanup(
@@ -1733,6 +1751,10 @@ async fn ensure_applied_state_awaits_drains(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one build step needs its storage, transaction, exact operation, definition, stage, batch limits, and scan tuning"
+)]
 async fn step_build(
     db: &slatedb::Db,
     transaction: &impl crate::transaction::Mutation,
@@ -1741,6 +1763,7 @@ async fn step_build(
     definition: &ValidatedSecondaryIndexDefinition,
     stage: &SecondaryBuildStage,
     limits: SearchIndexBatchLimits,
+    scan_tuning: IndexLifecycleScanTuning,
 ) -> Result<IndexOperationStepResult> {
     match stage {
         SecondaryBuildStage::Scan(progress) => {
@@ -1752,6 +1775,7 @@ async fn step_build(
                 definition,
                 progress,
                 limits,
+                scan_tuning,
             )
             .await
         }
@@ -1924,6 +1948,10 @@ struct ObservedSourceScanCandidate {
 /// repairs it before the step commits makes the step retry. A unique entry an
 /// earlier batch gave an entity that has since moved off the value is taken
 /// over rather than reported as a duplicate (see [`decide_reconciliation`]).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one source batch needs its storage, transaction, exact operation, definition, progress, limits, and scan tuning"
+)]
 async fn scan_source(
     db: &slatedb::Db,
     transaction: &impl crate::transaction::Mutation,
@@ -1932,6 +1960,7 @@ async fn scan_source(
     definition: &ValidatedSecondaryIndexDefinition,
     progress: &SourceScanProgress,
     limits: SearchIndexBatchLimits,
+    scan_tuning: IndexLifecycleScanTuning,
 ) -> Result<IndexOperationStepResult> {
     let source = db.begin(slatedb::IsolationLevel::Snapshot).await?;
     let Some(mut rows) = super::label_source::LabelSource::open(
@@ -1941,6 +1970,7 @@ async fn scan_source(
         definition.label().as_str(),
         progress,
         limits,
+        scan_tuning,
     )
     .await?
     else {

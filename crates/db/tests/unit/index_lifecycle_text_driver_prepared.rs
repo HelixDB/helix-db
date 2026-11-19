@@ -1136,6 +1136,7 @@ async fn scan_source_case(
         },
         limits,
         document_limits(),
+        IndexLifecycleScanTuning::default(),
     )
     .await;
     drop(transaction);
@@ -1268,6 +1269,7 @@ async fn source_scan_attributes_every_input_output_and_corruption_boundary() {
             },
             batch_limits(8, u64::MAX, u64::MAX, u64::MAX),
             document_limits(),
+            IndexLifecycleScanTuning::default(),
         )
         .await
         .unwrap(),
@@ -1293,6 +1295,7 @@ async fn source_scan_attributes_every_input_output_and_corruption_boundary() {
         },
         batch_limits(8, u64::MAX, u64::MAX, u64::MAX),
         document_limits(),
+        IndexLifecycleScanTuning::default(),
     )
     .await
     .is_err());
@@ -1693,6 +1696,7 @@ async fn partition_blocker_retries_once_its_graph_row_is_repaired() {
             },
             batch_limits(8, u64::MAX, u64::MAX, u64::MAX),
             document_limits(),
+            IndexLifecycleScanTuning::default(),
         )
         .await
         .unwrap(),
@@ -2252,6 +2256,7 @@ async fn scanned_generation(
             },
             batch_limits(64, u64::MAX, u64::MAX, u64::MAX),
             document_limits(),
+            IndexLifecycleScanTuning::default(),
         )
         .await
         .unwrap(),
@@ -3160,6 +3165,7 @@ async fn source_scan_reads_only_its_label() {
             },
             crate::config::SearchIndexBackfillLimits::default().batch(),
             document_limits(),
+            IndexLifecycleScanTuning::default(),
         )
         .await
         .unwrap();
@@ -3251,6 +3257,7 @@ async fn source_scan_steps_resume_on_a_reopened_database() {
             &progress,
             batch_limits(16, u64::MAX, u64::MAX, u64::MAX),
             document_limits(),
+            IndexLifecycleScanTuning::default(),
         )
         .await
         .unwrap();
@@ -3405,6 +3412,7 @@ async fn source_scans_read_their_label_at_every_label_identity_stage() {
                 &progress,
                 batch_limits(16, u64::MAX, u64::MAX, u64::MAX),
                 document_limits(),
+                IndexLifecycleScanTuning::default(),
             )
             .await
             .unwrap();

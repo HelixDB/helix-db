@@ -30,23 +30,30 @@
 //! read and left to each driver's own label check, which writes nothing for
 //! it.
 //!
-//! Rows are read with `multi_get`, in chunks of at most
+//! A step reads its ids' rows in one of two ways ([`Reads`]), chosen from
+//! the ids it took. When they fill at least half of the key range from the
+//! first to the last ([`RANGE_DENSITY`]), one scan of that range reads them
+//! and the rows of other labels between them, as the prefix scan before it
+//! did, since a point read costs more than a row a scan passes. Otherwise
+//! rows are read with `multi_get`, in chunks of at most
 //! [`helix_planner::cost::RECORD_BATCH_ROWS`] ids, each read only once the
-//! previous one is consumed, and no chunk is read once the step has read its
-//! input-byte limit. A chunk takes at most as many ids as the step has read
-//! so far ([`FIRST_CHUNK_IDS`] first), so a step's reads at most double a
-//! chunk at a time, and once a row is read, no more ids than reach the input
-//! bytes the step has left at the mean bytes per id read so far. A label of
-//! large rows therefore reads about its limit and a row or two more per step,
-//! rather than a whole chunk of rows the step then leaves for the next one to
-//! read again, and a step whose first rows are small reads no more large rows
-//! past its limit than it had read before them. Like the prefix scan before
-//! it, a build's reads do not fill the block cache.
+//! previous one is consumed. Either way no row is read once the step has
+//! read its input-byte limit, counting every row read, of the label or not.
+//! A chunk takes at most as many ids as the step has read so far
+//! ([`FIRST_CHUNK_IDS`] first), so a step's reads at most double a chunk at
+//! a time, and once a row is read, no more ids than reach the input bytes
+//! the step has left at the mean bytes per id read so far. A label of large
+//! rows therefore reads about its limit and a row or two more per step,
+//! rather than a whole chunk of rows the next step reads again, and a step
+//! whose first rows are small reads no more large rows past its limit than
+//! it had read before them. A scan starts at the step's first id, so a row
+//! of another label it read is never read again by a later step. Like the
+//! prefix scan before them, a build's reads do not fill the block cache.
 
 use bytes::Bytes;
 use slatedb::DbReadOps;
 
-use crate::config::SearchIndexBatchLimits;
+use crate::config::{IndexLifecycleScanTuning, SearchIndexBatchLimits};
 use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::{DataKey, DataKeyKind, EdgePropertyByIdKey, NodePropertyKey};
 use crate::error::{HelixDbError, Result};
@@ -60,6 +67,11 @@ const CHUNK_IDS: usize = helix_planner::cost::RECORD_BATCH_ROWS as usize;
 /// such chunk of the largest rows a step admits stays near its byte limit.
 const FIRST_CHUNK_IDS: usize = 4;
 const _: () = assert!(FIRST_CHUNK_IDS <= CHUNK_IDS);
+
+/// A step scans its ids' key range when the range holds at most this many
+/// keys per id it took: a dense label then reads no more than this many
+/// rows per member, and a sparse one reads only its members.
+const RANGE_DENSITY: u64 = 2;
 
 /// One present source row of the label.
 pub(crate) struct SourceRow {
@@ -90,19 +102,55 @@ pub(crate) struct LabelSource<'a, R> {
     reader: &'a R,
     scope: DataScope,
     kind: IndexElementKind,
-    /// Ids taken for this step and not yet read, ascending.
-    ids: std::vec::IntoIter<u64>,
+    reads: Reads,
     /// Whether the label holds members after the taken ids, up to the bound.
     more: bool,
+    read: Read,
+}
+
+/// How a step reads the rows of the ids it took (see the module docs).
+enum Reads {
+    Points(PointReads),
+    Range(RangeReads),
+}
+
+/// Point reads of the taken ids, a chunk at a time.
+struct PointReads {
+    /// Ids taken and not yet read, ascending.
+    ids: std::vec::IntoIter<u64>,
     /// The chunk being returned: each id, its key and its row if present.
     chunk: std::vec::IntoIter<(u64, Bytes, Option<Bytes>)>,
-    /// The last id read.
-    last_read: Option<u64>,
     /// Ids read so far, present or not.
     ids_read: u64,
-    /// Key and value bytes of the present rows read so far.
-    read_bytes: u64,
-    max_input_bytes: u64,
+}
+
+/// One scan from the first taken id's key to the last's.
+struct RangeReads {
+    /// Ids taken and not yet passed, ascending.
+    ids: std::iter::Peekable<std::vec::IntoIter<u64>>,
+    rows: slatedb::DbIterator,
+}
+
+/// What a step has read so far.
+struct Read {
+    /// The last id read or passed.
+    last: Option<u64>,
+    /// Key and value bytes of the rows read, of the label or not.
+    bytes: u64,
+    /// The step's input-byte limit: no row is read once `bytes` reaches it.
+    limit: u64,
+}
+
+impl Read {
+    fn add(&mut self, key: &[u8], value: &[u8]) {
+        self.bytes = self
+            .bytes
+            .saturating_add(u64::try_from(key.len() + value.len()).unwrap_or(u64::MAX));
+    }
+
+    fn spent(&self) -> bool {
+        self.bytes >= self.limit
+    }
 }
 
 impl<'a, R: DbReadOps + Send + Sync> LabelSource<'a, R> {
@@ -112,7 +160,8 @@ impl<'a, R: DbReadOps + Send + Sync> LabelSource<'a, R> {
     /// `None` when no member is left: the scan is complete. A step therefore
     /// returns at most `limits.max_entities()` rows, and a driver ends its
     /// step on [`LabelRead::Exhausted`] or [`LabelRead::Paused`] rather than
-    /// counting entities itself.
+    /// counting entities itself. `scan` tunes the read-ahead of a step that
+    /// scans its ids' key range.
     ///
     /// A cursor is the complete property-by-ID key of its kind. An edge
     /// cursor may also be a retired 16-byte `[from][to]` property key an older
@@ -125,6 +174,7 @@ impl<'a, R: DbReadOps + Send + Sync> LabelSource<'a, R> {
         label: &str,
         progress: &SourceScanProgress,
         limits: SearchIndexBatchLimits,
+        scan: IndexLifecycleScanTuning,
     ) -> Result<Option<Self>> {
         let upper = match source_id(scope, kind, progress.inclusive_upper_bound.as_bytes())? {
             SourceKey::Id(id) => id,
@@ -162,37 +212,98 @@ impl<'a, R: DbReadOps + Send + Sync> LabelSource<'a, R> {
             .by_ref()
             .take(limits.max_entities().get())
             .collect::<Vec<_>>();
-        if taken.is_empty() {
+        let (Some(&first), Some(&last)) = (taken.first(), taken.last()) else {
             return Ok(None);
-        }
+        };
+        let taken_ids = u64::try_from(taken.len()).unwrap_or(u64::MAX);
+        let reads = if last - first < taken_ids.saturating_mul(RANGE_DENSITY) {
+            Reads::Range(RangeReads {
+                ids: taken.into_iter().peekable(),
+                rows: reader
+                    .scan_with_options(
+                        source_key(scope, kind, first)..=source_key(scope, kind, last),
+                        &scan.scan_options(),
+                    )
+                    .await?,
+            })
+        } else {
+            Reads::Points(PointReads {
+                ids: taken.into_iter(),
+                chunk: Vec::new().into_iter(),
+                ids_read: 0,
+            })
+        };
         Ok(Some(Self {
             reader,
             scope,
             kind,
-            ids: taken.into_iter(),
+            reads,
             more: in_bound.next().is_some(),
-            chunk: Vec::new().into_iter(),
-            last_read: None,
-            ids_read: 0,
-            read_bytes: 0,
-            max_input_bytes: limits.max_input_bytes().get(),
+            read: Read {
+                last: None,
+                bytes: 0,
+                limit: limits.max_input_bytes().get(),
+            },
         }))
     }
 
     /// The next present row, or how the step's ids ended once every row
     /// returned so far is all there is.
     pub(crate) async fn next(&mut self) -> Result<LabelRead> {
+        let row = match &mut self.reads {
+            Reads::Points(points) => {
+                points
+                    .next(self.reader, self.scope, self.kind, &mut self.read)
+                    .await?
+            }
+            Reads::Range(range) => range.next(self.scope, self.kind, &mut self.read).await?,
+        };
+        let Some(row) = row else {
+            return Ok(self.end());
+        };
+        Ok(LabelRead::Row(row))
+    }
+
+    fn end(&mut self) -> LabelRead {
+        let last_read = self
+            .read
+            .last
+            .expect("a source with taken ids reads or passes one before it ends");
+        let taken_left = match &mut self.reads {
+            Reads::Points(points) => points.ids.len() > 0,
+            Reads::Range(range) => range.ids.peek().is_some(),
+        };
+        if !taken_left && !self.more {
+            return LabelRead::Exhausted;
+        }
+        LabelRead::Paused(
+            IndexCursor::try_new(source_key(self.scope, self.kind, last_read))
+                .expect("a property-by-ID key is a valid cursor"),
+        )
+    }
+}
+
+impl PointReads {
+    /// The next present row, or `None` once the ids are read or the step has
+    /// read its limit.
+    async fn next(
+        &mut self,
+        reader: &(impl DbReadOps + Send + Sync),
+        scope: DataScope,
+        kind: IndexElementKind,
+        read: &mut Read,
+    ) -> Result<Option<SourceRow>> {
         loop {
             let Some((id, key, value)) = self.chunk.next() else {
-                if !self.read_chunk().await? {
-                    return Ok(self.end());
+                if !self.read_chunk(reader, scope, kind, read).await? {
+                    return Ok(None);
                 }
                 continue;
             };
             let Some(value) = value else {
                 continue;
             };
-            return Ok(LabelRead::Row(SourceRow {
+            return Ok(Some(SourceRow {
                 entity_id: IndexEntityId::new(id),
                 key,
                 value,
@@ -202,23 +313,28 @@ impl<'a, R: DbReadOps + Send + Sync> LabelSource<'a, R> {
 
     /// Reads the next chunk of taken ids, unless none is left or the step has
     /// read its input-byte limit. Returns whether a chunk was read.
-    async fn read_chunk(&mut self) -> Result<bool> {
-        if self.read_bytes >= self.max_input_bytes {
+    async fn read_chunk(
+        &mut self,
+        reader: &(impl DbReadOps + Send + Sync),
+        scope: DataScope,
+        kind: IndexElementKind,
+        read: &mut Read,
+    ) -> Result<bool> {
+        if read.spent() {
             return Ok(false);
         }
-        let chunk_ids = self.chunk_ids();
+        let chunk_ids = self.chunk_ids(read);
         let ids = self.ids.by_ref().take(chunk_ids).collect::<Vec<_>>();
         let Some(&last) = ids.last() else {
             return Ok(false);
         };
         let keys = ids
             .iter()
-            .map(|id| source_key(self.scope, self.kind, *id))
+            .map(|id| source_key(scope, kind, *id))
             .collect::<Vec<_>>();
         // Build reads stay out of the block cache, as the prefix scan's did:
         // a build reads a label once and would evict what queries read.
-        let rows = self
-            .reader
+        let rows = reader
             .multi_get_with_options(
                 &keys,
                 &slatedb::config::ReadOptions::new().with_cache_blocks(false),
@@ -229,17 +345,14 @@ impl<'a, R: DbReadOps + Send + Sync> LabelSource<'a, R> {
                 "build source multi-get must return one row per key".to_string(),
             ));
         }
-        self.read_bytes = keys
-            .iter()
+        keys.iter()
             .zip(&rows)
-            .filter_map(|(key, row)| row.as_ref().map(|row| key.len() + row.len()))
-            .fold(self.read_bytes, |bytes, row| {
-                bytes.saturating_add(u64::try_from(row).unwrap_or(u64::MAX))
-            });
+            .filter_map(|(key, row)| row.as_ref().map(|row| (key, row)))
+            .for_each(|(key, row)| read.add(key, row));
         self.ids_read = self
             .ids_read
             .saturating_add(u64::try_from(ids.len()).unwrap_or(u64::MAX));
-        self.last_read = Some(last);
+        read.last = Some(last);
         self.chunk = ids
             .into_iter()
             .zip(keys)
@@ -255,14 +368,14 @@ impl<'a, R: DbReadOps + Send + Sync> LabelSource<'a, R> {
     /// enough to reach the input-byte limit at the mean bytes per id read so
     /// far. The first bound keeps a mean taken over small rows from sizing a
     /// whole chunk of large ones.
-    fn chunk_ids(&self) -> usize {
+    fn chunk_ids(&self, read: &Read) -> usize {
         let grown = u128::from(self.ids_read).max(FIRST_CHUNK_IDS as u128);
-        let ids = match self.read_bytes {
+        let ids = match read.bytes {
             0 => grown,
-            read => {
-                let left = u128::from(self.max_input_bytes - read);
+            bytes => {
+                let left = u128::from(read.limit - bytes);
                 (left * u128::from(self.ids_read))
-                    .div_ceil(u128::from(read))
+                    .div_ceil(u128::from(bytes))
                     .min(grown)
             }
         };
@@ -270,18 +383,49 @@ impl<'a, R: DbReadOps + Send + Sync> LabelSource<'a, R> {
             .unwrap_or(usize::MAX)
             .clamp(1, CHUNK_IDS)
     }
+}
 
-    fn end(&self) -> LabelRead {
-        let last_read = self
-            .last_read
-            .expect("a source with taken ids reads its first chunk before it ends");
-        if self.ids.len() == 0 && !self.more {
-            return LabelRead::Exhausted;
+impl RangeReads {
+    /// The next present row of the taken ids, passing the ids without a row
+    /// before it and the rows of other labels, or `None` once the range is
+    /// read or the step has read its limit.
+    ///
+    /// Every row read moves `read.last`: the range starts at a taken id, and
+    /// a row passes every taken id before it. A row of another label read
+    /// past the limit is therefore never read again by a later step.
+    async fn next(
+        &mut self,
+        scope: DataScope,
+        kind: IndexElementKind,
+        read: &mut Read,
+    ) -> Result<Option<SourceRow>> {
+        loop {
+            if read.spent() {
+                return Ok(None);
+            }
+            let Some(row) = self.rows.next().await? else {
+                // No taken id left has a row.
+                read.last = self.ids.by_ref().last().or(read.last);
+                return Ok(None);
+            };
+            read.add(&row.key, &row.value);
+            // A retired `[from][to]` edge row is no entity.
+            let SourceKey::Id(id) = source_id(scope, kind, &row.key)? else {
+                continue;
+            };
+            while let Some(absent) = self.ids.next_if(|taken| *taken < id) {
+                read.last = Some(absent);
+            }
+            if self.ids.next_if_eq(&id).is_none() {
+                continue;
+            }
+            read.last = Some(id);
+            return Ok(Some(SourceRow {
+                entity_id: IndexEntityId::new(id),
+                key: row.key,
+                value: row.value,
+            }));
         }
-        LabelRead::Paused(
-            IndexCursor::try_new(source_key(self.scope, self.kind, last_read))
-                .expect("a property-by-ID key is a valid cursor"),
-        )
     }
 }
 
