@@ -65,9 +65,17 @@ async fn step(
     limits: SearchIndexBatchLimits,
 ) -> Option<(Vec<u64>, Option<u64>)> {
     let scope = DataScope::LegacyUnscoped;
-    let mut source = LabelSource::open(snapshot, scope, kind, label, progress, limits)
-        .await
-        .expect("the label source opens")?;
+    let mut source = LabelSource::open(
+        snapshot,
+        scope,
+        kind,
+        label,
+        progress,
+        limits,
+        IndexLifecycleScanTuning::default(),
+    )
+    .await
+    .expect("the label source opens")?;
     let mut ids = Vec::new();
     loop {
         match source.next().await.expect("the label source reads") {
@@ -140,7 +148,7 @@ async fn a_label_without_members_or_ids_left_has_nothing_to_read() {
     .await
     .is_none());
     assert!(matches!(
-        LabelSource::open(&read, scope, node, "User", &progress(scope, node, Some(300), 299), limits).await,
+        LabelSource::open(&read, scope, node, "User", &progress(scope, node, Some(300), 299), limits, IndexLifecycleScanTuning::default()).await,
         Err(HelixDbError::IndexCatalogCorruption(reason)) if reason.contains("exceeds")
     ));
 }
@@ -232,6 +240,7 @@ async fn admit(
         "User",
         progress,
         limits,
+        IndexLifecycleScanTuning::default(),
     )
     .await
     .expect("the label source opens")
@@ -250,7 +259,7 @@ async fn admit(
         ids: admitted,
         bytes: admitted_bytes,
         largest,
-        read: source.read_bytes,
+        read: source.read.bytes,
     }
 }
 
@@ -428,7 +437,8 @@ async fn edge_builds_resume_after_a_retired_pair_key_cursor() {
             cursor: Some(legacy.clone()),
             ..progress(scope, node, None, 8)
         },
-        limits(1024, 1 << 20)
+        limits(1024, 1 << 20),
+        IndexLifecycleScanTuning::default(),
     )
     .await
     .is_err());
@@ -442,7 +452,8 @@ async fn edge_builds_resume_after_a_retired_pair_key_cursor() {
             cursor: None,
             counters: OperationCounters::default(),
         },
-        limits(1024, 1 << 20)
+        limits(1024, 1 << 20),
+        IndexLifecycleScanTuning::default(),
     )
     .await
     .is_err());
@@ -583,11 +594,177 @@ async fn a_corrupt_label_bitmap_fails_the_step() {
                 node,
                 "User",
                 &progress(scope, node, None, 1),
-                limits(1024, 1 << 20)
+                limits(1024, 1 << 20),
+                IndexLifecycleScanTuning::default(),
             )
             .await
             .is_err(),
             "{stage:?}"
         );
     }
+}
+
+/// Whether a source opened on `progress` scans its ids' key range rather
+/// than reading them by point.
+async fn scans_range(
+    snapshot: &DbTransaction,
+    kind: IndexElementKind,
+    progress: &SourceScanProgress,
+    limits: SearchIndexBatchLimits,
+) -> bool {
+    let source = LabelSource::open(
+        snapshot,
+        DataScope::LegacyUnscoped,
+        kind,
+        "User",
+        progress,
+        limits,
+        IndexLifecycleScanTuning::default(),
+    )
+    .await
+    .expect("the label source opens")
+    .expect("members remain");
+    matches!(source.reads, Reads::Range(_))
+}
+
+/// A step whose ids fill at least half their key range scans it, passing the
+/// rows of other labels and the ids without rows; a sparser one reads its
+/// ids by point. Steps of both kinds return every member's row once, in id
+/// order, and each pauses after the last id it read or passed.
+#[tokio::test]
+async fn dense_steps_scan_their_range_and_sparse_steps_read_points() {
+    let db = test_db("label-source-range").await;
+    let scope = DataScope::LegacyUnscoped;
+    let node = IndexElementKind::Node;
+    // Two of every three ids below 600 are members, every seventh of them
+    // without a row; above it, one id in ten.
+    let member = |id: u64| if id < 600 { id % 3 != 2 } else { id % 10 == 0 };
+    let mut expected = Vec::new();
+    for id in 0..1200 {
+        match (member(id), id % 7 == 0) {
+            (false, _) => testing::put_source_row(&db, scope, node, id, &row("Other", 0)).await,
+            (true, true) => {
+                let transaction = db
+                    .begin(IsolationLevel::Snapshot)
+                    .await
+                    .expect("write begins");
+                testing::stage_member(&transaction, scope, node, "User", id).await;
+                transaction.commit().await.expect("member commits");
+            }
+            (true, false) => {
+                testing::put_source_row(&db, scope, node, id, &row("User", 0)).await;
+                expected.push(id);
+            }
+        }
+    }
+    let read = snapshot(&db).await;
+    let limits = limits(50, 1 << 20);
+    assert!(scans_range(&read, node, &progress(scope, node, None, 1199), limits).await);
+    assert!(!scans_range(&read, node, &progress(scope, node, Some(599), 1199), limits).await);
+    let (mut after, mut read_ids) = (None, Vec::new());
+    while let Some((ids, paused)) = step(
+        &read,
+        node,
+        "User",
+        &progress(scope, node, after, 1199),
+        limits,
+    )
+    .await
+    {
+        assert!(
+            ids.last()
+                .is_none_or(|last| paused.is_none_or(|paused| *last <= paused)),
+            "a step pauses at or after its last row"
+        );
+        read_ids.extend(ids);
+        let Some(paused) = paused else {
+            break;
+        };
+        assert!(
+            after.is_none_or(|after| paused > after),
+            "every step advances"
+        );
+        after = Some(paused);
+    }
+    assert_eq!(read_ids, expected);
+}
+
+/// A row of another label that takes a scanning step past its byte limit
+/// ends the step, and the next step's range starts after it, so it is never
+/// read again. Retired `[from][to]` edge rows in an edge range are passed.
+#[tokio::test]
+async fn rows_of_other_labels_past_the_limit_are_read_once() {
+    let db = test_db("label-source-range-large-other").await;
+    let scope = DataScope::LegacyUnscoped;
+    let node = IndexElementKind::Node;
+    for id in 0..10 {
+        let row = match id {
+            5 => row("Other", 64 << 10),
+            _ => row("User", 0),
+        };
+        testing::put_source_row(&db, scope, node, id, &row).await;
+    }
+    let read = snapshot(&db).await;
+    let limits = limits(1024, 4096);
+    assert!(scans_range(&read, node, &progress(scope, node, None, 9), limits).await);
+    assert_eq!(
+        step(&read, node, "User", &progress(scope, node, None, 9), limits).await,
+        Some((vec![0, 1, 2, 3, 4], Some(4)))
+    );
+    let mut source = LabelSource::open(
+        &read,
+        scope,
+        node,
+        "User",
+        &progress(scope, node, Some(4), 9),
+        limits,
+        IndexLifecycleScanTuning::default(),
+    )
+    .await
+    .expect("the label source opens")
+    .expect("members remain");
+    let mut ids = Vec::new();
+    while let LabelRead::Row(row) = source.next().await.expect("the label source reads") {
+        ids.push(row.entity_id.get());
+    }
+    assert_eq!(ids, [6, 7, 8, 9]);
+    assert!(source.read.bytes < 4096, "{} read", source.read.bytes);
+
+    let edge = IndexElementKind::Edge;
+    for id in 3..9 {
+        testing::put_source_row(&db, scope, edge, id, &row("FOLLOWS", 0)).await;
+    }
+    db.put(
+        DataKey::Data {
+            scope,
+            kind: DataKeyKind::EdgePropertyPair(LegacyEdgePropertyPairKey::new(5, 9)),
+        }
+        .to_bytes(),
+        crate::encoding::v2::values::property::encode_properties(&row("FOLLOWS", 0)),
+    )
+    .await
+    .expect("retired pair row writes");
+    let read = snapshot(&db).await;
+    let mut source = LabelSource::open(
+        &read,
+        scope,
+        edge,
+        "FOLLOWS",
+        &progress(scope, edge, None, 8),
+        limits,
+        IndexLifecycleScanTuning::default(),
+    )
+    .await
+    .expect("the label source opens")
+    .expect("members remain");
+    assert!(matches!(source.reads, Reads::Range(_)));
+    let mut ids = Vec::new();
+    let end = loop {
+        match source.next().await.expect("the label source reads") {
+            LabelRead::Row(row) => ids.push(row.entity_id.get()),
+            end => break end,
+        }
+    };
+    assert_eq!(ids, [3, 4, 5, 6, 7, 8]);
+    assert!(matches!(end, LabelRead::Exhausted));
 }

@@ -2021,13 +2021,15 @@ impl HelixDB {
         )
         .expect("secondary output ceiling is a valid family batch limit");
         let secondary_driver: Arc<dyn index_lifecycle::outbox::IndexOperationDriver> = Arc::new(
-            index_lifecycle::secondary::SecondaryIndexDriver::new(Arc::clone(&index_scope_gates)),
+            index_lifecycle::secondary::SecondaryIndexDriver::new(Arc::clone(&index_scope_gates))
+                .with_scan_tuning(lifecycle_throughput.scan()),
         );
         let vector_driver = index_lifecycle::vector::VectorIndexDriver::new(
             Arc::clone(&index_scope_gates),
             Arc::clone(&vector_memory.registry),
             Arc::clone(&vector_memory.simhasher_registry),
         )
+        .with_scan_tuning(lifecycle_throughput.scan())
         .with_batch_reads(batch_reads::BatchReads::for_block_cache(
             slate_db_cache.as_ref(),
         ))

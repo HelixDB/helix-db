@@ -356,6 +356,7 @@ async fn an_edge_build_resumes_after_a_retired_pair_key_cursor() {
             secondary,
             &progress,
             limits,
+            IndexLifecycleScanTuning::default(),
         )
         .await
         .expect("the step stages");
@@ -686,6 +687,7 @@ async fn scan_progress_resumes_across_binaries_in_both_directions() {
         secondary,
         &older,
         limits,
+        IndexLifecycleScanTuning::default(),
     )
     .await
     .expect("the resumed step stages");

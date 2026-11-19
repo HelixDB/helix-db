@@ -32,7 +32,7 @@ use rand::{rngs::StdRng, SeedableRng};
 use sha2::{Digest, Sha256};
 use slatedb::{Db, DbTransaction, IsolationLevel};
 
-use crate::config::{SearchIndexBackfillLimits, SearchIndexBatchLimits};
+use crate::config::{IndexLifecycleScanTuning, SearchIndexBackfillLimits, SearchIndexBatchLimits};
 use crate::encoding::v2::keys::indexes::vector::{
     VectorIndexMetadataKey, VectorKey, VectorStorageLane,
 };
@@ -87,6 +87,7 @@ pub(crate) struct VectorIndexDriver {
     scope_gates: Arc<crate::index_lifecycle::IndexScopeGates>,
     cache_registry: Arc<vector::VectorCacheRegistry>,
     simhasher_registry: Arc<vector::SimHasherRegistry>,
+    scan_tuning: IndexLifecycleScanTuning,
     /// How build handles fetch HNSW row batches, fixed by the database's cache mode.
     batch_reads: crate::batch_reads::BatchReads,
     /// Planning budget shared with queue publication.
@@ -997,11 +998,18 @@ impl VectorIndexDriver {
             scope_gates,
             cache_registry,
             simhasher_registry,
+            scan_tuning: IndexLifecycleScanTuning::default(),
             batch_reads: crate::batch_reads::BatchReads::Single,
             build_cache: Arc::new(VectorBuildCache::new(
                 SearchIndexBackfillLimits::default().vector_build_cache_bytes(),
             )),
         }
+    }
+
+    /// Applies runtime source-scan prefetching without admitting blocks to cache.
+    pub(crate) const fn with_scan_tuning(mut self, scan_tuning: IndexLifecycleScanTuning) -> Self {
+        self.scan_tuning = scan_tuning;
+        self
     }
 
     /// Applies the database's row-batch fetch policy to build handles.
@@ -1122,6 +1130,7 @@ impl IndexOperationDriver for VectorIndexDriver {
                             definition,
                             stage,
                             limits,
+                            self.scan_tuning,
                             Arc::clone(&self.simhasher_registry),
                             self.batch_reads,
                             &self.build_cache,
@@ -1138,6 +1147,7 @@ impl IndexOperationDriver for VectorIndexDriver {
                             definition,
                             stage,
                             limits,
+                            self.scan_tuning,
                             Arc::clone(&self.simhasher_registry),
                             self.batch_reads,
                             &self.build_cache,
@@ -1154,6 +1164,7 @@ impl IndexOperationDriver for VectorIndexDriver {
                             definition,
                             stage,
                             limits,
+                            self.scan_tuning,
                             Arc::clone(&self.simhasher_registry),
                             self.batch_reads,
                             &self.build_cache,
@@ -2076,6 +2087,7 @@ async fn step_build<D: Distance>(
     definition: &ValidatedVectorIndexDefinition,
     stage: &VectorBuildStage,
     limits: SearchIndexBatchLimits,
+    scan_tuning: IndexLifecycleScanTuning,
     simhasher_registry: Arc<vector::SimHasherRegistry>,
     batch_reads: crate::batch_reads::BatchReads,
     build_cache: &VectorBuildCache,
@@ -2122,6 +2134,7 @@ async fn step_build<D: Distance>(
                 definition,
                 progress,
                 limits,
+                scan_tuning,
                 simhasher_registry,
                 batch_reads,
                 &mut session,
@@ -2773,6 +2786,7 @@ async fn scan_source<D: Distance>(
     definition: &ValidatedVectorIndexDefinition,
     progress: &SourceScanProgress,
     limits: SearchIndexBatchLimits,
+    scan_tuning: IndexLifecycleScanTuning,
     simhasher_registry: Arc<vector::SimHasherRegistry>,
     batch_reads: crate::batch_reads::BatchReads,
     build_session: &mut CheckedOutSession<D>,
@@ -2789,6 +2803,7 @@ async fn scan_source<D: Distance>(
         definition.label().as_str(),
         progress,
         limits,
+        scan_tuning,
     )
     .await?
     else {

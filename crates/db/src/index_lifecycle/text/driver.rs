@@ -800,6 +800,7 @@ impl IndexOperationDriver for TextIndexDriver {
                     progress,
                     limits,
                     self.document_limits,
+                    self.scan_tuning,
                 )
                 .await
             }
@@ -2491,7 +2492,7 @@ fn authoritative_property_key(scope: DataScope, entity: IndexEntity) -> Bytes {
 /// publication share yet still exceed this transaction.
 #[allow(
     clippy::too_many_arguments,
-    reason = "a source scan binds its snapshot, transaction, operation, record, cursor, and both budgets"
+    reason = "a source scan binds its snapshot, transaction, operation, record, cursor, both budgets, and tuning"
 )]
 async fn scan_source(
     source: &DbTransaction,
@@ -2502,6 +2503,7 @@ async fn scan_source(
     progress: &SourceScanProgress,
     limits: SearchIndexBatchLimits,
     document_limits: ActiveTextMutationLimits,
+    scan_tuning: IndexLifecycleScanTuning,
 ) -> Result<IndexOperationStepResult> {
     let ValidatedDynamicIndexDefinition::Text(definition) = record.definition() else {
         return Err(corruption("text source scan loaded another family"));
@@ -2513,6 +2515,7 @@ async fn scan_source(
         definition.label().as_str(),
         progress,
         limits,
+        scan_tuning,
     )
     .await?
     else {
