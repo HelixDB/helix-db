@@ -1506,18 +1506,31 @@ mod tests {
                 return;
             }
             self.store.uploads.send_replace(WalUploads::Held);
-            let current = outbox::read_operation(&self.db, scope, operation.operation_id())
+            let current = outbox::read_operation(self.db.as_ref(), scope, operation.operation_id())
                 .await
                 .unwrap()
                 .expect("the operation is retained");
             let superseding = current
                 .progressed(activate_progress(entities), ClaimContinuation::Retain)
                 .unwrap();
+            // The record and its queue pointer, as the superseding write
+            // leaves them.
+            let mut batch = slatedb::WriteBatch::new();
+            batch.put(
+                outbox::scoped_operation_key(scope, operation.operation_id()),
+                crate::encoding::v2::values::encode_operation_record(&superseding),
+            );
+            batch.put(
+                outbox::global_operation_key(operation.operation_id()),
+                crate::encoding::v2::values::encode_metadata_value(
+                    &crate::index_lifecycle::IndexV2MetadataValue::OperationQueuePointer(
+                        outbox::pointer_for(scope, &superseding),
+                    ),
+                ),
+            );
             self.db
-                .put_with_options(
-                    outbox::scoped_operation_key(scope, operation.operation_id()),
-                    crate::encoding::v2::values::encode_operation_record(&superseding),
-                    &slatedb::config::PutOptions::default(),
+                .write_with_options(
+                    batch,
                     &slatedb::config::WriteOptions {
                         await_durable: false,
                         ..slatedb::config::WriteOptions::default()

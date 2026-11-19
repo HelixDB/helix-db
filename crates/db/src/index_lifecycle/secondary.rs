@@ -12018,12 +12018,13 @@ mod tests {
     #[tokio::test]
     async fn a_gated_drain_holds_one_reach_of_a_backlog_far_beyond_it() {
         let reach = GATED_BACKLOG_BATCHES;
-        let entities = u64::try_from(9 * reach).expect("small count");
-        let stages: [(&str, fn(&SecondaryBuildStage) -> bool); 2] = [
-            ("secondary-gated-reach-validation", is_validation),
+        // Three full reaches and a remainder.
+        let entities = u64::try_from(3 * (reach + 1) + 1).expect("small count");
+        let validation = is_validation as fn(&SecondaryBuildStage) -> bool;
+        for (name, reached) in [
+            ("secondary-gated-reach-validation", validation),
             ("secondary-gated-reach-activation", is_activation),
-        ];
-        for (name, reached) in stages {
+        ] {
             let definition = validated(
                 SecondaryIndexDefinition::node_equality("User", "email")
                     .expect("node equality definition"),
@@ -12073,7 +12074,9 @@ mod tests {
                         assert!(driver.activation_drains_again(&operation, None));
                     }
                 }
-                stage => panic!("{name}: unexpected stage {stage:?}"),
+                stage @ (SecondaryBuildStage::Scan(_) | SecondaryBuildStage::CatchUp(_)) => {
+                    panic!("{name}: unexpected stage {stage:?}")
+                }
             }
             let deltas =
                 || generation_rows(&db, scope, RecordKind::BuildDelta, index_id, generation);
@@ -12461,38 +12464,52 @@ mod tests {
         let deltas = delta_keys(
             generation_rows(&db, scope, RecordKind::BuildDelta, index_id, generation).await,
         );
-        let (counters, drained_through) = drain_backlog_under_gate(
-            &db,
+        let ledgers = driver.scope_gates.delta_ledgers();
+        let delta_generation = delta_ledger::DeltaGeneration {
             scope,
-            &operation,
-            OperationCounters::default(),
-            one_entity_limits(),
-            AppliedStateDisposition::Release,
-            &deltas,
-        )
-        .await
-        .expect("the gated drains commit");
+            index_id,
+            generation,
+        };
+        let (db_ref, operation_ref) = (&db, &operation);
+        let drain = |counters| async move {
+            let backlog = ledgers
+                .observe(
+                    db_ref,
+                    delta_generation,
+                    one_entity_limits(),
+                    delta_ledger::Reach::Batches(GATED_BACKLOG_BATCHES),
+                )
+                .await
+                .expect("the backlog is observed");
+            drain_backlog_under_gate(
+                db_ref,
+                ledgers,
+                delta_generation,
+                operation_ref,
+                counters,
+                one_entity_limits(),
+                AppliedStateDisposition::Release,
+                backlog,
+            )
+            .await
+            .expect("the gated drains commit")
+        };
+        let (counters, drained_through, observed) = drain(OperationCounters::default()).await;
         assert_eq!(counters.entities, 3, "every delta is reconciled");
         assert_eq!(drained_through, Some(delta_key(3)));
+        assert!(matches!(&observed, GatedDeltas::Every(keys) if *keys == deltas));
         assert!(
             generation_rows(&db, scope, RecordKind::BuildDelta, index_id, generation)
                 .await
                 .is_empty()
         );
+        let (again, resume, observed) = drain(counters).await;
         assert_eq!(
-            drain_backlog_under_gate(
-                &db,
-                scope,
-                &operation,
-                counters,
-                one_entity_limits(),
-                AppliedStateDisposition::Release,
-                &deltas,
-            )
-            .await
-            .expect("reconciled deltas drain nothing"),
-            (counters, None)
+            (again, resume),
+            (counters, None),
+            "reconciled deltas drain nothing"
         );
+        assert!(matches!(observed, GatedDeltas::Every(keys) if keys.is_empty()));
         // A delta before the resume key is one the fence rules out; the
         // step's drain never reaches it, which shows where it starts, and
         // drains the one after it.
