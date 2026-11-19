@@ -718,6 +718,76 @@ fn static_types_follow_datetime_values() {
             r::ValueType::Boolean
         );
     }
+    // So does an IN member, written out or a literal list, or a simple CASE's
+    // WHEN value against its subject, in either order; a member or WHEN value
+    // of unknown type, or a list of unknown members, runs.
+    let text = || E::Literal(V::String("x".into()));
+    let clock = || E::Function(F::DateTime, vec![]);
+    let member = |value: E, list: E| E::Binary(r::Binary::In, Box::new(value), Box::new(list));
+    let case = |operand: E, comparisons: Vec<E>| {
+        E::SimpleCase(Box::new(r::SimpleCase {
+            operand,
+            branches: helix_planner::ir::AtLeast::try_from_vec(
+                comparisons
+                    .into_iter()
+                    .map(|comparison| (comparison, E::Literal(V::Integer(1))))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap(),
+            otherwise: E::Literal(V::Null),
+        }))
+    };
+    for expression in [
+        member(clock(), E::List(vec![E::Literal(V::Integer(1)), text()])),
+        member(text(), E::List(vec![clock()])),
+        member(
+            clock(),
+            E::Literal(V::List(vec![V::Null, V::String("x".into())])),
+        ),
+        member(text(), E::Literal(V::List(vec![V::DateTime(1)]))),
+        case(clock(), vec![E::Literal(V::Integer(1)), text()]),
+        case(text(), vec![clock()]),
+    ] {
+        let error = infer(expression.clone()).unwrap_err();
+        assert_eq!(
+            (error.detail.as_str(), error.phase),
+            (r::detail::DATETIME_TEXT_COMPARISON, r::ErrorPhase::Compile),
+            "{expression:?}"
+        );
+    }
+    for (expression, expected) in [
+        (
+            member(clock(), E::List(vec![E::Parameter("p".into()), clock()])),
+            r::ValueType::Boolean,
+        ),
+        (
+            member(clock(), E::Parameter("p".into())),
+            r::ValueType::Boolean,
+        ),
+        (
+            member(text(), E::Literal(V::List(vec![V::Null]))),
+            r::ValueType::Boolean,
+        ),
+        (
+            case(clock(), vec![E::Parameter("p".into())]),
+            r::ValueType::Integer,
+        ),
+        (
+            case(E::Parameter("p".into()), vec![text(), clock()]),
+            r::ValueType::Integer,
+        ),
+    ] {
+        assert_eq!(
+            infer(expression.clone()).unwrap(),
+            expected,
+            "{expression:?}"
+        );
+    }
+    // A non-list IN operand of known type is still rejected as before.
+    assert_eq!(
+        infer(member(clock(), text())).unwrap_err().detail,
+        r::detail::INVALID_ARGUMENT_TYPE
+    );
     // Conversions that are null where they cannot convert accept any type.
     for (function, expected) in [
         (F::ToStringOrNull, r::ValueType::String),
