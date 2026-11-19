@@ -5420,3 +5420,6 @@ mod v1_contracts;
 #[cfg(test)]
 #[path = "../../tests/unit/migrations_contracts.rs"]
 mod external_contracts;
+#[cfg(all(test, feature = "index-lifecycle-testing"))]
+#[path = "../../tests/unit/index_builds_beside_migrations.rs"]
+mod lifecycle_testing_tests;
