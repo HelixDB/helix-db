@@ -14,6 +14,29 @@ use slatedb::object_store::ObjectStore;
 
 use super::*;
 use crate::config::{self, DbConfig, SecondaryIndexDefinition};
+use crate::encoding::indexes::range::RangeIndexDirection;
+use crate::encoding::v2::keys::{ManagedIndexKey, ScopedKey, SecondaryEntryLane};
+use crate::encoding::v2::values::property::range_index_value::{
+    project_range_value, RangeValueProjection,
+};
+use crate::index_lifecycle::{ActiveIndexHandle, ValidatedSecondaryIndexDefinition};
+
+tokio::task_local! {
+    /// Holds a conversion batch between its reads and its write: the batch
+    /// signals the first notify, then waits for the second.
+    static BEFORE_CONVERSION: (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
+}
+
+/// Pauses a conversion batch taken inside a [`BEFORE_CONVERSION`] scope.
+pub(super) async fn pause_before_conversion() {
+    let Ok((reached, resume)) =
+        BEFORE_CONVERSION.try_with(|(reached, resume)| (Arc::clone(reached), Arc::clone(resume)))
+    else {
+        return;
+    };
+    reached.notify_one();
+    resume.notified().await;
+}
 
 fn config(batch_rows: usize, worker: config::MigrationWorkerMode) -> DbConfig {
     DbConfig::new().with_migration_tuning(
@@ -345,8 +368,10 @@ async fn converts_every_tenant_scope_independently() {
         .all(|row| row["at"] != json!("2026-01-01T00:00:00.000Z")));
 }
 
+/// A collision in a unique index keeps only the colliding value a string: the
+/// row's other convertible properties still convert.
 #[tokio::test]
-async fn a_unique_collision_keeps_only_the_colliding_row_as_a_string() {
+async fn a_unique_collision_keeps_only_the_colliding_value_as_a_string() {
     let db = open(1024).await;
     db.install_index_for_tests(
         SecondaryIndexDefinition::node_unique_equality("Event", "at")
@@ -369,7 +394,11 @@ async fn a_unique_collision_keeps_only_the_colliding_row_as_a_string() {
         &db,
         u,
         "Event",
-        vec![("name", s("b")), ("at", s("2026-01-01T01:00:00+01:00"))],
+        vec![
+            ("name", s("b")),
+            ("at", s("2026-01-01T01:00:00+01:00")),
+            ("until", s("2026-03-01T00:00:00Z")),
+        ],
     )
     .await;
     add_node(
@@ -382,13 +411,13 @@ async fn a_unique_collision_keeps_only_the_colliding_row_as_a_string() {
 
     let report = run_to_completion(&db).await;
 
-    assert_eq!(report.converted_values, 1, "{report:?}");
+    assert_eq!(report.converted_values, 2, "{report:?}");
     assert_eq!(report.unique_conflicts, 1);
     assert_eq!(
         values(&db, u, "Event").await,
         [
             json!({ "name": "a", "at": "2026-01-01T00:00:00.000Z" }),
-            json!({ "name": "b", "at": "2026-01-01T01:00:00+01:00" }),
+            json!({ "name": "b", "at": "2026-01-01T01:00:00+01:00", "until": "2026-03-01T00:00:00.000Z" }),
             json!({ "name": "c", "at": "2026-02-01T00:00:00.000Z" }),
         ]
     );
@@ -719,5 +748,428 @@ async fn cypher_and_sql_read_converted_rows_as_datetimes() {
         .await
         .unwrap();
     assert_eq!(sql.rows, vec![vec![json!("d")], vec![json!("a")]]);
+    db.close().await.unwrap();
+}
+
+/// `(id, value)` of every unscoped `Event` storing `property`, read from the
+/// rows.
+async fn stored(db: &HelixDB, property: &str) -> Vec<(u64, PropertyValue)> {
+    let HelixStorage::Writer(writer) = db.storage() else {
+        panic!("writer");
+    };
+    read_rows(
+        writer.db(),
+        DataScope::LegacyUnscoped,
+        Element::Node,
+        None,
+        MigrationTuning::default(),
+    )
+    .await
+    .unwrap()
+    .iter()
+    .filter_map(|(key, value)| {
+        let (id, row) = decode_row(DataScope::LegacyUnscoped, Element::Node, key, value)
+            .unwrap()
+            .unwrap();
+        if label_of(&row) != Some("Event") {
+            return None;
+        }
+        row.into_iter()
+            .find(|stored| stored.name == property)
+            .map(|stored| (id, stored.value))
+    })
+    .collect()
+}
+
+/// The raw rows of `Event.{property}`'s equality and range indexes, read
+/// without the per-row check a query applies to index hits, hold exactly what
+/// a scan of the rows does: each probed value's equality row holds the ids
+/// storing that value and no other, and the range index holds one entry per
+/// stored value.
+async fn assert_indexes_match_rows(db: &HelixDB, property: &str, probes: &[PropertyValue]) {
+    let HelixStorage::Writer(writer) = db.storage() else {
+        panic!("writer");
+    };
+    let store = writer.db();
+    let stored = stored(db, property).await;
+    let handles = db.active_index_handles_loaded(DataScope::LegacyUnscoped);
+    let handle = |range: bool| -> &ActiveIndexHandle {
+        handles
+            .iter()
+            .find(|handle| {
+                handle
+                    .secondary_definition()
+                    .is_some_and(|definition| definition.property().as_str() == property)
+                    && matches!(
+                        (handle.secondary_definition(), range),
+                        (
+                            Some(ValidatedSecondaryIndexDefinition::NodeEquality { .. }),
+                            false
+                        ) | (
+                            Some(ValidatedSecondaryIndexDefinition::NodeRange { .. }),
+                            true
+                        )
+                    )
+            })
+            .expect("the index is active")
+    };
+
+    for probe in probes {
+        let expected = stored
+            .iter()
+            .filter(|(_, value)| value == probe)
+            .map(|(id, _)| *id)
+            .collect::<roaring::RoaringTreemap>();
+        let indexed = crate::index_lifecycle::secondary::lookup_active_equality_point_literal(
+            store,
+            handle(false),
+            probe,
+        )
+        .await
+        .unwrap();
+        assert_eq!(indexed, expected, "{property} {probe:?}");
+    }
+
+    let range = handle(true);
+    let mut rows = store
+        .scan_prefix(
+            ManagedIndexKey::data_prefix(
+                DataScope::LegacyUnscoped,
+                ScopedKey::secondary_lane_prefix(
+                    range.index_id(),
+                    range.generation(),
+                    SecondaryEntryLane::NodeRangeAscending,
+                ),
+            ),
+            ..,
+        )
+        .await
+        .unwrap();
+    let mut indexed = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        let ManagedIndexKey::Data {
+            kind: ScopedKey::SecondaryEntry(entry),
+            ..
+        } = ManagedIndexKey::parse_from_slice(DataScope::LegacyUnscoped, &row.key).unwrap()
+        else {
+            panic!("the range lane holds secondary entries");
+        };
+        indexed.push((
+            entry.entity_id().unwrap().get(),
+            entry.range_value().unwrap().encoded().to_vec(),
+        ));
+    }
+    indexed.sort();
+    let mut expected = stored
+        .iter()
+        .map(|(id, value)| {
+            let RangeValueProjection::Indexed(value) =
+                project_range_value(value, RangeIndexDirection::Asc)
+            else {
+                panic!("{value:?} is range indexed");
+            };
+            (*id, value.encoded().to_vec())
+        })
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(indexed, expected, "{property}");
+}
+
+/// Converting a property an equality and a range index cover leaves no
+/// string entry behind: afterwards the old strings find nothing, the
+/// datetimes find every row, and each index holds what a scan of the rows does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn conversion_leaves_no_string_entry_in_equality_or_range_indexes() {
+    let db = open(2).await;
+    for definition in [
+        SecondaryIndexDefinition::node_equality("Event", "at"),
+        SecondaryIndexDefinition::node_range("Event", "at"),
+    ] {
+        db.install_index_for_tests(definition.unwrap().try_into().unwrap())
+            .await
+            .unwrap();
+    }
+    let u = DataScope::LegacyUnscoped;
+    // Two spellings of one instant, which one datetime written as a literal
+    // shares too.
+    let strings = [
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T01:00:00+01:00",
+        "2026-06-01T05:00:00+09:00",
+        "2025-12-31T23:59:59.999Z",
+        "2026-03-01T00:00:00.250-05:00",
+    ];
+    for (index, at) in strings.iter().enumerate() {
+        add_node(
+            &db,
+            u,
+            "Event",
+            vec![("name", s(&format!("e{index}"))), ("at", s(at))],
+        )
+        .await;
+    }
+    add_node(
+        &db,
+        u,
+        "Event",
+        vec![("name", s("typed")), ("at", dt("2026-01-01T00:00:00Z"))],
+    )
+    .await;
+    let probes = strings
+        .iter()
+        .flat_map(|at| {
+            [
+                PropertyValue::String((*at).to_owned()),
+                PropertyValue::DateTime(parse_millis(at).unwrap().unwrap()),
+            ]
+        })
+        .collect::<Vec<_>>();
+    // Before the job the indexes hold the strings, which this check sees.
+    assert_indexes_match_rows(&db, "at", &probes).await;
+    assert_eq!(stored(&db, "at").await.len(), strings.len() + 1);
+
+    let report = run_to_completion(&db).await;
+    assert_eq!(report.converted_values, 5, "{report:?}");
+    assert!(stored(&db, "at")
+        .await
+        .iter()
+        .all(|(_, value)| matches!(value, PropertyValue::DateTime(_))));
+    assert_indexes_match_rows(&db, "at", &probes).await;
+
+    // Through queries too: the strings find nothing, the datetimes find
+    // every row.
+    let hits = |predicate: Predicate, at: Option<&str>| {
+        let db = &db;
+        let at = at.map(str::to_owned);
+        async move {
+            let request = QueryRequest::read(
+                read_batch()
+                    .var_as(
+                        "hits",
+                        g().n_with_label_where("Event", predicate)
+                            .values(vec!["name"]),
+                    )
+                    .returning(["hits"]),
+            );
+            let request = match at {
+                Some(at) => request
+                    .with_typed_parameter("at", QueryParamType::DateTime, QueryValue::String(at))
+                    .unwrap(),
+                None => request,
+            };
+            let response = db.query(request).await.unwrap();
+            let mut names = response["hits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|hit| hit["name"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        }
+    };
+    for at in strings {
+        assert!(hits(Predicate::eq("at", at), None).await.is_empty(), "{at}");
+    }
+    assert_eq!(
+        hits(
+            Predicate::eq_param("at", "at"),
+            Some("2026-01-01T00:00:00Z")
+        )
+        .await,
+        ["e0", "e1", "typed"]
+    );
+    assert_eq!(
+        hits(
+            Predicate::gt_param("at", "at"),
+            Some("2000-01-01T00:00:00Z")
+        )
+        .await,
+        ["e0", "e1", "e2", "e3", "e4", "typed"]
+    );
+    db.close().await.unwrap();
+}
+
+/// A user write committed between a conversion batch's reads and its write
+/// wins: the batch leaves the property it set to a new string, set to a new
+/// datetime, or removed exactly as the user left it, and still converts the
+/// row's other convertible properties. A property the job skipped stays as
+/// stored on every row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_between_a_batchs_reads_and_its_write_wins_and_loses_nothing() {
+    let db = open(1024).await;
+    let u = DataScope::LegacyUnscoped;
+    for name in ["string", "datetime", "removed", "untouched"] {
+        add_node(
+            &db,
+            u,
+            "Event",
+            vec![
+                ("name", s(name)),
+                ("at", s("2026-01-01T00:00:00Z")),
+                ("until", s("2026-02-01T00:00:00+01:00")),
+                ("note", s("2026-03-01T00:00:00Z")),
+            ],
+        )
+        .await;
+    }
+    // One plain string leaves every `note` as stored.
+    add_node(
+        &db,
+        u,
+        "Event",
+        vec![("name", s("plain")), ("note", s("soon"))],
+    )
+    .await;
+
+    // Detect both elements, up to the first conversion batch.
+    let HelixStorage::Writer(writer) = db.storage() else {
+        panic!("writer");
+    };
+    while !matches!(
+        load(writer.db()).await.unwrap(),
+        Some(Job::Running {
+            phase: Phase::Convert { .. },
+            ..
+        })
+    ) {
+        assert!(process_once(&db, tuning(&db)).await.unwrap());
+    }
+
+    // The batch reads every row, then waits while the user writes `at`.
+    let pause = (
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(tokio::sync::Notify::new()),
+    );
+    let (reached, resume) = (Arc::clone(&pause.0), Arc::clone(&pause.1));
+    let event = |name: &str| g().n_with_label_where("Event", Predicate::eq("name", name));
+    let (stepped, ()) = tokio::join!(
+        BEFORE_CONVERSION.scope(pause, process_once(&db, tuning(&db))),
+        async {
+            reached.notified().await;
+            db.query(QueryRequest::write(
+                write_batch()
+                    .var_as(
+                        "string",
+                        event("string").set_property("at", s("2027-01-01T00:00:00Z")),
+                    )
+                    .var_as(
+                        "datetime",
+                        event("datetime").set_property("at", dt("2027-02-01T00:00:00Z")),
+                    )
+                    .var_as("removed", event("removed").remove_property("at")),
+            ))
+            .await
+            .unwrap();
+            resume.notify_one();
+        }
+    );
+    assert!(stepped.unwrap());
+
+    let report = run_to_completion(&db).await;
+    // `until` on every row, and `at` only on the row the user left alone.
+    assert_eq!(report.converted_values, 5, "{report:?}");
+    assert_eq!(
+        report
+            .skipped_properties
+            .iter()
+            .map(|skip| (skip.property.name.as_str(), skip.reason))
+            .collect::<Vec<_>>(),
+        [("note", SkipReason::NotRfc3339)]
+    );
+    let until = "2026-01-31T23:00:00.000Z";
+    let note = "2026-03-01T00:00:00Z";
+    assert_eq!(
+        values(&db, u, "Event").await,
+        [
+            json!({ "name": "datetime", "at": "2027-02-01T00:00:00.000Z", "until": until, "note": note }),
+            json!({ "name": "plain", "note": "soon" }),
+            json!({ "name": "removed", "until": until, "note": note }),
+            json!({ "name": "string", "at": "2027-01-01T00:00:00Z", "until": until, "note": note }),
+            json!({ "name": "untouched", "at": "2026-01-01T00:00:00.000Z", "until": until, "note": note }),
+        ]
+    );
+    db.close().await.unwrap();
+}
+
+/// A row whose convertible properties are each covered by an equality and a
+/// range index converts every one in one batch, and each index ends holding
+/// exactly what a scan of the rows does: one write's index update never
+/// undoes or duplicates another's on the same row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn converting_several_indexed_properties_of_one_row_maintains_each_index() {
+    let db = open(2).await;
+    for property in ["at", "until"] {
+        for definition in [
+            SecondaryIndexDefinition::node_equality("Event", property),
+            SecondaryIndexDefinition::node_range("Event", property),
+        ] {
+            db.install_index_for_tests(definition.unwrap().try_into().unwrap())
+                .await
+                .unwrap();
+        }
+    }
+    let u = DataScope::LegacyUnscoped;
+    let rows = [
+        ("e0", "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"),
+        (
+            "e1",
+            "2026-01-01T01:00:00+01:00",
+            "2026-01-02T00:00:00.000Z",
+        ),
+        (
+            "e2",
+            "2026-06-01T05:00:00+09:00",
+            "2026-06-01T05:00:00+09:00",
+        ),
+    ];
+    for (name, at, until) in rows {
+        add_node(
+            &db,
+            u,
+            "Event",
+            vec![("name", s(name)), ("at", s(at)), ("until", s(until))],
+        )
+        .await;
+    }
+    // A typed `at` beside a string `until`: only `until` converts.
+    add_node(
+        &db,
+        u,
+        "Event",
+        vec![
+            ("name", s("typed")),
+            ("at", dt("2026-01-01T00:00:00Z")),
+            ("until", s("2026-01-02T00:00:00Z")),
+        ],
+    )
+    .await;
+    let probes = rows
+        .iter()
+        .flat_map(|(_, at, until)| [at, until])
+        .flat_map(|stored| {
+            [
+                PropertyValue::String((*stored).to_owned()),
+                PropertyValue::DateTime(parse_millis(stored).unwrap().unwrap()),
+            ]
+        })
+        .collect::<Vec<_>>();
+    for property in ["at", "until"] {
+        assert_indexes_match_rows(&db, property, &probes).await;
+    }
+
+    let report = run_to_completion(&db).await;
+    assert_eq!(report.converted_values, 7, "{report:?}");
+    for property in ["at", "until"] {
+        let stored = stored(&db, property).await;
+        assert_eq!(stored.len(), rows.len() + 1, "{property}");
+        assert!(
+            stored
+                .iter()
+                .all(|(_, value)| matches!(value, PropertyValue::DateTime(_))),
+            "{property}: {stored:?}"
+        );
+        assert_indexes_match_rows(&db, property, &probes).await;
+    }
     db.close().await.unwrap();
 }
