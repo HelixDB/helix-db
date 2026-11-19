@@ -219,6 +219,8 @@ impl LabelIdentityMigration {
 pub(crate) struct LabelCopySession {
     max_rows: usize,
     max_members: u64,
+    /// [`BATCH_BYTES`], or the writer's share of its unflushed budget if that
+    /// is smaller; each copy step sets it before it stages anything.
     max_bytes: usize,
     /// The current limits of a copy step: a conflict or a slow commit halves
     /// them, so a batch a hot row's writes keep hitting shrinks to that row
@@ -551,12 +553,13 @@ pub(crate) async fn copy_hash_label_rows_once(
             })
         })
         .transpose()?;
-    // No step stages more than its share of the writer's unflushed budget.
-    let step_bytes = session
-        .bytes
+    // No step stages more than its share of the writer's unflushed budget, so
+    // the step limit, and the progress log, never exceed it.
+    session.max_bytes = BATCH_BYTES
         .min(db.unflushed_bytes()?.max_unflushed_bytes / STEP_SHARE)
         .max(1);
-    let mut batch = CopyBatch::new(session, step_bytes);
+    session.bytes = session.bytes.min(session.max_bytes);
+    let mut batch = CopyBatch::new(session);
     // The scope whose exact edge labels this step read.
     let mut reloaded = None;
     let after = match &recorded {
@@ -708,7 +711,7 @@ struct CopyBatch {
 }
 
 impl CopyBatch {
-    fn new(session: &LabelCopySession, max_bytes: usize) -> Self {
+    fn new(session: &LabelCopySession) -> Self {
         Self {
             rows: Vec::new(),
             passed: 0,
@@ -716,7 +719,7 @@ impl CopyBatch {
             members: 0,
             max_rows: session.rows,
             max_members: session.members,
-            max_bytes,
+            max_bytes: session.bytes,
             progress: None,
             totals: LabelIdentityMigration::default(),
         }
