@@ -470,8 +470,22 @@ async fn an_oversized_row_of_the_label_still_blocks_the_build() {
 /// 25 reads them ([`crate::index_lifecycle::label_source`]): two ids in
 /// three fill more than half a step's key range, which it scans; one in
 /// three does not, and it reads its ids by point.
-const DENSITIES: [(&str, fn(u64) -> bool); 2] =
-    [("range", |id| id % 3 != 2), ("points", |id| id % 3 == 0)];
+#[derive(Debug, Clone, Copy)]
+enum Density {
+    Range,
+    Points,
+}
+
+impl Density {
+    const ALL: [Self; 2] = [Self::Range, Self::Points];
+
+    fn member(self, id: u64) -> bool {
+        match self {
+            Self::Range => id % 3 != 2,
+            Self::Points => id.is_multiple_of(3),
+        }
+    }
+}
 
 /// Writes during the scan move rows into and out of the label, delete them
 /// and create them at, below and above the bound; the build converges on
@@ -481,7 +495,7 @@ const DENSITIES: [(&str, fn(u64) -> bool); 2] =
 async fn writes_racing_the_scan_converge() {
     let scope = DataScope::LegacyUnscoped;
     let node = IndexElementKind::Node;
-    for (definition, (density, users)) in DENSITIES.into_iter().flat_map(|density| {
+    for (definition, density) in Density::ALL.into_iter().flat_map(|density| {
         [
             SecondaryIndexDefinition::node_equality("User", "email"),
             SecondaryIndexDefinition::node_unique_equality("User", "email"),
@@ -490,8 +504,8 @@ async fn writes_racing_the_scan_converge() {
         .map(|definition| (definition, density))
     }) {
         let definition = validated(definition.expect("definition"));
-        let db = test_db(&format!("label-source-racing-writes-{density}")).await;
-        let mut sources = seed(&db, 600, users).await;
+        let db = test_db(&format!("label-source-racing-writes-{density:?}")).await;
+        let mut sources = seed(&db, 600, |id| density.member(id)).await;
         let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 599).await;
         let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
         let mut claim_sequence = 1;
@@ -538,7 +552,7 @@ async fn writes_racing_the_scan_converge() {
                 | CommittedOperationStep::TransientFailure) => break end,
             }
         };
-        assert_eq!(end, CommittedOperationStep::Completed, "{density}");
+        assert_eq!(end, CommittedOperationStep::Completed, "{density:?}");
         assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources)
             .await;
         db.close().await.expect("database closes");
@@ -556,8 +570,8 @@ async fn a_lost_wal_tail_resumes_at_the_durable_cursor() {
 
     let scope = DataScope::LegacyUnscoped;
     let node = IndexElementKind::Node;
-    for (density, users) in DENSITIES {
-        let path = format!("label-source-lost-tail-{density}");
+    for density in Density::ALL {
+        let path = format!("label-source-lost-tail-{density:?}");
         let open = |store: &Arc<GatedWalStore>| {
             Db::builder(
                 path.clone(),
@@ -571,7 +585,7 @@ async fn a_lost_wal_tail_resumes_at_the_durable_cursor() {
         bootstrap_writer(&db)
             .await
             .expect("lost-tail database bootstraps");
-        let sources = seed(&db, 600, users).await;
+        let sources = seed(&db, 600, |id| density.member(id)).await;
         let definition = email_index();
         let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 599).await;
         let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
@@ -625,14 +639,14 @@ async fn a_lost_wal_tail_resumes_at_the_durable_cursor() {
             )
             .await
             .expect("a progressed step does not wait for its WAL upload");
-            assert_eq!(step, CommittedOperationStep::Progressed, "{density}");
+            assert_eq!(step, CommittedOperationStep::Progressed, "{density:?}");
         }
         assert_ne!(
             read_operation(&db, scope, operation_id)
                 .await
                 .expect("operation is readable"),
             durable,
-            "{density}: the lost steps progressed"
+            "{density:?}: the lost steps progressed"
         );
         drop(db);
 
@@ -644,7 +658,7 @@ async fn a_lost_wal_tail_resumes_at_the_durable_cursor() {
                 .await
                 .expect("operation is readable"),
             durable,
-            "{density}: the build resumes at its last durable cursor"
+            "{density:?}: the build resumes at its last durable cursor"
         );
         for id in [3, 590] {
             assert_eq!(
@@ -652,12 +666,12 @@ async fn a_lost_wal_tail_resumes_at_the_durable_cursor() {
                     .await
                     .expect("source row reads"),
                 Some(encode_properties(&sources[&id])),
-                "{density}: the lost write of {id} is gone"
+                "{density:?}: the lost write of {id} is gone"
             );
         }
         let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
         let (_, end) = drive_build(&db, &driver, operation_id, &mut claim_sequence, limits).await;
-        assert_eq!(end, CommittedOperationStep::Completed, "{density}");
+        assert_eq!(end, CommittedOperationStep::Completed, "{density:?}");
         assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources)
             .await;
         db.close().await.expect("lost-tail database closes");
