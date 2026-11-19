@@ -7305,7 +7305,8 @@ mod tests {
             entity_id,
             before,
             after,
-        );
+        )
+        .await;
         let key = source_key(scope, kind, entity_id);
         if after.is_empty() {
             transaction.delete(key)?;
@@ -7384,7 +7385,8 @@ mod tests {
             entity_id,
             before,
             after,
-        );
+        )
+        .await;
         let key = source_key(scope, IndexElementKind::Node, entity_id);
         if after.is_empty() {
             transaction.delete(key).expect("legacy delete stages");

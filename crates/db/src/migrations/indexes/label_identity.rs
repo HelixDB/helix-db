@@ -1523,6 +1523,89 @@ pub(crate) async fn make_legacy_label_fixture(db: &Db) -> Result<()> {
     Ok(())
 }
 
+/// How far a test store's label identity migration has gone, for tests of
+/// what reads label rows at each stage a writer may serve.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LabelStage {
+    /// Version 5, before the copy: label rows are hash-keyed only.
+    BeforeCopy,
+    /// Version 6, one member copied: reads use the hash rows, every graph
+    /// write files both keys, and the exact rows lack what was written
+    /// before the copy began, but for that one member.
+    Copying,
+    /// Version 7: copied, published, and the hash rows cleaned up.
+    Published,
+}
+
+#[cfg(test)]
+impl LabelStage {
+    pub(crate) const ALL: [Self; 3] = [Self::BeforeCopy, Self::Copying, Self::Published];
+
+    /// Rewinds `db` to version 5 with every label row under its hash key
+    /// ([`make_legacy_label_fixture`]), so rows written next are filed as a
+    /// binary before label identity files them. The caller must quiesce
+    /// every write.
+    pub(crate) async fn rewind(db: &Db) {
+        make_legacy_label_fixture(db)
+            .await
+            .expect("the store rewinds before label identity");
+    }
+
+    /// Moves `db`, rewound by [`Self::rewind`] and holding hash rows, to
+    /// this stage through the migration's own steps.
+    pub(crate) async fn reach(self, db: &Db) {
+        let writer = crate::HelixWriter::new(std::sync::Arc::new(db.clone()), 4, 2);
+        let version = match self {
+            Self::BeforeCopy => IndexStorageVersion::OPERATION_QUEUES,
+            Self::Copying => {
+                start_label_identity_copy(db)
+                    .await
+                    .expect("the copy starts");
+                // One member a step: a row of two members is copied in part.
+                let step =
+                    copy_hash_label_rows_once(&writer, &mut LabelCopySession::with_limits(1, 1))
+                        .await
+                        .expect("one copy step runs");
+                assert_eq!(
+                    step,
+                    LabelCopyStep::Copied,
+                    "the store has hash rows to copy"
+                );
+                IndexStorageVersion::LABEL_COPY
+            }
+            Self::Published => {
+                start_label_identity_copy(db)
+                    .await
+                    .expect("the copy starts");
+                let mut session = LabelCopySession::new();
+                while copy_hash_label_rows_once(&writer, &mut session)
+                    .await
+                    .expect("a copy step runs")
+                    .advanced()
+                {}
+                while delete_hash_label_rows_once(db, &mut session)
+                    .await
+                    .expect("a cleanup step runs")
+                    .advanced()
+                {}
+                assert!(
+                    hash_rows(db, None, None)
+                        .await
+                        .unwrap()
+                        .next()
+                        .await
+                        .unwrap()
+                        .is_none(),
+                    "the cleanup deletes every hash row"
+                );
+                IndexStorageVersion::LABEL_IDENTITY
+            }
+        };
+        assert_eq!(storage_version(db).await.unwrap(), version);
+    }
+}
+
 #[cfg(test)]
 #[path = "label_identity_tests.rs"]
 mod tests;

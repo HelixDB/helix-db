@@ -8,6 +8,12 @@
 //! harmless, since every reader checks the row. [`audit`] compares the two
 //! at one snapshot and changes nothing: repairing a bitmap would be a change
 //! to stored data.
+//!
+//! It reads the bitmaps that snapshot's reads and builds read: the hash rows
+//! until the label identity copy publishes, the exact rows after
+//! ([`super::label_source::label_layout`]). Exact rows hold one label each;
+//! a hash row is shared by every label with its hash, so its other labels'
+//! rows count as extra there.
 
 use std::collections::BTreeMap;
 
@@ -32,7 +38,8 @@ pub struct LabelBitmapFinding {
     /// index builds miss them.
     pub missing: RoaringTreemap,
     /// Bitmap members whose row is gone or carries another label, which every
-    /// reader skips. Rows of a label whose hash equals this one's count here.
+    /// reader skips. While the store reads hash rows, rows of a label whose
+    /// hash equals this one's count here.
     pub extra: u64,
 }
 
@@ -63,7 +70,8 @@ impl LabelBitmapAudit {
     }
 }
 
-/// Compares each label bitmap of `scope` with the rows `reader` holds.
+/// Compares each label bitmap of `scope` with the rows `reader` holds, in
+/// `reader`'s own label layout.
 ///
 /// Reads every node and edge row of the scope once, decoding only `$label`,
 /// and one bitmap per label carried; holds one id set per label. `reader`
@@ -72,6 +80,7 @@ pub(crate) async fn audit(
     reader: &(impl DbReadOps + Send + Sync),
     scope: DataScope,
 ) -> Result<LabelBitmapAudit> {
+    let layout = super::label_source::label_layout(reader).await?;
     let mut audit = LabelBitmapAudit::default();
     let mut scratch = view::Scratch::new();
     for kind in [IndexElementKind::Node, IndexElementKind::Edge] {
@@ -104,15 +113,8 @@ pub(crate) async fn audit(
             labels.entry(label.to_owned()).or_default().insert(id.get());
         }
         for (label, ids) in labels {
-            let members = match kind {
-                IndexElementKind::Node => {
-                    crate::search::lookup_node_label_index_scoped(reader, &label, scope).await?
-                }
-                IndexElementKind::Edge => {
-                    crate::search::lookup_global_edge_label_index_scoped(reader, &label, scope)
-                        .await?
-                }
-            };
+            let members =
+                super::label_source::label_members(reader, layout, kind, &label, scope).await?;
             audit.findings.push(LabelBitmapFinding {
                 kind,
                 rows: ids.len(),

@@ -97,14 +97,15 @@ async fn open_graph_db(
 }
 
 /// Stages node `id` joining `Document`'s label bitmap, as its row's write does.
-fn stage_document(transaction: &DbTransaction, scope: DataScope, id: u64) {
+async fn stage_document(transaction: &DbTransaction, scope: DataScope, id: u64) {
     crate::index_lifecycle::label_source::testing::stage_member(
         transaction,
         scope,
         IndexElementKind::Node,
         "Document",
         id,
-    );
+    )
+    .await;
 }
 
 /// The default policy's per-document publication limits.
@@ -1103,7 +1104,7 @@ async fn scan_source_case(
     };
     let source_key = authoritative_property_key(scope, entity);
     transaction.put(&source_key, value).unwrap();
-    stage_document(&transaction, scope, entity.id.get());
+    stage_document(&transaction, scope, entity.id.get()).await;
     if preexisting_state {
         transaction
             .put(
@@ -1677,7 +1678,7 @@ async fn partition_blocker_retries_once_its_graph_row_is_repaired() {
         )
         .unwrap();
     transaction.put(&graph_key, row("alpha")).unwrap();
-    stage_document(&transaction, scope, 7);
+    stage_document(&transaction, scope, 7).await;
     assert!(matches!(
         scan_source(
             &transaction,
@@ -2195,7 +2196,7 @@ fn tenant_state_key(
 }
 
 /// Writes graph rows; `Some("")` keeps the entity but drops the indexed text.
-fn put_reconciliation_rows(
+async fn put_reconciliation_rows(
     transaction: &DbTransaction,
     scope: DataScope,
     rows: &[(u64, &'static str, Option<&'static str>)],
@@ -2216,7 +2217,7 @@ fn put_reconciliation_rows(
         transaction
             .put(&key, property::encode_properties(&properties))
             .unwrap();
-        stage_document(transaction, scope, *id);
+        stage_document(transaction, scope, *id).await;
     }
 }
 
@@ -2231,7 +2232,7 @@ async fn scanned_generation(
         .await
         .unwrap();
     let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
-    put_reconciliation_rows(&transaction, scope, rows);
+    put_reconciliation_rows(&transaction, scope, rows).await;
     let upper = rows.iter().map(|(id, _, _)| *id).max().unwrap();
     assert!(matches!(
         scan_source(
@@ -2308,7 +2309,7 @@ async fn partition_scan_reconciles_entities_changed_after_the_source_scan() {
     )
     .await;
     let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
-    put_reconciliation_rows(&transaction, scope, &CURRENT_ROWS);
+    put_reconciliation_rows(&transaction, scope, &CURRENT_ROWS).await;
     transaction.commit().await.unwrap();
     let progress = initial_partition_scan(&operation, scope, OperationCounters::default()).unwrap();
     let state_key = |id| tenant_state_key(scope, &operation, "a", id);
@@ -2678,7 +2679,8 @@ async fn lone_reconciliation_generation(
         &transaction,
         scope,
         &[(7, "a", Some(LONE_AFTER)), (8, "a", None)],
-    );
+    )
+    .await;
     transaction.commit().await.unwrap();
     db
 }
@@ -3219,7 +3221,8 @@ async fn source_scan_steps_resume_on_a_reopened_database() {
             IndexElementKind::Node,
             label_of(id),
             id,
-        );
+        )
+        .await;
     }
     transaction.commit().await.unwrap();
     let operation = operation();
@@ -3293,4 +3296,152 @@ async fn source_scan_steps_resume_on_a_reopened_database() {
         );
     }
     db.close().await.unwrap();
+}
+
+/// At every stage of the label identity migration a text build stages its
+/// label's rows, written before the stage and after it, and no other: its
+/// steps read the label rows in the layout their snapshot names, so a build
+/// while the copy runs reads the complete hash rows rather than the
+/// incomplete exact ones.
+#[tokio::test]
+async fn source_scans_read_their_label_at_every_label_identity_stage() {
+    let scope = DataScope::LegacyUnscoped;
+    let labels = ["Document", "Note", "Image"];
+    let label_of = |id: u64| labels[usize::try_from(id % 3).unwrap()];
+    let row = |label: &str| {
+        [
+            property::Property::string("$label", label),
+            property::Property::string("body", "searchable text"),
+        ]
+    };
+    for stage in crate::migrations::LabelStage::ALL {
+        let db = open_graph_db(
+            &format!("text-driver-label-stage-{stage:?}"),
+            Arc::new(InMemory::new()),
+        )
+        .await
+        .unwrap();
+        crate::migrations::LabelStage::rewind(&db).await;
+        for id in 0..96_u64 {
+            crate::index_lifecycle::label_source::testing::put_source_row(
+                &db,
+                scope,
+                IndexElementKind::Node,
+                id,
+                &row(label_of(id)),
+            )
+            .await;
+        }
+        stage.reach(&db).await;
+        for id in 96..192_u64 {
+            crate::index_lifecycle::label_source::testing::put_source_row(
+                &db,
+                scope,
+                IndexElementKind::Node,
+                id,
+                &row(label_of(id)),
+            )
+            .await;
+        }
+        // After the stage, Document 3 becomes a Note and Document 6 is deleted.
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        crate::index_lifecycle::label_source::testing::stage_labels(
+            &transaction,
+            scope,
+            IndexElementKind::Node,
+            3,
+            &row("Document"),
+            &row("Note"),
+        )
+        .await;
+        transaction
+            .put(
+                authoritative_property_key(scope, reconciliation_entity(3)),
+                property::encode_properties(&row("Note")),
+            )
+            .unwrap();
+        crate::index_lifecycle::label_source::testing::stage_labels(
+            &transaction,
+            scope,
+            IndexElementKind::Node,
+            6,
+            &row("Document"),
+            &[],
+        )
+        .await;
+        transaction
+            .delete(authoritative_property_key(scope, reconciliation_entity(6)))
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        let operation = operation();
+        let mut progress = SourceScanProgress {
+            inclusive_upper_bound: IndexCursor::try_new(authoritative_property_key(
+                scope,
+                reconciliation_entity(191),
+            ))
+            .unwrap(),
+            cursor: None,
+            counters: OperationCounters::default(),
+        };
+        let scanned = loop {
+            let transaction = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            let source = db.begin(IsolationLevel::Snapshot).await.unwrap();
+            let result = scan_source(
+                &source,
+                &transaction,
+                scope,
+                &operation,
+                &record(),
+                &progress,
+                batch_limits(16, u64::MAX, u64::MAX, u64::MAX),
+                document_limits(),
+            )
+            .await
+            .unwrap();
+            transaction.commit().await.unwrap();
+            let IndexOperationStepResult::Progressed(IndexOperationProgress::TextBuild(
+                TextBuildProgress::Constructing(next),
+            )) = result
+            else {
+                panic!("a scan step progresses: {result:?}");
+            };
+            match next {
+                TextBuildStage::ScanSource(next) => progress = next,
+                TextBuildStage::ScanPartitions(scanned) => break scanned,
+                next @ (TextBuildStage::CatchUp(_)
+                | TextBuildStage::Compact(_)
+                | TextBuildStage::PrepareManifests(_)
+                | TextBuildStage::ValidateManifests(_)
+                | TextBuildStage::Activate(_)) => {
+                    panic!("a scan step leads to ScanSource or ScanPartitions: {next:?}")
+                }
+            }
+        };
+        let documents = |id: u64| label_of(id) == "Document" && id != 3 && id != 6;
+        assert_eq!(
+            scanned.counters.entities,
+            (0..192_u64).filter(|id| documents(*id)).count() as u64,
+            "{stage:?}"
+        );
+        for id in 0..192_u64 {
+            let applied = scoped_index_key(
+                scope,
+                ScopedKey::AppliedState(IndexEntityStateKey {
+                    index_id: operation.index_id(),
+                    generation: operation.generation(),
+                    entity: reconciliation_entity(id),
+                }),
+            );
+            assert_eq!(
+                db.get(&applied).await.unwrap().is_some(),
+                documents(id),
+                "{stage:?} row {id}"
+            );
+        }
+        db.close().await.unwrap();
+    }
 }

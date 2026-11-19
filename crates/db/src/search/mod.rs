@@ -1669,6 +1669,20 @@ pub(crate) fn add_to_legacy_node_label_index_scoped(
     stage_shared_bitmap_membership(txn, &key, node_id, true)
 }
 
+/// Stages `entity_id` joining (`present`) or leaving one retired hash-keyed
+/// label row, as a graph write on a store that still files hash rows does,
+/// for fixtures that write graph rows directly.
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
+pub(crate) fn stage_hash_label_membership(
+    txn: &DbTransaction,
+    row: HashLabelRow<'_>,
+    entity_id: u64,
+    present: bool,
+    tenant_scope: DataScope,
+) -> Result<(), HelixDbError> {
+    stage_shared_bitmap_membership(txn, &hash_label_key(tenant_scope, row), entity_id, present)
+}
+
 /// One label row a store before label identity files under its label's hash.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum HashLabelRow<'a> {
@@ -2139,18 +2153,6 @@ pub(crate) async fn read_node_label(
         },
     )
     .await
-}
-
-/// Look up all node IDs carrying `label` from the node label index.
-///
-/// The label index is the `$label` equality bitmap, kept with every node
-/// row in the same transaction; index builds read their label's nodes here.
-pub async fn lookup_node_label_index_scoped(
-    txn: &(impl DbReadOps + Send + Sync),
-    label: &str,
-    tenant_scope: DataScope,
-) -> Result<RoaringTreemap, HelixDbError> {
-    lookup_equality_index_set_scoped(txn, "$label", label, tenant_scope).await
 }
 
 /// Look up all edge IDs for a globally indexed edge property/value pair.
