@@ -103,7 +103,7 @@ impl GrpcService {
         &self,
         request: QueryJsonRequest,
         query: db::cypher::CompiledRequest,
-    ) -> Result<Response<QueryJsonResponse>, Status> {
+    ) -> Result<(QueryJsonResponse, CommitTimings), Status> {
         validate_options_for_request_type(
             request.warm_only,
             request.require_writer,
@@ -124,7 +124,10 @@ impl GrpcService {
             .map_err(cypher_status)?;
         let body = serde_json::to_vec(&explanation)
             .map_err(|e| status_from_service_error(QueryServiceError::JsonSerialize(e)))?;
-        Ok(Response::new(QueryJsonResponse { body: body.into() }))
+        Ok((
+            QueryJsonResponse { body: body.into() },
+            CommitTimings::default(),
+        ))
     }
 }
 
@@ -151,11 +154,16 @@ impl HelixDbServer for GrpcService {
         &self,
         request: Request<QueryJsonRequest>,
     ) -> Result<Response<QueryJsonResponse>, Status> {
+        let received = Instant::now();
         let request = request.into_inner();
-        let query = json_request::<db::cypher::Request>(&request.body)?
-            .compile()
-            .map_err(|e| cypher_status(e.into()))?;
-        self.explain_compiled(request, query).await
+        let result = async {
+            let query = json_request::<db::cypher::Request>(&request.body)?
+                .compile()
+                .map_err(|e| cypher_status(e.into()))?;
+            self.explain_compiled(request, query).await
+        }
+        .await;
+        timed(received, result)
     }
 
     async fn execute_sql(
@@ -179,11 +187,16 @@ impl HelixDbServer for GrpcService {
         &self,
         request: Request<QueryJsonRequest>,
     ) -> Result<Response<QueryJsonResponse>, Status> {
+        let received = Instant::now();
         let request = request.into_inner();
-        let query = json_request::<db::cypher::sql::request::Request>(&request.body)?
-            .compile()
-            .map_err(|e| cypher_status(e.into()))?;
-        self.explain_compiled(request, query).await
+        let result = async {
+            let query = json_request::<db::cypher::sql::request::Request>(&request.body)?
+                .compile()
+                .map_err(|e| cypher_status(e.into()))?;
+            self.explain_compiled(request, query).await
+        }
+        .await;
+        timed(received, result)
     }
 
     async fn execute_query(

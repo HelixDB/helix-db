@@ -2503,6 +2503,71 @@ mod tests {
         }
     }
 
+    /// The response says how long its request spent committing: nothing for a
+    /// read, and no durable wait for a write that returns once applied.
+    #[tokio::test]
+    async fn query_response_carries_the_commit_timings_of_its_mode() {
+        let db = Arc::new(
+            HelixDB::open(HelixDbSource::InMemory {
+                database: "query-service-commit-timings".to_string(),
+            })
+            .await
+            .expect("writer should open"),
+        );
+        let service = HelixQueryService::new(db);
+        let write = || {
+            QueryRequest::write(helix_ast::batch::write_batch().var_as(
+                "created",
+                g().add_n(
+                    "Timed",
+                    vec![("rank", helix_ast::value::PropertyInput::from(1_i64))],
+                ),
+            ))
+        };
+
+        let durable = service
+            .execute_query(write())
+            .await
+            .expect("durable write should commit")
+            .commit_timings();
+        assert!(durable.commit.is_some() && durable.durable.is_some());
+
+        let applied = service
+            .execute_query_with_mode(write(), QueryMode::ExecuteWithoutDurableWait)
+            .await
+            .expect("applied write should commit")
+            .commit_timings();
+        assert!(applied.commit.is_some());
+        assert_eq!(applied.durable, None);
+
+        let read = service
+            .execute_query(QueryRequest::read(
+                read_batch()
+                    .var_as("count", g().n_with_label("Timed").count())
+                    .returning(["count"]),
+            ))
+            .await
+            .expect("read should execute");
+        assert_eq!(read.json().get("count"), Some(&JsonValue::from(2)));
+        assert_eq!(read.commit_timings(), CommitTimings::default());
+
+        let ddl = service
+            .execute_query_with_mode(
+                QueryRequest::write(helix_ast::batch::write_batch().var_as(
+                    "operation",
+                    g().create_index_if_not_exists(helix_ast::index::IndexSpec::node_equality(
+                        "Timed", "rank",
+                    )),
+                )),
+                QueryMode::ExecuteWithoutDurableWait,
+            )
+            .await
+            .expect("index DDL should execute")
+            .commit_timings();
+        assert_eq!(ddl.commit, None);
+        assert!(ddl.durable.is_some());
+    }
+
     #[tokio::test]
     async fn query_service_rejects_writes_on_reader_handles() {
         let object_store: Arc<dyn slatedb::object_store::ObjectStore> = Arc::new(InMemory::new());

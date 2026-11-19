@@ -321,9 +321,9 @@ async fn a_failed_request_reports_only_execution() {
     server.close().await;
 }
 
-/// Planning-only and health routes execute nothing and report nothing.
+/// Planning commits nothing, and health routes do no request work to time.
 #[tokio::test(flavor = "multi_thread")]
-async fn routes_that_execute_nothing_report_no_timing() {
+async fn explain_reports_only_execution_and_health_reports_nothing() {
     let server = Server::open("server-timing-other-routes").await;
     for (path, body) in [
         (
@@ -337,7 +337,10 @@ async fn routes_that_execute_nothing_report_no_timing() {
         for grpc in [None, Some(&server.grpc)] {
             let explained = send(server.router.clone(), grpc, path, body.clone(), None).await;
             assert!(explained.0, "{path}");
-            assert_eq!(names(&explained), [""; 0], "{path}");
+            assert_eq!(names(&explained), ["exec"], "{path}");
+            let failed = send(server.router.clone(), grpc, path, b"{".to_vec(), None).await;
+            assert!(!failed.0, "{path}");
+            assert_eq!(names(&failed), ["exec"], "{path}");
         }
     }
     let health = server
