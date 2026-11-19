@@ -394,9 +394,13 @@ impl RangeReads {
     /// before it and the rows of other labels, or `None` once the range is
     /// read or the step has read its limit.
     ///
-    /// Every row read moves `read.last`: the range starts at a taken id, and
-    /// a row passes every taken id before it. A row of another label read
-    /// past the limit is therefore never read again by a later step.
+    /// A row passes every taken id whose key sorts before it: the ID key of
+    /// `id` passes the ids below `id`, and a retired `[from][to]` edge row,
+    /// which sorts after the ID key of `from`, passes the ids up to `from`.
+    /// The range starts at the first taken id's key, so the first row read
+    /// reads or passes it, and `read.last` is set once any row is read. A
+    /// row read past the limit therefore lies before the next taken id,
+    /// where the next step's range starts, and is never read again.
     async fn next(
         &mut self,
         scope: DataScope,
@@ -413,9 +417,15 @@ impl RangeReads {
                 return Ok(None);
             };
             read.add(&row.key, &row.value);
-            // A retired `[from][to]` edge row is no entity.
-            let SourceKey::Id(id) = source_id(scope, kind, &row.key)? else {
-                continue;
+            let id = match source_id(scope, kind, &row.key)? {
+                SourceKey::Id(id) => id,
+                // A retired `[from][to]` edge row is no entity.
+                SourceKey::LegacyEdgePair { from } => {
+                    while let Some(passed) = self.ids.next_if(|taken| *taken <= from) {
+                        read.last = Some(passed);
+                    }
+                    continue;
+                }
             };
             while let Some(absent) = self.ids.next_if(|taken| *taken < id) {
                 read.last = Some(absent);

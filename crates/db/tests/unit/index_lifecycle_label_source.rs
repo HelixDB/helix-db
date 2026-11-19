@@ -358,6 +358,7 @@ async fn large_rows_read_about_one_limit_per_step() {
                 scans_range(
                     &read,
                     node,
+                    "User",
                     &progress(scope, node, None, last),
                     limits(1024, LIMIT)
                 )
@@ -649,6 +650,7 @@ async fn a_corrupt_label_bitmap_fails_the_step() {
 async fn scans_range(
     snapshot: &DbTransaction,
     kind: IndexElementKind,
+    label: &str,
     progress: &SourceScanProgress,
     limits: SearchIndexBatchLimits,
 ) -> bool {
@@ -656,7 +658,7 @@ async fn scans_range(
         snapshot,
         DataScope::LegacyUnscoped,
         kind,
-        "User",
+        label,
         progress,
         limits,
         IndexLifecycleScanTuning::default(),
@@ -705,8 +707,26 @@ async fn dense_steps_scan_their_range_and_sparse_steps_read_points() {
     }
     let read = snapshot(&db).await;
     let limits = limits(50, 1 << 20);
-    assert!(scans_range(&read, node, &progress(scope, node, None, 1199), limits).await);
-    assert!(!scans_range(&read, node, &progress(scope, node, Some(599), 1199), limits).await);
+    assert!(
+        scans_range(
+            &read,
+            node,
+            "User",
+            &progress(scope, node, None, 1199),
+            limits
+        )
+        .await
+    );
+    assert!(
+        !scans_range(
+            &read,
+            node,
+            "User",
+            &progress(scope, node, Some(599), 1199),
+            limits
+        )
+        .await
+    );
     let (mut after, mut read_ids) = (None, Vec::new());
     while let Some((ids, paused)) = step(
         &read,
@@ -752,7 +772,7 @@ async fn rows_of_other_labels_past_the_limit_are_read_once() {
     }
     let read = snapshot(&db).await;
     let limits = limits(1024, 4096);
-    assert!(scans_range(&read, node, &progress(scope, node, None, 9), limits).await);
+    assert!(scans_range(&read, node, "User", &progress(scope, node, None, 9), limits).await);
     assert_eq!(
         step(&read, node, "User", &progress(scope, node, None, 9), limits).await,
         Some((vec![0, 1, 2, 3, 4], Some(4)))
@@ -813,4 +833,167 @@ async fn rows_of_other_labels_past_the_limit_are_read_once() {
     };
     assert_eq!(ids, [3, 4, 5, 6, 7, 8]);
     assert!(matches!(end, LabelRead::Exhausted));
+}
+
+/// The density rule's boundary: a step whose key range holds fewer than
+/// [`RANGE_DENSITY`] keys per id it took scans it, and one that holds
+/// exactly that many reads by point. Both return their members' rows in id
+/// order and pause after the last id they took.
+#[tokio::test]
+async fn the_density_boundary_picks_the_read_and_both_read_alike() {
+    let db = test_db("label-source-density-boundary").await;
+    let scope = DataScope::LegacyUnscoped;
+    let node = IndexElementKind::Node;
+    // Two ids taken a step: `Near` spans 3 keys past its first (range),
+    // `Far` 4 (points). Every other id is a row of another label.
+    let label_of = |id: u64| match id {
+        0 | 3 | 100 => "Near",
+        10 | 14 | 101 => "Far",
+        _ => "Other",
+    };
+    for id in 0..=101 {
+        testing::put_source_row(&db, scope, node, id, &row(label_of(id), 0)).await;
+    }
+    let read = snapshot(&db).await;
+    let limits = limits(2, 1 << 20);
+    let first = progress(scope, node, None, 101);
+    assert_eq!(RANGE_DENSITY, 2);
+    assert!(scans_range(&read, node, "Near", &first, limits).await);
+    assert!(!scans_range(&read, node, "Far", &first, limits).await);
+    assert_eq!(
+        step(&read, node, "Near", &first, limits).await,
+        Some((vec![0, 3], Some(3)))
+    );
+    assert_eq!(
+        step(&read, node, "Far", &first, limits).await,
+        Some((vec![10, 14], Some(14)))
+    );
+    assert_eq!(
+        step(
+            &read,
+            node,
+            "Near",
+            &progress(scope, node, Some(3), 101),
+            limits
+        )
+        .await,
+        Some((vec![100], None))
+    );
+    assert_eq!(
+        step(
+            &read,
+            node,
+            "Far",
+            &progress(scope, node, Some(14), 101),
+            limits
+        )
+        .await,
+        Some((vec![101], None))
+    );
+}
+
+/// In an edge range, a member without a row followed by retired `[from][to]`
+/// rows (a hub's old out-edges) that reach the step's byte limit is passed
+/// by them: the step pauses on it, and the next step's range starts after
+/// those rows and reads the rest.
+#[tokio::test]
+async fn retired_pair_rows_past_the_limit_pass_the_member_they_follow() {
+    let db = test_db("label-source-range-pair-rows").await;
+    let scope = DataScope::LegacyUnscoped;
+    let edge = IndexElementKind::Edge;
+    let transaction = db
+        .begin(IsolationLevel::Snapshot)
+        .await
+        .expect("write begins");
+    testing::stage_member(&transaction, scope, edge, "FOLLOWS", 5).await;
+    transaction.commit().await.expect("member commits");
+    for id in [6, 7] {
+        testing::put_source_row(&db, scope, edge, id, &row("FOLLOWS", 0)).await;
+    }
+    for to in 0..4 {
+        db.put(
+            DataKey::Data {
+                scope,
+                kind: DataKeyKind::EdgePropertyPair(LegacyEdgePropertyPairKey::new(5, to)),
+            }
+            .to_bytes(),
+            crate::encoding::v2::values::property::encode_properties(&row("FOLLOWS", 2048)),
+        )
+        .await
+        .expect("retired pair row writes");
+    }
+    let read = snapshot(&db).await;
+    let limits = limits(1024, 4096);
+    let first = progress(scope, edge, None, 7);
+    assert!(scans_range(&read, edge, "FOLLOWS", &first, limits).await);
+    assert_eq!(
+        step(&read, edge, "FOLLOWS", &first, limits).await,
+        Some((vec![], Some(5)))
+    );
+    assert_eq!(
+        step(
+            &read,
+            edge,
+            "FOLLOWS",
+            &progress(scope, edge, Some(5), 7),
+            limits
+        )
+        .await,
+        Some((vec![6, 7], None))
+    );
+}
+
+/// A member whose row carries another label, as a label-hash collision
+/// leaves before the label identity copy, is read once by a scanning step
+/// among the rows of other labels around it, and left to the driver's own
+/// label check.
+#[tokio::test]
+async fn a_colliding_member_is_read_once_in_a_range() {
+    let db = test_db("label-source-range-collision").await;
+    LabelStage::rewind(&db).await;
+    let scope = DataScope::LegacyUnscoped;
+    let node = IndexElementKind::Node;
+    for id in 0..12 {
+        let label = if id % 3 == 2 { "Other" } else { "User" };
+        testing::put_source_row(&db, scope, node, id, &row(label, 0)).await;
+    }
+    let transaction = db
+        .begin(IsolationLevel::Snapshot)
+        .await
+        .expect("write begins");
+    testing::stage_member(&transaction, scope, node, "User", 5).await;
+    transaction.commit().await.expect("collision commits");
+    let read = snapshot(&db).await;
+    assert_eq!(
+        label_layout(&read).await.expect("the marker reads"),
+        LabelRowLayout::Hash
+    );
+    let (mut after, mut read_ids) = (None, Vec::new());
+    let limits = limits(3, 1 << 20);
+    while let Some((ids, paused)) = step(
+        &read,
+        node,
+        "User",
+        &progress(scope, node, after, 11),
+        limits,
+    )
+    .await
+    {
+        assert!(
+            scans_range(
+                &read,
+                node,
+                "User",
+                &progress(scope, node, after, 11),
+                limits
+            )
+            .await
+        );
+        read_ids.extend(ids);
+        let Some(paused) = paused else {
+            break;
+        };
+        after = Some(paused);
+    }
+    assert_eq!(read_ids, [0, 1, 3, 4, 5, 6, 7, 9, 10]);
 }

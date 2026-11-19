@@ -11294,7 +11294,9 @@ mod tests {
 
     /// The public `entities` progress counts each source entity once for
     /// equality, unique, and range builds: validation revisits every applied
-    /// row, which shows as bytes and operations, never as entities.
+    /// row, which shows as bytes and operations, never as entities. The
+    /// label's rows lie between rows of another label, which its scanning
+    /// steps read and never count.
     #[tokio::test]
     async fn progress_counts_each_source_entity_once() {
         const ENTITIES: u64 = 10;
@@ -11314,15 +11316,19 @@ mod tests {
             let definition = validated(definition.expect("test definition is valid"));
             let db = test_db("secondary-progress-entities").await;
             let scope = DataScope::LegacyUnscoped;
-            for entity_id in 0..ENTITIES {
+            for entity_id in 0..2 * ENTITIES {
                 let mut properties = user_properties(&format!("seed-{entity_id}@example.com"));
+                if entity_id % 2 == 1 {
+                    properties[0] = Property::string("$label", "Other");
+                }
                 properties.push(Property::i64(
                     "rank",
                     i64::try_from(entity_id).expect("rank fits"),
                 ));
                 put_source(&db, scope, IndexElementKind::Node, entity_id, &properties).await;
             }
-            let (operation_id, _, _) = create_build(&db, scope, &definition, ENTITIES - 1).await;
+            let (operation_id, _, _) =
+                create_build(&db, scope, &definition, 2 * ENTITIES - 1).await;
             let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
             let status = |record: IndexOperationRecord| {
                 let status = crate::index_lifecycle::IndexOperationStatus::from_record(&record);
