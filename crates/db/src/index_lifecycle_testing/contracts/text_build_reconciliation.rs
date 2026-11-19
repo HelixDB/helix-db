@@ -34,7 +34,8 @@ const LABEL: &str = "ReconcileDoc";
 const PROPERTY: &str = "body";
 const TENANT: &str = "tenant";
 const SCOPE: DataScope = DataScope::LegacyUnscoped;
-/// Unindexed rows after the targets keep `ScanSource` running past them.
+/// Rows of the label after the targets, with no text to index, keep
+/// `ScanSource` running past them: a build reads only its label's rows.
 const FILLERS: u64 = 4;
 
 /// Build boundary where the first writes land.
@@ -257,7 +258,7 @@ async fn run_case(ordinal: usize, shape: Shape, point: LatePoint) {
         rows.insert(id, text_row(target.tenant, Some(target.body)));
     }
     for id in ids.clone().skip(targets.len()) {
-        rows.insert(id, vec![Property::string("$label", "ReconcileFiller")]);
+        rows.insert(id, text_row("filler", None));
     }
     for (id, row) in &rows {
         put_source(&db, SCOPE, *id, row).await;
