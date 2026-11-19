@@ -217,25 +217,28 @@ impl<'db> Interpreter<'db> {
             ctx.finish(plan.root(), plan.executable_returns())
         })
         .await
+        .map(|(result, _)| result)
     }
 
     /// Execute a validated executable plan and keep only its requested
-    /// returns, which move out of the interpreter without being copied.
+    /// returns, which move out of the interpreter without being copied, and
+    /// the time the request spent committing.
     pub(crate) async fn execute_returns(
         self,
         plan: &exec::ExecutablePlan,
-    ) -> Result<ReturnedValues> {
+    ) -> Result<(ReturnedValues, crate::query_resources::CommitTimings)> {
         self.run(plan, |ctx| ctx.finish_returns(plan.executable_returns()))
             .await
     }
 
     /// Runs the request lifecycle around `finish`, which shapes the result
-    /// once execution and any commit have succeeded.
+    /// once execution and any commit have succeeded. The result comes with
+    /// the time the request spent committing.
     async fn run<T>(
         mut self,
         plan: &exec::ExecutablePlan,
         finish: impl FnOnce(&mut ExecutionContext<'db>) -> Result<T>,
-    ) -> Result<T> {
+    ) -> Result<(T, crate::query_resources::CommitTimings)> {
         self.ctx.check_execution_deadline()?;
         let request_mode = RequestExecutionMode::try_from(plan)?;
         match request_mode {
@@ -270,6 +273,7 @@ impl<'db> Interpreter<'db> {
         // applied record.
         let result = match request_mode {
             RequestExecutionMode::IndexDdl => {
+                let durable_started = std::time::Instant::now();
                 let durable = self
                     .ctx
                     .execution_control
@@ -278,6 +282,12 @@ impl<'db> Interpreter<'db> {
                         self.ctx.db.await_visible_writes_durable(),
                     )
                     .await;
+                self.ctx
+                    .commit_timings
+                    .add(crate::query_resources::CommitTimings {
+                        commit: None,
+                        durable: Some(durable_started.elapsed()),
+                    });
                 result.and_then(|value| durable.map(|()| value))
             }
             RequestExecutionMode::Read | RequestExecutionMode::GraphWrite => result,
@@ -312,7 +322,7 @@ impl<'db> Interpreter<'db> {
         {
             self.ctx.close_request_read_view()?;
         }
-        result
+        result.map(|value| (value, self.ctx.commit_timings))
     }
 }
 

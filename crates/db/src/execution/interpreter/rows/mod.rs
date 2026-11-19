@@ -125,6 +125,7 @@ impl Interpreter<'_> {
                     crate::cypher::ResourceUsage {
                         peak_memory_bytes: budget.peak(),
                         reads: budget.reads(),
+                        commit: self.ctx.commit_timings,
                     },
                 ))
             }
@@ -501,6 +502,9 @@ impl ExecutionContext<'_> {
                 resources: crate::cypher::ResourceUsage {
                     peak_memory_bytes: self.row_budget().peak(),
                     reads: self.row_budget().reads(),
+                    // Nothing has committed yet; the request boundary fills
+                    // this in after its commit.
+                    commit: self.commit_timings,
                 },
             },
             output_memory,

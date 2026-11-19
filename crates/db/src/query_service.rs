@@ -23,6 +23,7 @@ use crate::execution::interpreter::{
     ElementRef, ExecutionResult, ExecutionScalar, ExecutionValue, ReturnedValue, ReturnedValues,
 };
 use crate::execution_control::ExecutionControl;
+pub use crate::query_resources::CommitTimings;
 use crate::HelixDB;
 
 pub mod insight_tally;
@@ -457,7 +458,7 @@ async fn execute_validated<B: ResponseBody>(
     execution_control.check()?;
     // Planning and execution share the request's one parameter copy.
     let (params, proof) = prepared.into_execution_inputs();
-    let returns = db
+    let (returns, commit_timings) = db
         .execute_prepared_returns_scoped_controlled(
             planning.plan(),
             params,
@@ -469,7 +470,9 @@ async fn execute_validated<B: ResponseBody>(
         )
         .await?;
     let (_, diagnostics) = planning.into_parts();
-    QueryResponse::encode(&returns, diagnostics)
+    let mut response = QueryResponse::encode(&returns, diagnostics)?;
+    response.commit_timings = commit_timings;
+    Ok(response)
 }
 
 enum ValidatedQuery {
@@ -595,6 +598,7 @@ fn query_param_bindings(
 pub struct QueryResponse<B = Vec<u8>> {
     body: B,
     diagnostics: PlannerDiagnostics,
+    commit_timings: CommitTimings,
 }
 
 impl QueryResponse {
@@ -645,7 +649,14 @@ impl<B> QueryResponse<B> {
         Ok(Self {
             body: B::encode(&ReturnsJson(returns))?,
             diagnostics,
+            commit_timings: CommitTimings::default(),
         })
+    }
+
+    /// Time the request spent committing; empty for a read and for a response
+    /// encoded outside request execution.
+    pub const fn commit_timings(&self) -> CommitTimings {
+        self.commit_timings
     }
 
     /// Borrow the telemetry-safe diagnostics for the exact executed plan.
