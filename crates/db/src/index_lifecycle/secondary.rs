@@ -8998,14 +8998,26 @@ mod tests {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let mut seed = slatedb::WriteBatch::new();
+        let seed = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .expect("the seed begins");
         for (&entity_id, properties) in &sources {
             seed.put(
                 source_key(scope, IndexElementKind::Node, entity_id),
                 encode_properties(properties),
-            );
+            )
+            .expect("the source row stages");
+            crate::index_lifecycle::label_source::testing::stage_member(
+                &seed,
+                scope,
+                IndexElementKind::Node,
+                "User",
+                entity_id,
+            )
+            .await;
         }
-        db.write(seed).await.expect("sources are seeded");
+        seed.commit().await.expect("sources are seeded");
         let (operation_id, index_id, generation) =
             create_build(&db, scope, &definition, entities - 1).await;
         let ledger = delta_ledger::DeltaGeneration {
