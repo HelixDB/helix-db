@@ -1672,7 +1672,11 @@ pub(crate) fn add_to_legacy_node_label_index_scoped(
 /// Stages `entity_id` joining (`present`) or leaving one retired hash-keyed
 /// label row, as a graph write on a store that still files hash rows does,
 /// for fixtures that write graph rows directly.
-#[cfg(any(test, feature = "index-lifecycle-testing"))]
+#[cfg(any(
+    test,
+    feature = "index-lifecycle-testing",
+    feature = "production-scale"
+))]
 pub(crate) fn stage_hash_label_membership(
     txn: &DbTransaction,
     row: HashLabelRow<'_>,

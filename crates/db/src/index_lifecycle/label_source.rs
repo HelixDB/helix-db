@@ -375,13 +375,16 @@ fn corruption(message: &str) -> HelixDbError {
 /// the row's label bitmap as a graph write does, in the same transaction and
 /// under the keys the store's marker in its snapshot names (hash keys before
 /// the label identity copy, both while it runs, exact keys once published).
-#[cfg(any(test, feature = "index-lifecycle-testing"))]
+#[cfg(any(
+    test,
+    feature = "index-lifecycle-testing",
+    feature = "production-scale"
+))]
 pub(crate) mod testing {
-    use slatedb::{Db, DbTransaction, IsolationLevel};
+    use slatedb::DbTransaction;
 
     use crate::encoding::property::Property;
     use crate::encoding::v2::keys::scope::DataScope;
-    use crate::encoding::v2::values::property::encode_properties;
     use crate::index_lifecycle::repository::LabelRowWrites;
     use crate::index_lifecycle::IndexElementKind;
 
@@ -444,6 +447,7 @@ pub(crate) mod testing {
     }
 
     /// Stages `id` joining `label`'s bitmap.
+    #[cfg(any(test, feature = "index-lifecycle-testing"))]
     pub(crate) async fn stage_member(
         transaction: &DbTransaction,
         scope: DataScope,
@@ -491,15 +495,16 @@ pub(crate) mod testing {
 
     /// Writes `properties` as `id`'s source row and adds `id` to its label's
     /// bitmap in one commit.
+    #[cfg(any(test, feature = "index-lifecycle-testing"))]
     pub(crate) async fn put_source_row(
-        db: &Db,
+        db: &slatedb::Db,
         scope: DataScope,
         kind: IndexElementKind,
         id: u64,
         properties: &[Property],
     ) {
         let transaction = db
-            .begin(IsolationLevel::Snapshot)
+            .begin(slatedb::IsolationLevel::Snapshot)
             .await
             .expect("source write begins");
         for label in label_of(properties).into_iter() {
@@ -508,7 +513,7 @@ pub(crate) mod testing {
         transaction
             .put(
                 super::source_key(scope, kind, id),
-                encode_properties(properties),
+                crate::encoding::v2::values::property::encode_properties(properties),
             )
             .expect("source row stages");
         transaction.commit().await.expect("source write commits");
@@ -518,7 +523,7 @@ pub(crate) mod testing {
     /// commit: a row that may no longer decode keeps the membership it had.
     #[cfg(test)]
     pub(crate) async fn put_raw_source_row(
-        db: &Db,
+        db: &slatedb::Db,
         scope: DataScope,
         kind: IndexElementKind,
         id: u64,
@@ -526,7 +531,7 @@ pub(crate) mod testing {
         value: bytes::Bytes,
     ) {
         let transaction = db
-            .begin(IsolationLevel::Snapshot)
+            .begin(slatedb::IsolationLevel::Snapshot)
             .await
             .expect("source write begins");
         stage_member(&transaction, scope, kind, label, id).await;
