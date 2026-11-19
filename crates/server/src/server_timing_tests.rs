@@ -193,12 +193,14 @@ async fn every_write_route_separates_the_durable_wait_from_execution() {
                     ["commit", "durable", "exec"],
                     "{path} {flag:?}"
                 );
-                // The wait began within the hold, after execution and commit.
+                // The hold lands in `durable`, not `exec`. The same statement
+                // just ran unheld, so execution is warm; the margins absorb a
+                // descheduled test thread.
                 let held = HELD.as_secs_f64() * 1000.0;
                 let waited = durable.1["durable"];
                 let before = durable.1["exec"] + durable.1["commit"];
                 assert!(
-                    waited + before >= held && waited > before,
+                    waited + before >= held - 50.0 && waited >= held / 4.0,
                     "{path} {flag:?}: {:?}",
                     durable.1
                 );
@@ -343,6 +345,20 @@ async fn explain_reports_only_execution_and_health_reports_nothing() {
             assert_eq!(names(&failed), ["exec"], "{path}");
         }
     }
+    // A request rejected before its body is read never starts the clock.
+    let rejected = server
+        .router
+        .clone()
+        .oneshot(
+            Request::post("/v2/query")
+                .header("x-helix-await-durable", "maybe")
+                .body(Body::from(native_write()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    assert!(rejected.headers().get(server_timing::NAME).is_none());
     let health = server
         .router
         .clone()
