@@ -374,6 +374,9 @@ impl InFlightTask {
                 // the operation for the whole slice; see [`CLAIM_SLICE`].
                 let slice = std::time::Instant::now();
                 let mut claimed = claimed;
+                // Whether a step of this slice committed without waiting for
+                // its WAL upload.
+                let mut applied = false;
                 loop {
                     // The dispatcher observed only the slice's first step.
                     #[cfg(test)]
@@ -394,10 +397,22 @@ impl InFlightTask {
                     .await?;
                     #[cfg(feature = "index-lifecycle-testing")]
                     lifecycle_metrics.observe_operation(executed.evidence);
+                    applied |=
+                        executed.evidence.outcome == outbox::CommittedOperationStep::Progressed;
                     let Some(retained) = executed.retained else {
                         // See [`CLAIM_SLICE`]: the slice ends once its steps
-                        // are durable. Every other outcome already is.
-                        if executed.evidence.outcome == outbox::CommittedOperationStep::Progressed {
+                        // are durable. A blocked or completed step waited for
+                        // its upload, which made every earlier one durable;
+                        // after any other last step, such as a progressed one
+                        // or a retained claim found superseded, the slice
+                        // uploads what its progressed steps applied.
+                        if applied
+                            && !matches!(
+                                executed.evidence.outcome,
+                                outbox::CommittedOperationStep::Blocked
+                                    | outbox::CommittedOperationStep::Completed
+                            )
+                        {
                             db.flush().await?;
                         }
                         break;
@@ -1176,6 +1191,7 @@ mod tests {
         NoCursorProgress, OperationCounters, PhysicalGeneration, SecondaryBuildProgress,
         SecondaryBuildStage, ValidatedDynamicIndexDefinition,
     };
+    use crate::search::vector::gated_wal::{GatedWalStore, WalUploads};
 
     /// A driver for a task whose claim is lost before any step.
     struct NeverSteps;
@@ -1398,7 +1414,7 @@ mod tests {
     async fn run_task(
         db: &Arc<Db>,
         operation: &IndexOperationRecord,
-        driver: CountingDriver,
+        driver: impl IndexOperationDriver + 'static,
         shutdown: watch::Receiver<bool>,
     ) -> IndexOperationRecord {
         let epoch = WriterEpoch::from_bytes([5; 16]).unwrap();
@@ -1439,6 +1455,137 @@ mod tests {
         .await
         .unwrap()
         .expect("the operation is retained")
+    }
+
+    /// Progresses like [`CountingDriver`], and once `superseded_at` entities
+    /// are counted holds WAL uploads and advances the operation's revision
+    /// without waiting for its upload, as a concurrent abort or claim does,
+    /// so the slice's next step finds its claim superseded.
+    struct SupersedingDriver {
+        counting: CountingDriver,
+        superseded_at: u64,
+        db: Arc<Db>,
+        store: Arc<GatedWalStore>,
+    }
+
+    #[async_trait]
+    impl IndexOperationDriver for SupersedingDriver {
+        fn family(&self) -> IndexOperationFamily {
+            IndexOperationFamily::Secondary
+        }
+
+        async fn step(
+            &self,
+            db: &Db,
+            transaction: &DbTransaction,
+            scope: DataScope,
+            operation: &IndexOperationRecord,
+            limits: SearchIndexBatchLimits,
+        ) -> Result<outbox::IndexOperationStepExecution> {
+            self.counting
+                .step(db, transaction, scope, operation, limits)
+                .await
+        }
+
+        async fn after_commit(
+            &self,
+            scope: DataScope,
+            _index: &IndexRecordV2,
+            operation: &IndexOperationRecord,
+            committed: outbox::CommittedOperationStep,
+            _state: Option<outbox::CommittedStepState>,
+        ) {
+            let entities = IndexOperationStatus::from_record(operation)
+                .common()
+                .progress
+                .entities
+                + 1;
+            if committed != outbox::CommittedOperationStep::Progressed
+                || entities != self.superseded_at
+            {
+                return;
+            }
+            self.store.uploads.send_replace(WalUploads::Held);
+            let current = outbox::read_operation(&self.db, scope, operation.operation_id())
+                .await
+                .unwrap()
+                .expect("the operation is retained");
+            let superseding = current
+                .progressed(activate_progress(entities), ClaimContinuation::Retain)
+                .unwrap();
+            self.db
+                .put_with_options(
+                    outbox::scoped_operation_key(scope, operation.operation_id()),
+                    crate::encoding::v2::values::encode_operation_record(&superseding),
+                    &slatedb::config::PutOptions::default(),
+                    &slatedb::config::WriteOptions {
+                        await_durable: false,
+                        ..slatedb::config::WriteOptions::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    /// A slice whose retained step finds its claim superseded commits
+    /// nothing more, yet still ends by uploading the steps it progressed:
+    /// the task waits for that upload instead of letting the build run more
+    /// than one slice ahead of it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_superseded_slice_still_uploads_its_progressed_steps() {
+        let store = Arc::new(GatedWalStore::new());
+        let db = Arc::new(
+            Db::builder(
+                "worker-superseded-slice",
+                Arc::clone(&store) as Arc<dyn slatedb::object_store::ObjectStore>,
+            )
+            .build()
+            .await
+            .unwrap(),
+        );
+        let operation = enqueue(&db, 12).await;
+        let task = tokio::spawn({
+            let db = Arc::clone(&db);
+            let driver = SupersedingDriver {
+                counting: CountingDriver {
+                    completes_at: 1_000,
+                    delay: Duration::ZERO,
+                },
+                superseded_at: 5,
+                db: Arc::clone(&db),
+                store: Arc::clone(&store),
+            };
+            async move { run_task(&db, &operation, driver, watch::channel(false).1).await }
+        });
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            store
+                .uploads
+                .subscribe()
+                .wait_for(|uploads| *uploads == WalUploads::Held),
+        )
+        .await
+        .expect("the build reaches the superseding step")
+        .expect("the gate outlives its store");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !task.is_finished(),
+            "the superseded slice waits for the upload of its progressed steps"
+        );
+        store.uploads.send_replace(WalUploads::Open);
+        let superseded = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("the slice ends once its upload lands")
+            .unwrap();
+        assert_eq!(
+            IndexOperationStatus::from_record(&superseded)
+                .common()
+                .progress
+                .entities,
+            5,
+            "no step ran after the claim was superseded"
+        );
     }
 
     /// One task runs every step of a short build under its single claim:
