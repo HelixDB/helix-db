@@ -41,7 +41,7 @@ async fn compact_rows_preserve_scopes_null_extension_paths_and_expression_values
         let logical_width = query.bindings().len();
         let selected = r::plan(query.clone(), &db.planner_context(context::ParamBindings::default())).unwrap();
         assert!(selected.program().query().width() < logical_width, "fixture must reuse cells: {text}");
-        let mut plans = vec![r::RowPlan::reference(query).unwrap()];
+        let mut plans = vec![r::RowPlan::reference(query, 0).unwrap()];
         for layout in [r::RowLayoutMode::Compact,r::RowLayoutMode::Identity] {
             for execution in [r::RowExecution::Batched,r::RowExecution::Materialized] {
                 plans.push(selected.clone().with_layout(layout).with_execution(execution));
@@ -88,6 +88,7 @@ async fn physical_program_admission_rejects_insufficient_budget_before_writes() 
     assert!(matches!(failure,Error::Query(error) if error.detail=="memory_limit"));
     let reference = r::RowPlan::reference(
         helix_cypher::compile("MATCH (n:MustNotExist) RETURN count(*)").unwrap(),
+        0,
     )
     .unwrap();
     assert_eq!(
@@ -116,7 +117,7 @@ async fn identity_layout_rejects_a_row_that_cannot_fit_after_program_admission()
         .collect();
     let query = r::Query::new(bindings, vec![], vec![]).unwrap();
     assert_eq!(query.layout().width(), 0);
-    let plan = r::RowPlan::reference(query).unwrap();
+    let plan = r::RowPlan::reference(query, 0).unwrap();
     let row_bytes = size_of::<r::Row>() + plan.program().query().width() * size_of::<r::Value>();
     let memory_bytes = row_bytes - 1;
     assert!(plan.program().retained_layout_bytes() < memory_bytes);
@@ -163,7 +164,7 @@ async fn compact_rows_preserve_new_mutation_targets_and_atomic_failures() {
                 assert_eq!(result.rows,expected);
                 let observation = r::RowPlan::reference(helix_cypher::compile(
                     "MATCH (n:Created) RETURN n.key ORDER BY n.key",
-                ).unwrap()).unwrap();
+                ).unwrap(), 0).unwrap();
                 let actual = Interpreter::new(&db,context::ParamBindings::default()).execute_rows(
                     &observation,&BTreeMap::new(),Limits::default(),
                 ).await.unwrap();
@@ -181,7 +182,7 @@ async fn compact_rows_preserve_new_mutation_targets_and_atomic_failures() {
                     && error.phase==r::ErrorPhase::Runtime));
                 let observation = r::RowPlan::reference(helix_cypher::compile(
                     "MATCH (n:Rollback) RETURN count(*)",
-                ).unwrap()).unwrap();
+                ).unwrap(), 0).unwrap();
                 assert_eq!(Interpreter::new(&db,context::ParamBindings::default()).execute_rows(
                     &observation,&BTreeMap::new(),Limits::default(),
                 ).await.unwrap().rows,vec![vec![json!(0)]]);

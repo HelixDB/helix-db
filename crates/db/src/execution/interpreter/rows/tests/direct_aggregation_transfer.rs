@@ -169,7 +169,7 @@ async fn direct_groups_retain_incoming_order_dependencies_in_shared_plans() {
     let materialized = planned
         .clone()
         .with_execution(r::RowExecution::Materialized);
-    let reference = r::RowPlan::reference(query).unwrap();
+    let reference = r::RowPlan::reference(query, 0).unwrap();
     for plan in [&planned, &materialized, &reference] {
         let result = Interpreter::new(&db, context::ParamBindings::default())
             .execute_rows(plan, &BTreeMap::new(), Limits::default())

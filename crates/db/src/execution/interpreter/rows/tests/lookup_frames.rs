@@ -321,7 +321,7 @@ async fn indexed_pattern_frames_match_independent_products_and_paths() {
             for strategy in [
                 plan.clone(),
                 plan.clone().with_execution(r::RowExecution::Materialized),
-                r::RowPlan::reference(query.clone()).unwrap(),
+                r::RowPlan::reference(query.clone(), 0).unwrap(),
             ] {
                 let mut actual = Interpreter::new(&db, context::ParamBindings::default())
                     .execute_rows(
@@ -578,7 +578,7 @@ async fn indexed_pattern_fallbacks_share_sources_across_outer_batches() {
         for strategy in [
             plan.clone(),
             plan.clone().with_execution(r::RowExecution::Materialized),
-            r::RowPlan::reference(query.clone()).unwrap(),
+            r::RowPlan::reference(query.clone(), 0).unwrap(),
         ] {
             let actual = Interpreter::new(&db, context::ParamBindings::default())
                 .execute_rows(

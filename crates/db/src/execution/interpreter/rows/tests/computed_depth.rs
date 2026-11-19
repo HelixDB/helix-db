@@ -55,7 +55,7 @@ async fn computed_values_keep_depth_semantics_in_all_execution_strategies() {
             for strategy in [
                 plan.clone(),
                 plan.with_execution(r::RowExecution::Materialized),
-                r::RowPlan::reference(query).unwrap(),
+                r::RowPlan::reference(query, 0).unwrap(),
             ] {
                 let result = Interpreter::new(&db, context::ParamBindings::default())
                     .execute_rows(&strategy, &BTreeMap::new(), Limits::default())
@@ -107,7 +107,7 @@ async fn excessive_computed_depth_is_a_runtime_error_and_rolls_back_prior_writes
             for strategy in [
                 plan.clone(),
                 plan.with_execution(r::RowExecution::Materialized),
-                r::RowPlan::reference(query).unwrap(),
+                r::RowPlan::reference(query, 0).unwrap(),
             ] {
                 let error = Interpreter::new(&db, context::ParamBindings::default())
                     .execute_rows(&strategy, &BTreeMap::new(), Limits::default())

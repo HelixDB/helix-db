@@ -160,7 +160,7 @@ fn physical_program_preserves_logical_diagnostics_and_shares_native_access_progr
         r::RowLayoutMode::Identity
     );
     assert_eq!(
-        r::RowPlan::reference(query)
+        r::RowPlan::reference(query, 0)
             .unwrap()
             .program()
             .layout_mode(),

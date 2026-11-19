@@ -36,7 +36,7 @@ async fn matches_after_barriers_keep_the_actual_input_relation() {
         assert!(source > 0 && plan.batch_consumer(source).is_some(), "{text}");
         assert!(plan.pipeline().input_window(source).is_none(), "later producers must drain: {text}");
         for batch_rows in [1,2,7] {
-            for strategy in [plan.clone(),plan.clone().with_execution(r::RowExecution::Materialized),r::RowPlan::reference(query.clone()).unwrap()] {
+            for strategy in [plan.clone(),plan.clone().with_execution(r::RowExecution::Materialized),r::RowPlan::reference(query.clone(), 0).unwrap()] {
                 let result = Interpreter::new(&db,context::ParamBindings::default())
                     .execute_rows(&strategy,&BTreeMap::new(),Limits { batch_rows, ..Default::default() }).await.unwrap();
                 assert_eq!(result.rows,expected,"{text}; batch={batch_rows}");
@@ -135,7 +135,7 @@ async fn matches_after_writes_see_index_changes_and_drain_late_errors() {
         let plan=r::plan(query.clone(),&db.planner_context(context::ParamBindings::default())).unwrap();
         assert!(plan.batch_consumer(*plan.matches().keys().last().unwrap()).is_some());
         for batch_rows in [1,2,7] {
-            for strategy in [plan.clone(),plan.clone().with_execution(r::RowExecution::Materialized),r::RowPlan::reference(query.clone()).unwrap()] {
+            for strategy in [plan.clone(),plan.clone().with_execution(r::RowExecution::Materialized),r::RowPlan::reference(query.clone(), 0).unwrap()] {
                 let error=Interpreter::new(&db,context::ParamBindings::default()).execute_rows(&strategy,&BTreeMap::new(),Limits { batch_rows,..Default::default() }).await.unwrap_err();
                 assert!(matches!(error,Error::Query(error) if error.detail==detail),"{text}");
             }

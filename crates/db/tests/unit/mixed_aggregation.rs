@@ -81,7 +81,7 @@ async fn mixed_aggregate_common_plans_preserve_groups_empty_input_and_graph_valu
         let materialized = selected
             .clone()
             .with_execution(r::RowExecution::Materialized);
-        let reference = r::RowPlan::reference(query).unwrap();
+        let reference = r::RowPlan::reference(query, 0).unwrap();
         for plan in [&selected, &materialized, &reference] {
             for batch_rows in [1, 2, 7] {
                 let result = Interpreter::new(&db, context::ParamBindings::default())

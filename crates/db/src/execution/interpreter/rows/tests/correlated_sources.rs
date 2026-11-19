@@ -39,7 +39,7 @@ async fn correlated_disconnected_patterns_preserve_duplicates_and_optional_scope
         assert!(plan.matches()[&1].steps.iter().all(|step|!matches!(step,r::MatchStep::IndexLookup(_))));
         if !text.contains("ORDER BY") { expected.sort_by_key(|row|serde_json::to_string(row).unwrap()); }
         for batch_rows in [1,2,7] {
-            for strategy in [plan.clone(),plan.clone().with_execution(r::RowExecution::Materialized),r::RowPlan::reference(query.clone()).unwrap()] {
+            for strategy in [plan.clone(),plan.clone().with_execution(r::RowExecution::Materialized),r::RowPlan::reference(query.clone(), 0).unwrap()] {
                 let mut actual=Interpreter::new(&db,context::ParamBindings::default()).execute_rows(&strategy,&BTreeMap::new(),Limits{batch_rows,..Default::default()}).await.unwrap().rows;
                 if !text.contains("ORDER BY") { actual.sort_by_key(|row|serde_json::to_string(row).unwrap()); }
                 assert_eq!(actual,expected,"{text}; batch={batch_rows}");

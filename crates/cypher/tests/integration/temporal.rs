@@ -218,8 +218,7 @@ fn datetime_predicates_bound_index_access() {
             "MATCH (n:E) WHERE n.day = datetime($missing) RETURN n",
             "Empty",
         ),
-        // Text or numbers the planner cannot read, or the statement clock,
-        // which the planner does not know, keep the scan.
+        // Text or numbers the planner cannot read keep the scan.
         (
             "MATCH (n:E) WHERE n.at < datetime($bad) RETURN n",
             "LabelScan",
@@ -228,9 +227,165 @@ fn datetime_predicates_bound_index_access() {
             "MATCH (n:E) WHERE n.at < datetime($number) RETURN n",
             "LabelScan",
         ),
-        ("MATCH (n:E) WHERE n.at < datetime() RETURN n", "LabelScan"),
-        ("MATCH (n:E) WHERE n.day = datetime() RETURN n", "LabelScan"),
     ] {
         assert_eq!(source(text), expected, "{text}");
+    }
+}
+
+/// 2023-11-14T22:13:20.000Z, the statement clock of the plans below.
+const NOW: i64 = 1_700_000_000_000;
+const WEEK: i64 = 604_800_000;
+
+/// The planning context's statement clock is known before planning, so a
+/// comparison with `datetime()`, `timestamp()`, integer arithmetic over them
+/// and `datetime({epochMillis: …})` of such an integer bounds range and
+/// equality index access at the instant execution evaluates. An operand that
+/// would fail, such as an overflow or datetime arithmetic, keeps the scan,
+/// whose evaluation raises the error.
+#[test]
+fn clock_relative_predicates_bound_index_access() {
+    let indexes = catalog::IndexCatalogSnapshot::default()
+        .with_node_eq(catalog::ScopedPropertyKey::try_new("E", "day").unwrap())
+        .with_node_range(
+            catalog::ScopedPropertyDirectionKey::try_new(
+                "E",
+                "at",
+                helix_ast::index::RangeIndexDirection::Asc,
+            )
+            .unwrap(),
+        )
+        .with_node_range(
+            catalog::ScopedPropertyDirectionKey::try_new(
+                "E",
+                "ms",
+                helix_ast::index::RangeIndexDirection::Asc,
+            )
+            .unwrap(),
+        );
+    let mut context = context::PlannerContext {
+        indexes,
+        statement_time: NOW,
+        ..context::PlannerContext::default()
+    };
+    for (name, value) in [
+        ("window", P::I64(WEEK)),
+        ("text", P::String("a week".into())),
+    ] {
+        context
+            .params
+            .make_mut()
+            .values
+            .insert(ir::NonEmptyString::new(name).unwrap(), value);
+    }
+    let plan = |query: r::Query| {
+        let plan = r::plan(query, &context).unwrap();
+        assert_eq!(plan.statement_time(), NOW);
+        let first = plan.matches().values().next().expect("a MATCH");
+        let [step, ..] = first.sources[0].access.steps() else {
+            panic!("an access step");
+        };
+        format!("{:?}", step.op)
+    };
+    let cypher = |text: &str| (text.to_owned(), plan(helix_cypher::compile(text).unwrap()));
+    let sql = |text: &str| {
+        let query =
+            helix_cypher::sql::compile(text, &helix_cypher::sql::Mappings::default()).unwrap();
+        (text.to_owned(), plan(query))
+    };
+    let source = |op: &str| {
+        op.trim_start_matches("Access { plan: Node(")
+            .split(|c: char| !c.is_alphanumeric())
+            .next()
+            .unwrap()
+            .to_owned()
+    };
+    let datetime = |millis: i64| format!("DateTime({millis})");
+    let integer = |millis: i64| format!("I64({millis})");
+    for ((text, op), expected, bound) in [
+        (
+            cypher("MATCH (n:E) WHERE n.at < datetime() RETURN n"),
+            "RangeIndex",
+            datetime(NOW),
+        ),
+        (
+            cypher("MATCH (n:E) WHERE n.day = datetime() RETURN n"),
+            "Bitmap",
+            datetime(NOW),
+        ),
+        (
+            cypher("MATCH (n:E {at: datetime()}) RETURN n"),
+            "RangeIndex",
+            datetime(NOW),
+        ),
+        (
+            cypher("MATCH (n:E) WHERE n.at > datetime({epochMillis: timestamp() - 604800000}) RETURN n"),
+            "RangeIndex",
+            datetime(NOW - WEEK),
+        ),
+        (
+            cypher("MATCH (n:E) WHERE datetime({epochMillis: timestamp() - $window}) <= n.at RETURN n"),
+            "RangeIndex",
+            datetime(NOW - WEEK),
+        ),
+        (
+            cypher("MATCH (n:E) WHERE n.day = datetime({epochMillis: timestamp() / 86400000 * 86400000}) RETURN n"),
+            "Bitmap",
+            datetime(NOW / 86_400_000 * 86_400_000),
+        ),
+        (
+            cypher("MATCH (n:E) WHERE n.ms > timestamp() - $window RETURN n"),
+            "RangeIndex",
+            integer(NOW - WEEK),
+        ),
+        (
+            cypher("MATCH (n:E) WHERE -1000 + timestamp() < n.ms AND n.ms <= timestamp() % 1000 + 3 * 1000 RETURN n"),
+            "RangeIndex",
+            integer(NOW - 1000),
+        ),
+        (
+            cypher(
+                "MATCH (n:E) WITH n, timestamp() - $window AS since WHERE n.ms >= since RETURN n",
+            ),
+            "RangeIndex",
+            integer(NOW - WEEK),
+        ),
+        (
+            sql("SELECT e.seq FROM E e WHERE e.at <= NOW()"),
+            "RangeIndex",
+            datetime(NOW),
+        ),
+        (
+            sql("SELECT e.seq FROM E e WHERE e.at > CURRENT_TIMESTAMP(0)"),
+            "RangeIndex",
+            datetime((NOW + 500) / 1000 * 1000),
+        ),
+        (
+            sql("SELECT e.seq FROM E e WHERE e.day = CURRENT_TIMESTAMP"),
+            "Bitmap",
+            datetime(NOW),
+        ),
+        (
+            sql("SELECT e.seq FROM E e WHERE e.ms >= TIMESTAMP() - 604800000"),
+            "RangeIndex",
+            integer(NOW - WEEK),
+        ),
+    ] {
+        assert_eq!(source(&op), expected, "{text}: {op}");
+        assert!(op.contains(&bound), "{text}: {bound} in {op}");
+    }
+    // Operands that fail, or whose value the planner cannot read, keep the
+    // scan, so evaluation decides and raises the error.
+    for text in [
+        "MATCH (n:E) WHERE n.ms > timestamp() * 9223372036854775807 RETURN n",
+        "MATCH (n:E) WHERE n.ms > timestamp() / 0 RETURN n",
+        "MATCH (n:E) WHERE n.ms > timestamp() % 0 RETURN n",
+        "MATCH (n:E) WHERE n.ms > -(timestamp() - timestamp() - 9223372036854775807 - 1) RETURN n",
+        "MATCH (n:E) WHERE n.ms > timestamp() - $text RETURN n",
+        "MATCH (n:E) WHERE n.ms > timestamp() - 1.5 RETURN n",
+        "MATCH (n:E) WHERE n.at > datetime({epochMillis: timestamp() * 100000}) RETURN n",
+        "MATCH (n:E) WHERE n.at > datetime({epochMillis: $text}) RETURN n",
+        "MATCH (n:E) WHERE n.at > datetime({epochMillis: n.ms}) RETURN n",
+    ] {
+        assert_eq!(source(&cypher(text).1), "LabelScan", "{text}");
     }
 }

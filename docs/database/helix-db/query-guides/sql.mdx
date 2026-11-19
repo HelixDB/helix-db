@@ -406,7 +406,8 @@ profile and are rejected (`function`): `CURRENT_DATE` becomes `date()`,
 and `stddev` `stDev`.
 
 Timestamps are Cypher's [UTC datetimes](/database/helix-db/query-guides/cypher#datetimes).
-`CURRENT_TIMESTAMP` and `NOW()` become `datetime()`, the statement's clock.
+`CURRENT_TIMESTAMP` and `NOW()` become `datetime()`, the statement's clock,
+which is read before planning, so `WHERE e.at > NOW()` can bound a range index.
 Their one optional argument is a fractional-seconds precision from 0 to 6, as
 in PostgreSQL's `CURRENT_TIMESTAMP(p)` and MySQL's `NOW(p)`, which rounds the
 clock; a datetime holds milliseconds, so 3 to 6 change nothing. Any other

@@ -308,7 +308,9 @@ pub(in crate::execution::interpreter) struct ExecutionContext<'db> {
     /// [`super::access::PendingSets`]).
     pub(in crate::execution::interpreter) pending_sets: Arc<super::access::PendingSets>,
     /// UTC epoch milliseconds read once when the request starts: the statement
-    /// clock every Cypher `datetime()` and `timestamp()` returns.
+    /// clock every `datetime()` and `timestamp()`, Cypher or native, returns. A
+    /// Cypher statement replaces it with the clock its plan was folded from
+    /// ([`helix_planner::relational::RowPlan::statement_time`]).
     pub(in crate::execution::interpreter) statement_time: i64,
     #[cfg(test)]
     pub(in crate::execution::interpreter) projection_reads: Arc<ProjectionReadCounters>,

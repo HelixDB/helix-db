@@ -56,6 +56,10 @@ impl Interpreter<'_> {
         limits: Limits,
     ) -> Result<O::Value> {
         self.ctx.check_execution_deadline()?;
+        // The plan's index bounds were folded from this clock, so every
+        // `datetime()` and `timestamp()` of the statement, in a residual
+        // comparison or a write, evaluates to the same instant.
+        self.ctx.statement_time = plan.statement_time();
         self.ctx.row_memory = Some(memory::Budget::new(limits.memory_bytes));
         let _program_memory = self
             .ctx

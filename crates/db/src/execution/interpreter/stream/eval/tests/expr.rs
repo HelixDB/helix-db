@@ -203,17 +203,20 @@ async fn expressions_cover_arithmetic_case_parameters_and_errors() {
 #[tokio::test]
 async fn expressions_cover_datetime_else_branch_and_type_error_edges() {
     let db = test_support::open_db("stream-eval-expression-edges").await;
-    let ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
     let row = ExecutionRow::empty();
 
-    assert!(matches!(
+    // The clock is the request's statement time, read once, never the wall
+    // clock at each evaluation.
+    ctx.statement_time = 1_000_000_000_000;
+    assert_eq!(
         ctx.eval_expr(&row, &Expr::Timestamp).await.unwrap(),
-        DbPropertyValue::I64(_)
-    ));
-    assert!(matches!(
+        DbPropertyValue::I64(1_000_000_000_000)
+    );
+    assert_eq!(
         ctx.eval_expr(&row, &Expr::DateTimeNow).await.unwrap(),
-        DbPropertyValue::DateTime(_)
-    ));
+        DbPropertyValue::DateTime(1_000_000_000_000)
+    );
     assert_eq!(
         ctx.eval_expr(
             &row,

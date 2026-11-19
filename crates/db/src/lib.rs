@@ -2681,7 +2681,8 @@ impl HelixDB {
         self.runtime_catalog_snapshot()
     }
 
-    /// Build the immutable planner context for a request.
+    /// Build the immutable planner context for a request, reading its
+    /// statement clock ([`PlannerContext::statement_time`]).
     pub fn planner_context(&self, params: ParamBindings) -> PlannerContext {
         let indexes = self.runtime_catalog_snapshot();
         PlannerContext {
@@ -2693,10 +2694,12 @@ impl HelixDB {
             storage: Default::default(),
             limits: Default::default(),
             optimizer_limits: Default::default(),
+            statement_time: chrono::Utc::now().timestamp_millis(),
         }
     }
 
-    /// Build the immutable planner context for a request storage namespace.
+    /// Build the immutable planner context for a request storage namespace,
+    /// reading its statement clock ([`PlannerContext::statement_time`]).
     pub async fn planner_context_scoped(
         &self,
         params: ParamBindings,
@@ -2712,6 +2715,7 @@ impl HelixDB {
             storage: Default::default(),
             limits: Default::default(),
             optimizer_limits: Default::default(),
+            statement_time: chrono::Utc::now().timestamp_millis(),
         })
     }
 
@@ -2759,6 +2763,9 @@ impl HelixDB {
                 storage: Default::default(),
                 limits: Default::default(),
                 optimizer_limits: Default::default(),
+                // The request's one clock read: planning folds it into
+                // index bounds and execution evaluates it.
+                statement_time: chrono::Utc::now().timestamp_millis(),
             },
             proof: CatalogRefreshProof {
                 runtime: Arc::downgrade(&self.inner),

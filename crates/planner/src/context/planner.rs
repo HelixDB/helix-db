@@ -36,6 +36,14 @@ pub struct PlannerContext {
     /// Guardrails for Cascades exploration.
     #[serde(default)]
     pub optimizer_limits: OptimizerLimits,
+    /// The statement clock in UTC epoch milliseconds: the instant every
+    /// `datetime()` and `timestamp()` of the statement evaluates to. A request
+    /// reads it once before planning, so the planner can fold clock-relative
+    /// operands into index bounds, and execution evaluates the same instant
+    /// (see [`crate::relational::RowPlan::statement_time`]). The default is
+    /// the Unix epoch, a fixed clock for reproducible planning.
+    #[serde(default)]
+    pub statement_time: i64,
 }
 
 impl PlannerContext {
