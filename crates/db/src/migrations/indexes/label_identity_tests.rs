@@ -509,6 +509,7 @@ async fn an_open_starts_the_copy_and_reads_stay_exact_at_every_step() {
         session.totals(),
         LabelIdentityMigration {
             copied: exact_before.len() as u64,
+            members: exact_before.values().map(|ids| ids.len()).sum(),
             ..LabelIdentityMigration::default()
         }
     );

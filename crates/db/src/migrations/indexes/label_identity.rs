@@ -187,6 +187,9 @@ impl ExactRows {
 pub(crate) struct LabelIdentityMigration {
     /// Hash rows copied to their exact key.
     pub(crate) copied: u64,
+    /// Members copied into exact rows, counting a row copied a range at a
+    /// time as it goes, so progress shows while one large row is copied.
+    pub(crate) members: u64,
     /// Hash rows no live member names, or neighbor rows no edge label
     /// explains; nothing reads them once the migration is published.
     pub(crate) skipped: u64,
@@ -200,6 +203,7 @@ pub(crate) struct LabelIdentityMigration {
 impl LabelIdentityMigration {
     fn add(&mut self, batch: Self) {
         self.copied += batch.copied;
+        self.members += batch.members;
         self.skipped += batch.skipped;
         self.stale_members += batch.stale_members;
         self.conflicts += batch.conflicts;
@@ -230,6 +234,9 @@ pub(crate) struct LabelCopySession {
     /// Hash rows the cleanup deleted.
     deleted: u64,
     started: Instant,
+    /// When this session's first cleanup step began: the cleanup's rate and
+    /// elapsed time count from here, not from the copy.
+    cleanup_started: Option<Instant>,
     reported: Instant,
     /// Runs before the next batch commits, so a test can write between a
     /// batch's reads and its commit.
@@ -257,6 +264,7 @@ impl LabelCopySession {
             totals: LabelIdentityMigration::default(),
             deleted: 0,
             started: Instant::now(),
+            cleanup_started: None,
             reported: Instant::now(),
             #[cfg(test)]
             before_commit: None,
@@ -323,6 +331,7 @@ impl LabelCopySession {
         let elapsed = self.started.elapsed();
         tracing::info!(
             copied = self.totals.copied,
+            members = self.totals.members,
             skipped = self.totals.skipped,
             stale_members = self.totals.stale_members,
             conflicts = self.totals.conflicts,
@@ -344,7 +353,10 @@ impl LabelCopySession {
             return;
         }
         self.reported = Instant::now();
-        let elapsed = self.started.elapsed();
+        let elapsed = self
+            .cleanup_started
+            .get_or_insert_with(Instant::now)
+            .elapsed();
         tracing::info!(
             deleted = self.deleted,
             rows_per_second = per_second(self.deleted, elapsed),
@@ -668,6 +680,7 @@ async fn publish(writer: &crate::HelixWriter, session: &LabelCopySession) -> Res
     let totals = session.totals;
     tracing::info!(
         copied = totals.copied,
+        members = totals.members,
         skipped = totals.skipped,
         stale_members = totals.stale_members,
         conflicts = totals.conflicts,
@@ -732,6 +745,7 @@ impl CopyBatch {
         if self.members + count <= self.max_members {
             self.totals.copied += 1;
             self.totals.stale_members += stale;
+            self.totals.members += count;
             if !members.is_empty() {
                 self.members += count;
                 self.bytes = self
@@ -748,6 +762,7 @@ impl CopyBatch {
             .select(self.max_members - 1)
             .expect("a row larger than the batch has a member at its limit");
         members.remove_range(through + 1..);
+        self.totals.members += members.len();
         self.members = self.max_members;
         self.rows.push((exact, members));
         self.progress = Some(label_migration::LabelCopyProgressValue::members(
@@ -1356,6 +1371,7 @@ pub(crate) async fn delete_hash_label_rows_once(
     {
         return Ok(LabelHashCleanup::Unpublished);
     }
+    let started = *session.cleanup_started.get_or_insert_with(Instant::now);
     let progress_key =
         super::super::scoped_metadata_key(DataScope::LegacyUnscoped, LABEL_HASH_CLEANUP_PROGRESS);
     let after = db
@@ -1400,7 +1416,7 @@ pub(crate) async fn delete_hash_label_rows_once(
         session.cleaned(deleted);
         tracing::info!(
             deleted = session.deleted,
-            elapsed_ms = u64::try_from(session.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             "label identity cleanup deleted the last retired hash label rows"
         );
         return Ok(LabelHashCleanup::Done { deleted });
