@@ -202,6 +202,10 @@ pub(crate) struct DeltaLedgers {
     /// verified one chunk of its keys.
     #[cfg(test)]
     pub(super) evict_after_chunk: parking_lot::Mutex<Option<DeltaGeneration>>,
+    /// The most rows any observation returned, so tests can bound what an
+    /// observation holds in memory.
+    #[cfg(test)]
+    pub(super) largest_observation: std::sync::atomic::AtomicUsize,
 }
 
 /// What [`DeltaLedgers::candidates`] found in an observation's ledger.
@@ -217,11 +221,17 @@ enum Candidates {
 }
 
 /// How much of the backlog an observation reads before it stops counting.
+///
+/// Production observations always stop at a reach, so one never holds more
+/// than about that many batches of deltas in memory, however large the
+/// backlog; a caller that needs every delta observes again after draining
+/// what it read.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Reach {
     /// Stops once the deltas read exceed this many batches.
     Batches(usize),
     /// Reads every pending delta.
+    #[cfg(test)]
     Complete,
 }
 
@@ -255,6 +265,7 @@ impl ObservedBacklog {
     fn reached(&self, limits: SearchIndexBatchLimits, reach: Reach) -> bool {
         match reach {
             Reach::Batches(batches) => self.exceeds(limits, batches),
+            #[cfg(test)]
             Reach::Complete => false,
         }
     }
@@ -342,7 +353,12 @@ impl DeltaLedgers {
             };
             let values = db.multi_get(&chunk).await?;
             verified = chunk.last().cloned();
+            // Stops at the reach mid-chunk, so a chunk never takes the
+            // observation past it by more than one delta.
             for (key, value) in chunk.into_iter().zip(values) {
+                if observed.reached(limits, reach) {
+                    break;
+                }
                 match value {
                     Some(value) => observed.insert(key, value),
                     None => absent.push(key),
@@ -394,6 +410,9 @@ impl DeltaLedgers {
             };
         }
         self.finish(observation, absent, scanned, advanced);
+        #[cfg(test)]
+        self.largest_observation
+            .fetch_max(observed.rows.len(), std::sync::atomic::Ordering::Relaxed);
         Ok(observed)
     }
 

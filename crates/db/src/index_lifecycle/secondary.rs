@@ -244,16 +244,54 @@ enum PreparedSecondaryStep {
     },
     /// A catch-up or activation step that fences the scope's writers:
     /// catch-up holds the write fence, activation the lifecycle permit.
-    /// `deltas` are every pending delta key, observed under that permit.
-    /// Bounded drains committed under it reconciled every delta through
+    /// `deltas` are the keys the last observation under that permit read,
+    /// about [`GATED_BACKLOG_BATCHES`] batches at most: every pending delta,
+    /// unless a drain blocked on one of them. Bounded drains committed under it reconciled every delta through
     /// `drained_through`, so the step's own drain resumes after it and passes
     /// every key or blocks on the entity one of them blocked on; `counters`
     /// include their work.
     Gated {
         counters: OperationCounters,
         drained_through: Option<Bytes>,
-        deltas: Vec<Bytes>,
+        deltas: GatedDeltas,
     },
+}
+
+/// The delta keys a gated step drains after the bounded drains before it,
+/// read by the last observation under its permit.
+#[derive(Debug)]
+enum GatedDeltas {
+    /// Every pending delta: the observation was within its reach.
+    Every(Vec<Bytes>),
+    /// One reach of a larger backlog, on whose first delta after the
+    /// drains' resume key a bounded drain blocked. The step blocks on the
+    /// same entity: no writer runs under the permit.
+    Blocked(Vec<Bytes>),
+}
+
+impl GatedDeltas {
+    fn keys(&self) -> &[Bytes] {
+        match self {
+            Self::Every(keys) | Self::Blocked(keys) => keys,
+        }
+    }
+
+    /// Passes the step's `result` on, unless it did not block on keys a
+    /// bounded drain blocked on: they are not every pending delta, so
+    /// nothing else may follow from them. The step then retries from a new
+    /// observation.
+    fn confirm(&self, result: IndexOperationStepResult) -> Result<IndexOperationStepResult> {
+        match (self, result) {
+            (Self::Blocked(_), result)
+                if !matches!(result, IndexOperationStepResult::Blocked(_)) =>
+            {
+                Err(HelixDbError::TransactionConflict(
+                    "a gated secondary step passed the delta its drain blocked on".to_string(),
+                ))
+            }
+            (_, result) => Ok(result),
+        }
+    }
 }
 
 impl PreparedSecondaryOperationStep {
@@ -317,17 +355,18 @@ impl PreparedSecondaryOperationStep {
                     cursor: progress.cursor.clone(),
                     counters: *counters,
                 };
-                catch_up(
+                let result = catch_up(
                     transaction,
                     scope,
                     operation,
                     definition,
                     &progress,
-                    deltas,
+                    deltas.keys(),
                     drained_through.clone(),
                     limits,
                 )
-                .await
+                .await?;
+                deltas.confirm(result)
             }
             (
                 PreparedSecondaryStep::Validate { counters, batch },
@@ -353,17 +392,18 @@ impl PreparedSecondaryOperationStep {
                 },
                 SecondaryBuildStage::Activate(_),
             ) => {
-                activate(
+                let result = activate(
                     transaction,
                     scope,
                     operation,
                     definition,
                     *counters,
-                    deltas,
+                    deltas.keys(),
                     drained_through.clone(),
                     limits,
                 )
-                .await
+                .await?;
+                deltas.confirm(result)
             }
             (PreparedSecondaryStep::Exact { keys }, SecondaryBuildStage::Activate(progress)) => {
                 catch_up_exact(
@@ -1214,9 +1254,11 @@ impl IndexOperationDriver for SecondaryIndexDriver {
     ///
     /// Every backlog observation goes through the generation's
     /// [`delta_ledger`], so none rescans deltas an earlier one passed. Once
-    /// the permit is held, no writer holds its mutation permit, so one
-    /// complete observation reads every pending delta, and the gated drains
-    /// reconcile exactly those keys.
+    /// the permit is held, no writer holds its mutation permit, so the
+    /// backlog only shrinks: the gated drains observe and reconcile it one
+    /// reach at a time until an observation within its reach reads every
+    /// pending delta, which keeps memory within one reach however large the
+    /// backlog under the permit is.
     async fn prepare_step(
         &self,
         db: &slatedb::Db,
@@ -1341,31 +1383,32 @@ impl IndexOperationDriver for SecondaryIndexDriver {
         let permit = self.scope_gates.step_permit(db, scope, gate).await?;
         // Writes that committed while the permit was awaited may have taken
         // a catch-up backlog past the gated reach. A stalled validation and
-        // activation drain it regardless: they fence writers to finish.
-        let reach = match stage {
-            SecondaryBuildStage::CatchUp(_) => delta_ledger::Reach::Batches(GATED_BACKLOG_BATCHES),
-            SecondaryBuildStage::Scan(_)
-            | SecondaryBuildStage::Validate(_)
-            | SecondaryBuildStage::Activate(_) => delta_ledger::Reach::Complete,
-        };
-        let backlog = observe(reach).await?;
+        // activation drain it regardless, a reach at a time: they fence
+        // writers to finish.
+        let backlog = observe(delta_ledger::Reach::Batches(GATED_BACKLOG_BATCHES)).await?;
         if backlog.exceeds(limits, GATED_BACKLOG_BATCHES)
             && matches!(stage, SecondaryBuildStage::CatchUp(_))
         {
             drop(permit);
             return Ok(exact(first_batch(&backlog, scope, operation, limits)?));
         }
-        // Within its reach, the observation read every pending delta.
-        let deltas = backlog.rows.into_keys().collect::<Vec<_>>();
+        let (counters, drained_through, deltas) = drain_backlog_under_gate(
+            db,
+            ledgers,
+            generation,
+            operation,
+            counters,
+            limits,
+            disposition,
+            backlog,
+        )
+        .await?;
         if matches!(stage, SecondaryBuildStage::Activate(_)) {
             // A committed activation leaves nothing for the ledger to track;
             // one that does not commit starts its next observation again
             // from one full scan.
             ledgers.forget(generation);
         }
-        let (counters, drained_through) =
-            drain_backlog_under_gate(db, scope, operation, counters, limits, disposition, &deltas)
-                .await?;
         let step = match stage {
             SecondaryBuildStage::Validate(progress) => PreparedSecondaryStep::Validate {
                 counters,
@@ -1539,88 +1582,125 @@ fn first_batch(
 /// Drains every pending delta in bounded transactions of their own while the
 /// caller fences the scope's writers (the write fence or lifecycle permit).
 ///
-/// `deltas` holds every pending delta key in order, from a complete
-/// observation taken under that permit (see [`delta_ledger`]). No writer
-/// records a delta while the permit is held, so the backlog only shrinks,
-/// and each transaction runs until it has passed every key or a budget of
-/// `limits` stops it. Draining to the end, rather than estimating what the
-/// step's own transaction can finish, keeps every budget in charge: the step
-/// then finds nothing left and moves on. Each transaction re-reads the
-/// claimed operation, so an abort or a newer claim makes it fail instead of
-/// commit. A drain that blocks commits the reconciliations before the
-/// blocked entity, which leaves that entity first for the step to block on
-/// durably.
+/// `backlog` is an observation taken under that permit to
+/// [`GATED_BACKLOG_BATCHES`]. No writer records a delta while the permit is
+/// held, so the backlog only shrinks: the drain reconciles the observed
+/// deltas, observes the next reach through the generation's ledger, and so
+/// on until an observation within its reach, which read every pending delta
+/// (see [`delta_ledger`]). Memory therefore stays within one reach of
+/// deltas however large the backlog under the permit is. Within each reach,
+/// each transaction runs until it has passed every key or a budget of
+/// `limits` stops it, and resumes after the last delta the previous one
+/// reconciled, so none reads a key again. Draining to the end, rather than
+/// estimating what the step's own transaction can finish, keeps every
+/// budget in charge: the step then finds nothing left and moves on. Each
+/// transaction re-reads the claimed operation, so an abort or a newer claim
+/// makes it fail instead of commit. A drain that blocks commits the
+/// reconciliations before the blocked entity and stops, which leaves that
+/// entity first for the step to block on durably.
 ///
-/// Each transaction resumes after the last delta the previous one
-/// reconciled, so none reads a key again.
-///
-/// Returns the counters the step continues from, and the last delta key a
-/// committed drain reconciled, which the step's own drain resumes after.
-/// Counters are persisted only with the step's checkpoint, so a step that
-/// does not commit after these drains did (a lost conflict, a crash) leaves
-/// their committed work uncounted. Counters are progress telemetry; no
-/// lifecycle decision reads them.
+/// Returns the counters the step continues from, the last delta key a
+/// committed drain of the last reach reconciled, which the step's own drain
+/// resumes after, and that reach's delta keys. Counters are persisted only
+/// with the step's checkpoint, so a step that does not commit after these
+/// drains did (a lost conflict, a crash) leaves their committed work
+/// uncounted. Counters are progress telemetry; no lifecycle decision reads
+/// them.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a gated drain binds its storage, ledgers, generation, operation, counters, budgets, disposition, and first observation"
+)]
 async fn drain_backlog_under_gate(
     db: &slatedb::Db,
-    scope: DataScope,
+    ledgers: &delta_ledger::DeltaLedgers,
+    generation: delta_ledger::DeltaGeneration,
     operation: &IndexOperationRecord,
     mut counters: OperationCounters,
     limits: SearchIndexBatchLimits,
     disposition: AppliedStateDisposition,
-    deltas: &[Bytes],
-) -> Result<(OperationCounters, Option<Bytes>)> {
-    let mut drained_through = None;
+    mut backlog: delta_ledger::ObservedBacklog,
+) -> Result<(OperationCounters, Option<Bytes>, GatedDeltas)> {
+    let scope = generation.scope;
     loop {
-        let transaction = db
-            .begin(slatedb::IsolationLevel::SerializableSnapshot)
-            .await?;
-        let claimed =
-            super::outbox::load_exact_link(&transaction, scope, operation.operation_id()).await?;
-        if !claimed.is_some_and(|(_, claimed, _)| {
-            claimed.operation_revision() == operation.operation_revision()
-                && claimed.execution_state() == operation.execution_state()
-        }) {
-            return Err(HelixDbError::TransactionConflict(
-                "secondary operation claim changed before a gated drain".to_string(),
-            ));
-        }
-        let record = load_operation_index(&transaction, scope, operation).await?;
-        let ValidatedDynamicIndexDefinition::Secondary(definition) = record.definition() else {
-            return Err(corruption("gated secondary drain loaded another family"));
-        };
-        let mut accounting = BatchAccounting::new(counters, limits);
-        let mut staged_through = drained_through.clone();
-        let drain = drain_build_deltas(
-            &transaction,
-            scope,
-            operation,
-            definition,
-            &mut accounting,
-            disposition,
-            deltas,
-            &mut staged_through,
-        )
-        .await?;
-        // An empty accounting staged nothing: every remaining key was
-        // already reconciled, or its first entity blocks, which the step
-        // records durably.
-        if accounting.is_empty() {
-            return Ok((counters, drained_through));
-        }
-        counters = accounting.finish()?;
-        // Like a progressed step, a drain does not wait for the WAL upload,
-        // which would hold the scope's writers for that long: a crash loses
-        // it with every later commit, and its deltas stay pending.
-        transaction
-            .commit_with_options(&crate::transaction::CommitDurability::Applied.write_options())
-            .await?;
-        drained_through = staged_through;
-        match drain {
-            DeltaDrain::BudgetExhausted => {}
-            DeltaDrain::Drained | DeltaDrain::Blocked(_) => {
-                return Ok((counters, drained_through));
+        // Within its reach, the observation read every pending delta.
+        let complete = !backlog.exceeds(limits, GATED_BACKLOG_BATCHES);
+        let deltas = backlog.rows.into_keys().collect::<Vec<_>>();
+        let mut drained_through = None;
+        let blocked = loop {
+            let transaction = db
+                .begin(slatedb::IsolationLevel::SerializableSnapshot)
+                .await?;
+            let claimed =
+                super::outbox::load_exact_link(&transaction, scope, operation.operation_id())
+                    .await?;
+            if !claimed.is_some_and(|(_, claimed, _)| {
+                claimed.operation_revision() == operation.operation_revision()
+                    && claimed.execution_state() == operation.execution_state()
+            }) {
+                return Err(HelixDbError::TransactionConflict(
+                    "secondary operation claim changed before a gated drain".to_string(),
+                ));
             }
+            let record = load_operation_index(&transaction, scope, operation).await?;
+            let ValidatedDynamicIndexDefinition::Secondary(definition) = record.definition() else {
+                return Err(corruption("gated secondary drain loaded another family"));
+            };
+            let mut accounting = BatchAccounting::new(counters, limits);
+            let mut staged_through = drained_through.clone();
+            let drain = drain_build_deltas(
+                &transaction,
+                scope,
+                operation,
+                definition,
+                &mut accounting,
+                disposition,
+                &deltas,
+                &mut staged_through,
+            )
+            .await?;
+            // An empty accounting staged nothing: every remaining key was
+            // already reconciled, or its first entity blocks, which the step
+            // records durably.
+            let staged = !accounting.is_empty();
+            if staged {
+                counters = accounting.finish()?;
+                // Like a progressed step, a drain does not wait for the WAL
+                // upload, which would hold the scope's writers for that long:
+                // a crash loses it with every later commit, and its deltas
+                // stay pending.
+                transaction
+                    .commit_with_options(
+                        &crate::transaction::CommitDurability::Applied.write_options(),
+                    )
+                    .await?;
+                drained_through = staged_through;
+            }
+            match drain {
+                DeltaDrain::Drained => break false,
+                DeltaDrain::Blocked(_) => break true,
+                // A fresh batch admits at least one delta or blocks on it.
+                DeltaDrain::BudgetExhausted if !staged => {
+                    return Err(corruption(
+                        "a gated secondary drain staged nothing before its budget",
+                    ));
+                }
+                DeltaDrain::BudgetExhausted => {}
+            }
+        };
+        if blocked {
+            return Ok((counters, drained_through, GatedDeltas::Blocked(deltas)));
         }
+        if complete {
+            return Ok((counters, drained_through, GatedDeltas::Every(deltas)));
+        }
+        backlog = ledgers
+            .observe(
+                db,
+                generation,
+                limits,
+                delta_ledger::Reach::Batches(GATED_BACKLOG_BATCHES),
+            )
+            .await?;
     }
 }
 
@@ -11928,6 +12008,224 @@ mod tests {
         assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources)
             .await;
         db.close().await.expect("secondary test database closes");
+    }
+
+    /// A gated drain under a backlog far beyond its reach, as a stalled
+    /// validation or an activation whose exact preparations ran out meets,
+    /// observes and reconciles it one reach at a time: no observation holds
+    /// more than [`GATED_BACKLOG_BATCHES`] batches of deltas, and the
+    /// activated generation still equals its source.
+    #[tokio::test]
+    async fn a_gated_drain_holds_one_reach_of_a_backlog_far_beyond_it() {
+        let reach = GATED_BACKLOG_BATCHES;
+        let entities = u64::try_from(9 * reach).expect("small count");
+        let stages: [(&str, fn(&SecondaryBuildStage) -> bool); 2] = [
+            ("secondary-gated-reach-validation", is_validation),
+            ("secondary-gated-reach-activation", is_activation),
+        ];
+        for (name, reached) in stages {
+            let definition = validated(
+                SecondaryIndexDefinition::node_equality("User", "email")
+                    .expect("node equality definition"),
+            );
+            let (
+                db,
+                gates,
+                driver,
+                operation_id,
+                index_id,
+                generation,
+                mut claim_sequence,
+                mut sources,
+            ) = build_at_stage(name, &definition, entities, reached).await;
+            let scope = DataScope::LegacyUnscoped;
+            for entity_id in 0..entities {
+                let after = user_properties(&format!("moved-{entity_id}@example.com"));
+                mutate_source(
+                    &db,
+                    &driver,
+                    scope,
+                    IndexElementKind::Node,
+                    entity_id,
+                    &sources[&entity_id],
+                    &after,
+                )
+                .await
+                .expect("the write records a delta");
+                sources.insert(entity_id, after);
+            }
+            let operation = read_operation(&db, scope, operation_id)
+                .await
+                .expect("operation reads")
+                .expect("operation exists");
+            // The next preparation takes its permit over the whole backlog.
+            match build_stage(&db, operation_id).await {
+                SecondaryBuildStage::Validate(progress) => {
+                    for _ in 0..PREPARATIONS_BEFORE_FENCE {
+                        assert!(!driver.preparation_stalled(
+                            &operation,
+                            StallPoint::Validate(progress.cursor.clone())
+                        ));
+                    }
+                }
+                SecondaryBuildStage::Activate(_) => {
+                    for _ in 0..PREPARATIONS_BEFORE_FENCE {
+                        assert!(driver.activation_drains_again(&operation, None));
+                    }
+                }
+                stage => panic!("{name}: unexpected stage {stage:?}"),
+            }
+            let deltas =
+                || generation_rows(&db, scope, RecordKind::BuildDelta, index_id, generation);
+            assert_eq!(
+                deltas().await.len(),
+                usize::try_from(entities).expect("small count")
+            );
+            let largest = &gates.delta_ledgers().largest_observation;
+            largest.store(0, std::sync::atomic::Ordering::Relaxed);
+            let limits = one_entity_limits();
+            let step =
+                drive_one_with_limits(&db, &driver, operation_id, &mut claim_sequence, limits)
+                    .await;
+            assert!(
+                deltas().await.is_empty(),
+                "{name}: the gated drain reconciles the whole backlog"
+            );
+            let held = largest.load(std::sync::atomic::Ordering::Relaxed);
+            assert!(
+                held > 0 && held <= reach + 1,
+                "{name}: an observation held {held} deltas of a backlog of {entities}"
+            );
+            if step == CommittedOperationStep::Progressed {
+                assert_eq!(
+                    drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+                    CommittedOperationStep::Completed,
+                    "{name}"
+                );
+            } else {
+                assert_eq!(step, CommittedOperationStep::Completed, "{name}");
+            }
+            assert_generation_equals_source(
+                &db,
+                scope,
+                &definition,
+                index_id,
+                generation,
+                &sources,
+            )
+            .await;
+            db.close().await.expect("secondary test database closes");
+        }
+    }
+
+    /// A gated drain that blocks within one reach of a larger backlog hands
+    /// the step only that reach, and the step blocks on the same entity.
+    #[tokio::test]
+    async fn a_gated_drain_blocked_within_one_reach_blocks_the_step() {
+        let definition = validated(
+            SecondaryIndexDefinition::node_unique_equality("User", "email")
+                .expect("unique definition"),
+        );
+        let entities = u64::try_from(4 * GATED_BACKLOG_BATCHES).expect("small count");
+        let (db, gates, driver, operation_id, index_id, generation, mut claim_sequence, sources) =
+            build_at_stage(
+                "secondary-gated-reach-blocked",
+                &definition,
+                entities,
+                is_activation,
+            )
+            .await;
+        let scope = DataScope::LegacyUnscoped;
+        let duplicate = user_properties("duplicate@example.com");
+        for entity_id in 0..entities {
+            let after = if matches!(entity_id, 1 | 2) {
+                duplicate.clone()
+            } else {
+                user_properties(&format!("moved-{entity_id}@example.com"))
+            };
+            legacy_building_write(
+                &db,
+                &driver,
+                scope,
+                &definition,
+                index_id,
+                generation,
+                entity_id,
+                &sources[&entity_id],
+                &after,
+            )
+            .await;
+        }
+        let operation = read_operation(&db, scope, operation_id)
+            .await
+            .expect("operation reads")
+            .expect("operation exists");
+        for _ in 0..PREPARATIONS_BEFORE_FENCE {
+            assert!(driver.activation_drains_again(&operation, None));
+        }
+        let largest = &gates.delta_ledgers().largest_observation;
+        largest.store(0, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            drive_one_with_limits(
+                &db,
+                &driver,
+                operation_id,
+                &mut claim_sequence,
+                one_entity_limits()
+            )
+            .await,
+            CommittedOperationStep::Blocked
+        );
+        assert!(largest.load(std::sync::atomic::Ordering::Relaxed) <= GATED_BACKLOG_BATCHES + 1);
+        let operation = read_operation(&db, scope, operation_id)
+            .await
+            .expect("blocked operation reads")
+            .expect("blocked operation exists");
+        assert!(matches!(
+            operation.execution_state(),
+            IndexOperationExecutionState::Blocked(
+                IndexOperationBlocker::UniquenessViolation {
+                    first_entity_id,
+                    second_entity_id,
+                }
+            ) if first_entity_id.get() == 1 && second_entity_id.get() == 2
+        ));
+        assert_eq!(
+            generation_rows(&db, scope, RecordKind::BuildDelta, index_id, generation)
+                .await
+                .len(),
+            usize::try_from(entities - 2).expect("small count"),
+            "only the deltas before the blocked entity were reconciled"
+        );
+        db.close().await.expect("secondary test database closes");
+    }
+
+    /// A step handed one reach a drain blocked in must block too: any other
+    /// result is retried rather than trusted, since that reach is not every
+    /// pending delta.
+    #[test]
+    fn a_step_over_a_blocked_reach_must_block() {
+        let completed = || {
+            IndexOperationStepResult::Completed(IndexOperationOutcome::Build(
+                BuildOperationOutcome::Succeeded,
+            ))
+        };
+        assert!(matches!(
+            GatedDeltas::Blocked(Vec::new()).confirm(completed()),
+            Err(HelixDbError::TransactionConflict(_))
+        ));
+        assert!(matches!(
+            GatedDeltas::Every(Vec::new()).confirm(completed()),
+            Ok(IndexOperationStepResult::Completed(_))
+        ));
+        let blocked = IndexOperationStepResult::Blocked(IndexOperationBlocker::InvalidSourceData {
+            entity_kind: IndexElementKind::Node,
+            entity_id: IndexEntityId::new(1),
+        });
+        assert!(matches!(
+            GatedDeltas::Blocked(Vec::new()).confirm(blocked),
+            Ok(IndexOperationStepResult::Blocked(_))
+        ));
     }
 
     /// Writes that regrow the backlog as fast as activation's exact drains
