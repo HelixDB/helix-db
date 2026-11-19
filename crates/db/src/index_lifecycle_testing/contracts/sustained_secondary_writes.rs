@@ -42,6 +42,14 @@ const MAXIMUM_EXPLICIT_ADVANCES: u64 = 16;
 /// writes never does, so any finite bound detects it, and this one leaves
 /// room for slow and loaded CI hosts.
 const AUTOMATIC_ACTIVATION_BOUND: Duration = Duration::from_secs(120);
+/// Build steps the automatic worker takes for each batch the writer commits
+/// while the build runs: twice the deltas one batch adds.
+///
+/// Catch-up fences no one until its backlog is within reach, so it ends only
+/// while the build reconciles deltas faster than writes add them, and a
+/// one-row step reconciles one. A writer paced only by its WAL upload outruns
+/// one-row steps on a slow host, and the build then never leaves catch-up.
+const AUTOMATIC_STEPS_PER_BATCH: u64 = 2 * (INSERTS_PER_BATCH + 1);
 
 /// Every key ever written, mapped to the nodes that hold it now.
 type ExpectedKeys = BTreeMap<String, BTreeSet<u64>>;
@@ -139,7 +147,7 @@ async fn run_automatic_worker_under_a_writer_loop() {
         // One-row batches spread the scan and validation over hundreds of
         // steps, each racing the writer. Build steps do not wait for their
         // WAL upload but every public write does, so a short flush interval
-        // keeps the writer's batches as quick as a handful of steps.
+        // lets a batch land within the steps the writer waits for.
         DbConfig::new()
             .with_secondary_index_lifecycle_tuning(
                 SecondaryIndexLifecycleTuning::default().with_batch_rows(
@@ -171,7 +179,14 @@ async fn run_automatic_worker_under_a_writer_loop() {
     };
 
     let stop = AtomicBool::new(false);
+    let activated = AtomicBool::new(false);
     let committed = AtomicU64::new(0);
+    let steps = || {
+        controller
+            .automatic_metrics(&db)
+            .expect("sustained automatic metrics are readable")
+            .operation_steps
+    };
     let writer = async {
         let mut keys = keys;
         let mut batch = 0;
@@ -183,7 +198,12 @@ async fn run_automatic_worker_under_a_writer_loop() {
             commit_batch(&db, batch, moved, &mut keys).await;
             batch += 1;
             committed.store(batch, Ordering::Release);
-            tokio::task::yield_now().await;
+            // See [`AUTOMATIC_STEPS_PER_BATCH`]. The Active generation takes
+            // no steps, so the writer runs freely against it.
+            let resume = steps() + AUTOMATIC_STEPS_PER_BATCH;
+            while !activated.load(Ordering::Acquire) && steps() < resume {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
         }
         keys
     };
@@ -195,7 +215,10 @@ async fn run_automatic_worker_under_a_writer_loop() {
                 .await
                 .expect("sustained automatic operation remains readable");
             match status {
-                IndexOperationStatus::Succeeded { .. } => break,
+                IndexOperationStatus::Succeeded { .. } => {
+                    activated.store(true, Ordering::Release);
+                    break;
+                }
                 IndexOperationStatus::Blocked { .. } | IndexOperationStatus::Aborted { .. } => {
                     panic!("sustained writes must not stop the build: {status:?}")
                 }
