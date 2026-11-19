@@ -74,6 +74,14 @@ pub(super) const LEDGER_CAPACITY: usize = 1 << 16;
 /// largest are dropped, about 50 MB.
 pub(super) const LEDGERS_CAPACITY: usize = 4 * LEDGER_CAPACITY;
 
+/// Most deltas any reach counts to, whatever the batch limits.
+///
+/// An observation adds the keys it scans to its ledger, so a reach past
+/// [`LEDGER_CAPACITY`] would drop the ledger on every observation and make
+/// each one rescan the prefix from its start. Large configured batches would
+/// otherwise reach that far: eight batches of 8,192 entities.
+const REACH_ROWS: usize = LEDGER_CAPACITY / 4;
+
 /// Delta keys one multi-get verifies, and the most keys an observation
 /// copies out of the ledgers per lock: writers of every scope record under
 /// the same lock, so a large ledger is never copied in one hold.
@@ -244,10 +252,16 @@ pub(super) struct ObservedBacklog {
 }
 
 impl ObservedBacklog {
-    /// Whether the backlog is beyond `batches` batches of `limits`; exact for
-    /// any `batches` up to the reach it was observed to.
+    /// Whether the backlog is beyond `batches` batches of `limits`, counting
+    /// at most [`REACH_ROWS`] deltas; exact for any `batches` up to the reach
+    /// it was observed to, since a reach stops by this same measure.
     pub(super) fn exceeds(&self, limits: SearchIndexBatchLimits, batches: usize) -> bool {
-        self.rows.len() > limits.max_entities().get().saturating_mul(batches)
+        self.rows.len()
+            > limits
+                .max_entities()
+                .get()
+                .saturating_mul(batches)
+                .min(REACH_ROWS)
             || self.input_bytes
                 > limits
                     .max_input_bytes()
@@ -1068,6 +1082,38 @@ mod tests {
             LEDGER_CAPACITY
         );
         assert_eq!(ledgers.key_count(), LEDGER_CAPACITY);
+        db.close().await.expect("test database closes");
+    }
+
+    /// Batches large enough that a reach would pass [`LEDGER_CAPACITY`]
+    /// count to [`REACH_ROWS`] instead, so repeated bounded observations of
+    /// a large backlog keep their ledger rather than drop it and rescan.
+    #[tokio::test]
+    async fn a_reach_of_large_batches_keeps_its_ledger() {
+        let db = super::super::tests::test_db("delta-ledger-large-reach").await;
+        let ledgers = DeltaLedgers::default();
+        let limits = SearchIndexBatchLimits::try_new(
+            NonZeroUsize::new(LEDGER_CAPACITY).expect("positive"),
+            NonZeroU64::MAX,
+            NonZeroU64::MAX,
+            NonZeroU64::MAX,
+            NonZeroU64::MAX,
+        )
+        .expect("large-batch limits are consistent");
+        let entities = u64::try_from(LEDGER_CAPACITY + 1).expect("fits");
+        write_deltas(&db, 0..entities, Some(b"delta")).await;
+        let observed = ledgers
+            .observe(&db, generation(), limits, Reach::Batches(8))
+            .await
+            .expect("backlog is observed");
+        assert_eq!(observed.rows.len(), REACH_ROWS + 1);
+        assert!(observed.exceeds(limits, 8));
+        assert!(observed.exceeds(limits, 1));
+        assert_eq!(
+            ledgers.key_count(),
+            REACH_ROWS + 1,
+            "the ledger keeps what one reach read"
+        );
         db.close().await.expect("test database closes");
     }
 
