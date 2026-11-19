@@ -534,6 +534,7 @@ async fn a_lost_wal_tail_is_redone_to_the_golden_graph() {
                 name.clone(),
                 Arc::clone(store) as Arc<dyn slatedb::object_store::ObjectStore>,
             )
+            .with_merge_operator(Arc::new(crate::merge_operator::HelixMergeOperator::new()))
             .build()
         };
         let store = Arc::new(GatedWalStore::new());
