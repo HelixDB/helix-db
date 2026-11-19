@@ -967,6 +967,8 @@ impl QueryResponse {
 }
 
 #[cfg(test)]
+mod datetime_param_tests;
+#[cfg(test)]
 mod index_membership_retention_tests;
 #[cfg(test)]
 mod index_membership_tests;

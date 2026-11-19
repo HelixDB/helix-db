@@ -1406,12 +1406,11 @@ mod tests {
             Some(QueryParamType::F32)
         ));
 
-        // DateTime -> rfc3339 string
+        // DateTime -> normalized datetime millis, sent as its RFC3339 string
         let r = q_datetime(DateTime::from_millis(0)).unwrap();
-        let expected = DateTime::from_millis(0).to_rfc3339().unwrap();
         assert!(matches!(
             r.parameters().unwrap().get("ts"),
-            Some(QueryValue::String(s)) if *s == expected
+            Some(QueryValue::DateTime(0))
         ));
         assert!(matches!(
             r.parameter_types().unwrap().get("ts"),

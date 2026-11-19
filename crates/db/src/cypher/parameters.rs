@@ -109,6 +109,11 @@ fn payload(value: &query::QueryValue, depth: usize, count: &mut usize) -> r::Res
     // Recursion is bounded before descent. Wide inputs never allocate a pending
     // work vector proportional to their node count, unlike breadth-first work.
     match value {
+        // A datetime's rendered string is at most 30 bytes, built once.
+        Q::DateTime(_) => Ok(Payload {
+            retained: 30,
+            scratch: 0,
+        }),
         Q::Null | Q::Bool(_) | Q::I64(_) | Q::F64(_) | Q::F32(_) => Ok(Payload::default()),
         Q::String(value) => Ok(Payload {
             retained: value

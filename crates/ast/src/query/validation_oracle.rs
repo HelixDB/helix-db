@@ -50,6 +50,7 @@ pub(super) fn validate_json_value(value: &QueryValue, path: &str) -> Result<(), 
             | QueryValue::I64(_)
             | QueryValue::F64(_)
             | QueryValue::F32(_)
+            | QueryValue::DateTime(_)
             | QueryValue::String(_) => {}
         }
     }
@@ -107,8 +108,13 @@ pub(super) fn normalize_typed_value(
         (QueryParamType::DateTime, QueryValue::String(datetime))
             if chrono::DateTime::parse_from_rfc3339(&datetime).is_ok() =>
         {
-            Ok(QueryValue::String(datetime))
+            Ok(QueryValue::DateTime(
+                chrono::DateTime::parse_from_rfc3339(&datetime)
+                    .expect("guard parsed the datetime")
+                    .timestamp_millis(),
+            ))
         }
+        (QueryParamType::DateTime, value @ QueryValue::DateTime(_)) => Ok(value),
         (QueryParamType::Value, value) => {
             validate_json_value(&value, path)?;
             Ok(value)

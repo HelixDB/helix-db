@@ -589,7 +589,7 @@ fn assert_complete_fixture_coverage(coverage: &FixtureCoverage) {
         "QueryValue",
         &coverage.query_values,
         &[
-            "Null", "Bool", "I64", "F64", "F32", "String", "Array", "Object",
+            "Null", "Bool", "I64", "F64", "F32", "DateTime", "String", "Array", "Object",
         ],
     );
 }
@@ -1240,6 +1240,9 @@ fn visit_query_value(value: &QueryValue, coverage: &mut FixtureCoverage) {
         }
         QueryValue::F32(_) => {
             coverage.query_values.insert("F32");
+        }
+        QueryValue::DateTime(_) => {
+            coverage.query_values.insert("DateTime");
         }
         QueryValue::String(_) => {
             coverage.query_values.insert("String");

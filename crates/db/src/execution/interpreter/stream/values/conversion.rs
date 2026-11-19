@@ -40,6 +40,7 @@ pub(super) fn query_value_to_db_value(value: QueryValue) -> DbPropertyValue {
         QueryValue::I64(value) => DbPropertyValue::I64(value),
         QueryValue::F64(value) => DbPropertyValue::F64(value),
         QueryValue::F32(value) => DbPropertyValue::F32(value.into()),
+        QueryValue::DateTime(value) => DbPropertyValue::DateTime(value),
         QueryValue::String(value) => DbPropertyValue::String(value),
         QueryValue::Array(values) => {
             DbPropertyValue::Array(values.into_iter().map(query_value_to_db_value).collect())

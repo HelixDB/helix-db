@@ -8,6 +8,7 @@
 //! same job state and can resume after restart.
 
 pub(crate) mod background;
+pub(crate) mod datetime_strings;
 mod indexes;
 pub(crate) use indexes::label_identity::start_label_identity_copy;
 #[cfg(any(test, feature = "index-lifecycle-testing"))]

@@ -1455,6 +1455,25 @@ impl HelixDB {
         .await
     }
 
+    /// Waits until the background migration worker has finished every job:
+    /// the migration jobs, the label identity copy and its hash row cleanup,
+    /// and the datetime string conversion.
+    ///
+    /// The datetime string job keeps scanning rows written after open until it
+    /// catches up, committing a progress row per batch, and the label steps
+    /// commit their own progress, so a fixture that compares stored rows
+    /// across writes waits here before writing. A handle without a worker
+    /// returns at once. There is no deadline: fixtures with paused clocks
+    /// would fire one early, and a fresh store's jobs finish in a few batches.
+    #[cfg(test)]
+    pub(crate) async fn wait_for_background_migrations(&self) {
+        let worker = self.inner.migration_worker.lock().await.take();
+        let Some(worker) = worker else {
+            return;
+        };
+        worker.join().await;
+    }
+
     #[cfg(test)]
     async fn open_with_object_store_for_tests_inner(
         database: impl Into<String>,
@@ -2234,6 +2253,7 @@ impl HelixDB {
         if worker.is_none() {
             *worker = migrations::background::MigrationWorkerSupervisor::start_if_enabled(
                 Arc::clone(writer),
+                Arc::downgrade(&self.inner),
                 tuning,
                 background,
             );
@@ -4213,7 +4233,8 @@ impl HelixDB {
 
     #[cfg(test)]
     /// Advances every pending background migration by one bounded step, as
-    /// one turn of the background worker does; see
+    /// one turn of the background worker does, except the datetime string
+    /// conversion, which tests step on its own; see
     /// [`migrations::background::process_background_step`].
     ///
     /// This writer-only surface is available only when the migration worker is
@@ -4227,8 +4248,11 @@ impl HelixDB {
         if self.config().db().migrations().worker_mode() != config::MigrationWorkerMode::Disabled {
             return Err(HelixDbError::MigrationSteppingRequiresDisabledMode);
         }
+        // No database handle: the datetime string conversion keeps its own
+        // stepping surface, so a step here takes the jobs it took before.
         migrations::background::process_background_step(
             writer,
+            &std::sync::Weak::new(),
             self.config().db().migrations(),
             migrations::background::BackgroundMigrations::All,
             &mut migrations::LabelCopySession::new(),

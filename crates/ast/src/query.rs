@@ -49,8 +49,10 @@ pub enum QueryRequestType {
 /// back onto the variants: integers become [`QueryValue::I64`] when they fit
 /// and [`QueryValue::F64`] otherwise, other numbers become
 /// [`QueryValue::F64`], and a repeated object key keeps its last value. JSON
-/// never produces [`QueryValue::F32`]; typed `f32` parameters normalize into
-/// it.
+/// never produces [`QueryValue::F32`] or [`QueryValue::DateTime`]; typed
+/// `f32` and `date_time` parameters normalize into them. A datetime
+/// serializes as its canonical RFC3339 UTC string with millisecond precision,
+/// so a normalized request round-trips through JSON to the same value.
 ///
 /// ```
 /// use std::collections::BTreeMap;
@@ -83,12 +85,30 @@ pub enum QueryValue {
     F64(f64),
     /// 32-bit float.
     F32(f32),
+    /// UTC datetime as epoch milliseconds. Only a declared `date_time`
+    /// parameter produces it; untyped JSON strings stay [`QueryValue::String`].
+    #[serde(serialize_with = "serialize_datetime_millis")]
+    DateTime(i64),
     /// String.
     String(String),
     /// Array.
     Array(Vec<QueryValue>),
     /// Object.
     Object(BTreeMap<String, QueryValue>),
+}
+
+fn serialize_datetime_millis<S: Serializer>(
+    millis: &i64,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    crate::value::DateTime::from_millis(*millis)
+        .to_rfc3339()
+        .ok_or_else(|| {
+            serde::ser::Error::custom(format!(
+                "datetime millis '{millis}' cannot be rendered as RFC3339"
+            ))
+        })
+        .and_then(|rendered| serializer.serialize_str(&rendered))
 }
 
 /// Most parameter values an array reserves from a deserializer's length hint
@@ -200,6 +220,7 @@ impl From<&QueryValue> for PropertyValue {
             QueryValue::I64(value) => Self::I64(*value),
             QueryValue::F64(value) => Self::F64(*value),
             QueryValue::F32(value) => Self::F32(*value),
+            QueryValue::DateTime(value) => Self::DateTime(*value),
             QueryValue::String(value) => Self::String(value.clone()),
             QueryValue::Array(values) => {
                 Self::Array(values.iter().map(PropertyValue::from).collect())
@@ -1363,6 +1384,7 @@ fn validate_json_value(
             | QueryValue::I64(_)
             | QueryValue::F64(_)
             | QueryValue::F32(_)
+            | QueryValue::DateTime(_)
             | QueryValue::String(_) => {}
         }
         // Move to the next value in document order, closing finished frames.
@@ -1451,11 +1473,18 @@ fn normalize_typed_value_at(
             Ok(QueryValue::F32(value as f32))
         }
         (QueryParamType::F32, QueryValue::I64(value)) => Ok(QueryValue::F32(value as f32)),
-        (QueryParamType::DateTime, QueryValue::String(datetime))
-            if chrono::DateTime::parse_from_rfc3339(&datetime).is_ok() =>
-        {
-            Ok(QueryValue::String(datetime))
+        // Sub-millisecond digits truncate: stored datetimes are UTC epoch
+        // milliseconds, the precision every SDK already sends.
+        (QueryParamType::DateTime, QueryValue::String(datetime)) => {
+            crate::value::DateTime::parse_rfc3339(&datetime)
+                .map(|datetime| QueryValue::DateTime(datetime.millis()))
+                .map_err(|_| QueryError::ParameterTypeMismatch {
+                    path: path(),
+                    expected: QueryParamType::DateTime,
+                    actual,
+                })
         }
+        (QueryParamType::DateTime, value @ QueryValue::DateTime(_)) => Ok(value),
         (QueryParamType::Value, value) => {
             validate_json_value(&value, ParamPath { name, indices }, indices.len())?;
             Ok(value)
@@ -1491,6 +1520,7 @@ fn query_value_kind(value: &QueryValue) -> &'static str {
         QueryValue::I64(_) => "i64",
         QueryValue::F64(_) => "f64",
         QueryValue::F32(_) => "f32",
+        QueryValue::DateTime(_) => "date_time",
         QueryValue::String(_) => "string",
         QueryValue::Array(_) => "array",
         QueryValue::Object(_) => "object",
@@ -2096,11 +2126,58 @@ mod tests {
         assert!(typed(QueryParamType::String, QueryValue::String("x".to_owned())).is_ok());
         assert!(typed(QueryParamType::String, QueryValue::Null).is_err());
 
-        assert!(typed(
+        let datetime = typed(
             QueryParamType::DateTime,
             QueryValue::String("2026-07-28T12:34:56Z".to_owned()),
         )
-        .is_ok());
+        .unwrap();
+        assert_eq!(
+            datetime.parameters().unwrap().get("value"),
+            Some(&QueryValue::DateTime(1_785_242_096_000))
+        );
+        // Offsets normalize to UTC and sub-millisecond digits truncate, so
+        // equal instants become equal values whatever their spelling.
+        for spelling in [
+            "2026-07-28T21:34:56+09:00",
+            "2026-07-28T12:34:56.000Z",
+            "2026-07-28T12:34:56.000999Z",
+        ] {
+            assert_eq!(
+                typed(
+                    QueryParamType::DateTime,
+                    QueryValue::String(spelling.to_owned())
+                )
+                .unwrap()
+                .parameters()
+                .unwrap()
+                .get("value"),
+                Some(&QueryValue::DateTime(1_785_242_096_000)),
+                "{spelling}"
+            );
+        }
+        assert_eq!(
+            typed(
+                QueryParamType::Array(Box::new(QueryParamType::DateTime)),
+                QueryValue::Array(vec![QueryValue::String(
+                    "1969-12-31T23:59:59.999Z".to_owned()
+                )]),
+            )
+            .unwrap()
+            .parameters()
+            .unwrap()
+            .get("value"),
+            Some(&QueryValue::Array(vec![QueryValue::DateTime(-1)]))
+        );
+        assert!(
+            typed(QueryParamType::DateTime, QueryValue::DateTime(0)).is_ok(),
+            "normalization is idempotent"
+        );
+        assert!(typed(QueryParamType::DateTime, QueryValue::I64(0)).is_err());
+        assert_eq!(
+            serde_json::to_string(&QueryValue::DateTime(1_785_242_096_000)).unwrap(),
+            r#""2026-07-28T12:34:56.000Z""#
+        );
+        assert!(serde_json::to_string(&QueryValue::DateTime(i64::MAX)).is_err());
         assert!(typed(
             QueryParamType::DateTime,
             QueryValue::String("28 July 2026".to_owned()),
