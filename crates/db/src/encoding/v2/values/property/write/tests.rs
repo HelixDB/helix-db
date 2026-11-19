@@ -19,6 +19,7 @@ fn prepared_write_preserves_every_native_variant_and_bounds_clone_and_scratch() 
         PropertyValue::StringArray(vec!["s".repeat(100), String::new()]),
         PropertyValue::Array(vec![PropertyValue::Object(BTreeMap::new())]),
         PropertyValue::Object(BTreeMap::new()),
+        PropertyValue::DateTimeArray(vec![i64::MIN, 0, i64::MAX]),
     ];
     let mut properties: Vec<_> = values
         .into_iter()

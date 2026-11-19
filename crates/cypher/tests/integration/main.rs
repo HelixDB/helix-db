@@ -19,4 +19,5 @@ mod schema_storage;
 mod scopes;
 mod simple_case;
 mod sql;
+mod temporal;
 mod wildcard_identity;

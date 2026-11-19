@@ -233,6 +233,7 @@ fn bind_clauses(binder: &mut Binder, statement: &s::Statement) -> Result<r::Quer
                             | r::ValueType::Integer
                             | r::ValueType::Float
                             | r::ValueType::String
+                            | r::ValueType::DateTime
                             | r::ValueType::List
                             | r::ValueType::Map => r::BindingType::Scalar,
                         },
@@ -619,6 +620,7 @@ impl Binder {
             | r::Value::Boolean(_)
             | r::Value::Float(_)
             | r::Value::String(_)
+            | r::Value::DateTime(_)
             | r::Value::List(_)
             | r::Value::Map(_)
             | r::Value::Entity(_)
@@ -1143,6 +1145,14 @@ impl Binder {
                         "tolower" => (F::ToLower, 1, 1),
                         "toupper" => (F::ToUpper, 1, 1),
                         "substring" => (F::Substring, 2, 3),
+                        "datetime" => (F::DateTime, 0, 1),
+                        "timestamp" => (F::Timestamp, 0, 0),
+                        "tostringornull" => (F::ToStringOrNull, 1, 1),
+                        "tointegerornull" => (F::ToIntegerOrNull, 1, 1),
+                        "tofloatornull" => (F::ToFloatOrNull, 1, 1),
+                        "tobooleanornull" => (F::ToBooleanOrNull, 1, 1),
+                        "datetimeornull" => (F::DateTimeOrNull, 1, 1),
+                        "requiredatetime" => (F::RequireDateTime, 1, 1),
                         _ if DEFERRED_FUNCTIONS.contains(&name.as_str()) => {
                             return Err(QueryError::unsupported(
                                 detail::FUNCTION,
@@ -1164,19 +1174,73 @@ impl Binder {
                             format!("wrong argument count for {name}"),
                         ));
                     }
-                    r::Expression::Function(
-                        function,
-                        arguments
-                            .iter()
-                            .map(|argument| {
-                                if function == F::Exists {
-                                    self.boolean_expression(argument, scope, allow_aggregate)
-                                } else {
-                                    resolve(argument)
+                    // Only epochMillis maps have UTC millisecond semantics;
+                    // component maps and time zones are outside the profile.
+                    if function == F::DateTime
+                        && let [argument] = arguments.as_slice()
+                        && let E::Map(entries) = &argument.kind
+                        && !matches!(entries.as_slice(), [(key, _)] if key == "epochMillis")
+                    {
+                        return Err(QueryError::unsupported(
+                            detail::FUNCTION,
+                            "function `datetime` with a map other than {epochMillis: n}",
+                        )
+                        .at(e.span));
+                    }
+                    let arguments = arguments
+                        .iter()
+                        .map(|argument| {
+                            if function == F::Exists {
+                                self.boolean_expression(argument, scope, allow_aggregate)
+                            } else {
+                                resolve(argument)
+                            }
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    match (function, arguments.as_slice()) {
+                        // Literal text is read once, so a datetime literal
+                        // reaches index planning. Text in another form may
+                        // be ISO 8601 this profile does not read, such as a
+                        // week date or zone name, so it reports the
+                        // capability; text in the grammar's form that names
+                        // no instant, such as February 30, is an input error.
+                        (F::DateTime, [r::Expression::Literal(r::Value::String(text))]) => {
+                            let millis = r::parse_datetime(text).map_err(|error| {
+                                match error {
+                                    r::DatetimeTextError::OutsideGrammar => {
+                                        QueryError::unsupported(
+                                            detail::FUNCTION,
+                                            "function `datetime` with text other than \
+                                             RFC 3339, a UTC date and time, or a date",
+                                        )
+                                    }
+                                    r::DatetimeTextError::NoSuchInstant => QueryError::compile(
+                                        category::ARGUMENT_ERROR,
+                                        detail::INVALID_DATETIME,
+                                        format!("datetime text {text:?} names no instant"),
+                                    ),
+                                    r::DatetimeTextError::OutsideYears => QueryError::compile(
+                                        category::ARGUMENT_ERROR,
+                                        detail::INVALID_DATETIME,
+                                        format!(
+                                            "datetime text {text:?} names an instant outside \
+                                             the UTC years 0000 to 9999"
+                                        ),
+                                    ),
                                 }
-                            })
-                            .collect::<Result<_>>()?,
-                    )
+                                .at(e.span)
+                            })?;
+                            r::Expression::Literal(r::Value::DateTime(millis))
+                        }
+                        // Read once as well; text that reads as no instant
+                        // is null, as it is at run time.
+                        (F::DateTimeOrNull, [r::Expression::Literal(r::Value::String(text))]) => {
+                            r::Expression::Literal(
+                                r::parse_datetime(text).map_or(r::Value::Null, r::Value::DateTime),
+                            )
+                        }
+                        _ => r::Expression::Function(function, arguments),
+                    }
                 }
             }
         };
@@ -1187,7 +1251,7 @@ impl Binder {
 
 /// Lowercase openCypher 9 built-in functions outside this profile. Calling one
 /// reports an unsupported capability; any other unrecognized name is unknown.
-const DEFERRED_FUNCTIONS: [&str; 47] = [
+const DEFERRED_FUNCTIONS: [&str; 45] = [
     "acos",
     "all",
     "any",
@@ -1198,7 +1262,6 @@ const DEFERRED_FUNCTIONS: [&str; 47] = [
     "cos",
     "cot",
     "date",
-    "datetime",
     "degrees",
     "distance",
     "duration",
@@ -1234,7 +1297,6 @@ const DEFERRED_FUNCTIONS: [&str; 47] = [
     "tail",
     "tan",
     "time",
-    "timestamp",
 ];
 
 fn semantic(detail: &str, message: impl Into<String>) -> QueryError {

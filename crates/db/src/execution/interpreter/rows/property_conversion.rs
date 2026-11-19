@@ -1,6 +1,9 @@
 //! Preflight the owned Cypher representation before allocating its containers.
-//! Unsupported stored types produce one dormant error, without constructing a
-//! partial list/map or copying unobserved payloads along the failing branch.
+//! Unsupported stored types (bytes) produce one dormant error, without
+//! constructing a partial list/map or copying unobserved payloads along the
+//! failing branch. A stored datetime becomes [`r::Value::DateTime`] with the
+//! same epoch milliseconds, at any depth, and a stored datetime list a list of
+//! them.
 use crate::encoding::v2::values::property::property_value::PropertyValue as P;
 use helix_planner::relational as r;
 use helix_planner::relational::{category, detail};
@@ -20,7 +23,7 @@ impl Rejection {
             Self::StoredType => (
                 category::UNSUPPORTED_FEATURE,
                 detail::STORED_VALUE_TYPE,
-                "temporal and binary stored values are outside the MVP profile",
+                "binary stored values are outside the MVP profile",
             ),
             Self::Nesting => (
                 category::RESOURCE_LIMIT,
@@ -70,9 +73,9 @@ fn owned_bytes(value: &P, depth: usize) -> Result<usize, Rejection> {
         }
     };
     Ok(match value {
-        P::Null | P::Bool(_) | P::I64(_) | P::F64(_) | P::F32(_) => 0,
+        P::Null | P::Bool(_) | P::I64(_) | P::DateTime(_) | P::F64(_) | P::F32(_) => 0,
         P::String(value) => value.capacity(),
-        P::I64Array(values) => array_bytes(values.len())?,
+        P::I64Array(values) | P::DateTimeArray(values) => array_bytes(values.len())?,
         P::F64Array(values) => array_bytes(values.len())?,
         P::F32Array(values) => array_bytes(values.len())?,
         P::StringArray(values) => values
@@ -92,7 +95,7 @@ fn owned_bytes(value: &P, depth: usize) -> Result<usize, Rejection> {
                     .saturating_add(owned_bytes(value, depth + 1)?))
             },
         )?,
-        P::DateTime(_) | P::Bytes(_) => return Err(Rejection::StoredType),
+        P::Bytes(_) => return Err(Rejection::StoredType),
     })
 }
 
@@ -101,6 +104,7 @@ fn convert(value: P) -> r::Value {
         P::Null => r::Value::Null,
         P::Bool(value) => r::Value::Boolean(value),
         P::I64(value) => r::Value::Integer(value),
+        P::DateTime(millis) => r::Value::DateTime(millis),
         P::F64(value) | P::F32(value) => r::Value::Float(value),
         P::String(value) => r::Value::String(value),
         P::Array(values) => r::Value::List(values.into_iter().map(convert).collect()),
@@ -114,6 +118,9 @@ fn convert(value: P) -> r::Value {
             },
         )),
         P::I64Array(values) => r::Value::List(values.into_iter().map(r::Value::Integer).collect()),
+        P::DateTimeArray(values) => {
+            r::Value::List(values.into_iter().map(r::Value::DateTime).collect())
+        }
         P::F64Array(values) => r::Value::List(values.into_iter().map(r::Value::Float).collect()),
         P::F32Array(values) => r::Value::List(
             values
@@ -124,8 +131,6 @@ fn convert(value: P) -> r::Value {
         P::StringArray(values) => {
             r::Value::List(values.into_iter().map(r::Value::String).collect())
         }
-        P::DateTime(_) | P::Bytes(_) => {
-            unreachable!("conversion preflight rejects unsupported subtrees")
-        }
+        P::Bytes(_) => unreachable!("conversion preflight rejects unsupported subtrees"),
     }
 }

@@ -165,6 +165,7 @@ impl ExecutionContext<'_> {
                         | r::Value::Integer(_)
                         | r::Value::Float(_)
                         | r::Value::String(_)
+                        | r::Value::DateTime(_)
                         | r::Value::List(_)
                         | r::Value::Map(_)
                         | r::Value::Entity(_)
@@ -187,6 +188,7 @@ impl ExecutionContext<'_> {
                         | r::Value::Integer(_)
                         | r::Value::Float(_)
                         | r::Value::String(_)
+                        | r::Value::DateTime(_)
                         | r::Value::List(_)
                         | r::Value::Map(_)
                         | r::Value::Entity(_)
@@ -301,6 +303,7 @@ impl ExecutionContext<'_> {
                         | r::Value::Integer(_)
                         | r::Value::Float(_)
                         | r::Value::String(_)
+                        | r::Value::DateTime(_)
                         | r::Value::List(_)
                         | r::Value::Path(_) => {
                             return Err(r::QueryError::runtime(
@@ -318,6 +321,7 @@ impl ExecutionContext<'_> {
                         | r::Value::Integer(_)
                         | r::Value::Float(_)
                         | r::Value::String(_)
+                        | r::Value::DateTime(_)
                         | r::Value::List(_)
                         | r::Value::Map(_)
                         | r::Value::Path(_) => {
@@ -471,6 +475,7 @@ impl ExecutionContext<'_> {
                         | r::Value::Integer(_)
                         | r::Value::Float(_)
                         | r::Value::String(_)
+                        | r::Value::DateTime(_)
                         | r::Value::List(_)
                         | r::Value::Map(_) => {
                             return Err(r::QueryError::runtime(

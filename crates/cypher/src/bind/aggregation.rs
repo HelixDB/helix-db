@@ -165,6 +165,7 @@ fn aggregate_identity(expression: &r::Expression) -> r::Result<(digest::PlanDige
             | r::Value::Boolean(_)
             | r::Value::Integer(_)
             | r::Value::String(_)
+            | r::Value::DateTime(_)
             | r::Value::Entity(_)
             | r::Value::Path(_) => {}
         }

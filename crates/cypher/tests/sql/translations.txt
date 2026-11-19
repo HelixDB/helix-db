@@ -896,3 +896,105 @@ SELECT q.name FROM Person p
 
 SELECT p.name FROM Person p, Person p
 => error: syntax_error variable_already_bound
+
+# HelixDB: a TIMESTAMP literal is a UTC datetime, CURRENT_TIMESTAMP the statement clock
+SELECT e.seq FROM Event e WHERE e.at >= TIMESTAMP '2024-01-01 10:00:00' AND e.at < CURRENT_TIMESTAMP
+=> MATCH (e:Event) WHERE e.at >= datetime('2024-01-01T10:00:00.000Z') AND e.at < datetime() RETURN e.seq
+
+# HelixDB: a time zone in a TIMESTAMP literal is applied, then normalized to UTC
+SELECT TIMESTAMP WITH TIME ZONE '2024-01-01T10:00:00+02:00', TIMESTAMP '2024-01-01'
+=> RETURN datetime('2024-01-01T08:00:00.000Z'), datetime('2024-01-01T00:00:00.000Z')
+
+# HelixDB: casts to TIMESTAMP and NOW() are Cypher's datetime
+SELECT CAST(e.at AS TIMESTAMP), CAST('2024-01-01T00:00:00+02:00' AS TIMESTAMP), NOW() FROM Event e
+=> MATCH (e:Event) RETURN datetime(e.at), datetime('2024-01-01T00:00:00+02:00'), datetime()
+
+# HelixDB: TIMESTAMP text other than RFC 3339, a UTC date and time, or a date
+SELECT TIMESTAMP 'yesterday'
+=> error: unsupported_feature sql_construct
+
+# HelixDB: a cast of unreadable text fails when the translation compiles
+SELECT CAST('yesterday' AS TIMESTAMP)
+=> RETURN datetime('yesterday')
+!! unsupported_feature function
+
+# HelixDB: TIMESTAMP text in the grammar's form that names no instant is bad input
+SELECT TIMESTAMP '2024-02-30 00:00:00'
+=> error: argument_error invalid_datetime
+
+# HelixDB: fields that are not zero-padded are outside the grammar
+SELECT TIMESTAMP '2024-1-5'
+=> error: unsupported_feature sql_construct
+
+# HelixDB: so are years outside RFC 3339's 0000-9999
+SELECT TIMESTAMP '-0001-01-01'
+=> error: unsupported_feature sql_construct
+
+# HelixDB: a cast of text naming no instant fails when the translation compiles
+SELECT CAST('2024-13-01' AS TIMESTAMP)
+=> RETURN datetime('2024-13-01')
+!! argument_error invalid_datetime
+
+# HelixDB: EXTRACT reads the datetime property of the same meaning; EPOCH is fractional seconds
+SELECT EXTRACT(YEAR FROM e.at), EXTRACT(QUARTER FROM e.at), EXTRACT(MONTH FROM e.at), EXTRACT(WEEK FROM e.at), EXTRACT(ISOYEAR FROM e.at), EXTRACT(DAY FROM e.at), EXTRACT(DOY FROM e.at), EXTRACT(ISODOW FROM e.at), EXTRACT(HOUR FROM e.at), EXTRACT(MINUTE FROM e.at), EXTRACT(EPOCH FROM e.at) FROM Event e
+=> MATCH (e:Event) RETURN requireDatetime(e.at).year, requireDatetime(e.at).quarter, requireDatetime(e.at).month, requireDatetime(e.at).week, requireDatetime(e.at).weekYear, requireDatetime(e.at).day, requireDatetime(e.at).ordinalDay, requireDatetime(e.at).dayOfWeek, requireDatetime(e.at).hour, requireDatetime(e.at).minute, requireDatetime(e.at).epochMillis / 1000.0
+
+# HelixDB: EXTRACT groups by a datetime field
+SELECT EXTRACT(YEAR FROM e.at) AS year, COUNT(*) AS events FROM Event e GROUP BY EXTRACT(YEAR FROM e.at)
+=> MATCH (e:Event) RETURN requireDatetime(e.at).year AS year, count(*) AS events
+
+# HelixDB: EXTRACT of a literal is checked when the translation compiles
+SELECT EXTRACT(MONTH FROM TIMESTAMP '2024-05-06')
+=> RETURN requireDatetime(datetime('2024-05-06T00:00:00.000Z')).month
+
+# HelixDB: EXTRACT from text is a type error; text is never read as a datetime
+SELECT EXTRACT(YEAR FROM 'x')
+=> RETURN requireDatetime('x').year
+!! type_error invalid_argument_type
+
+# HelixDB: EXTRACT from a node is a type error, never the node's property of the field's name
+SELECT EXTRACT(YEAR FROM e) FROM Event e
+=> MATCH (e:Event) RETURN requireDatetime(e).year
+!! type_error invalid_argument_type
+
+# HelixDB: TRY_CAST and SAFE_CAST are null where CAST fails, for every type
+SELECT TRY_CAST(e.at AS TIMESTAMP), SAFE_CAST(e.n AS INTEGER), TRY_CAST(e.n AS DOUBLE), TRY_CAST(e.b AS BOOLEAN), TRY_CAST(e.n AS VARCHAR) FROM Event e
+=> MATCH (e:Event) RETURN datetimeOrNull(e.at), toIntegerOrNull(e.n), toFloatOrNull(e.n), toBooleanOrNull(e.b), toStringOrNull(e.n)
+
+# HelixDB: a safe cast of unreadable literal text is null when the translation compiles
+SELECT TRY_CAST('yesterday' AS TIMESTAMP)
+=> RETURN datetimeOrNull('yesterday')
+
+# HelixDB: CURRENT_TIMESTAMP and NOW take only a fractional-seconds precision, which rounds the clock
+SELECT CURRENT_TIMESTAMP(3), NOW(1)
+=> RETURN datetime(), datetime({epochMillis: (timestamp() + 50) / 100 * 100})
+
+# HelixDB: no other argument is read, least of all as a datetime
+SELECT NOW('2020-01-01')
+=> error: argument_error invalid_argument_type
+
+# HelixDB: a datetime never compares with text
+SELECT e.seq FROM Event e WHERE e.at > TIMESTAMP '2024-01-01' AND TIMESTAMP '2024-01-01' = '2024-01-01'
+=> MATCH (e:Event) WHERE e.at > datetime('2024-01-01T00:00:00.000Z') AND datetime('2024-01-01T00:00:00.000Z') = '2024-01-01' RETURN e.seq
+!! type_error datetime_text_comparison
+
+# HelixDB: PostgreSQL's SECOND carries the seconds' fraction, which no one property holds
+SELECT EXTRACT(SECOND FROM e.at) FROM Event e
+=> error: unsupported_feature sql_construct
+
+# HelixDB: so does MILLISECONDS
+SELECT EXTRACT(MILLISECONDS FROM e.at) FROM Event e
+=> error: unsupported_feature sql_construct
+
+# HelixDB: PostgreSQL's DOW counts Sunday as 0; ISODOW is dayOfWeek
+SELECT EXTRACT(DOW FROM e.at) FROM Event e
+=> error: unsupported_feature sql_construct
+
+# HelixDB: dates and times of day have no type yet
+SELECT CURRENT_DATE
+=> RETURN date()
+!! unsupported_feature function
+
+# HelixDB: date literals have no type yet
+SELECT DATE '2024-01-01'
+=> error: unsupported_feature sql_construct

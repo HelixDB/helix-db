@@ -47,6 +47,10 @@ pub enum PropertyValue {
     Array(#[rkyv(omit_bounds)] Vec<PropertyValue>),
     /// Object/map value
     Object(#[rkyv(omit_bounds)] BTreeMap<String, PropertyValue>),
+    /// Array of UTC datetimes as epoch milliseconds, the stored form of every
+    /// nonempty homogeneous datetime list. Declared last so that every earlier
+    /// variant keeps its persisted discriminant.
+    DateTimeArray(Vec<i64>),
 }
 
 impl PropertyValue {
@@ -67,7 +71,8 @@ impl PropertyValue {
             }
             (Self::String(left), Self::String(right)) => left == right,
             (Self::Bytes(left), Self::Bytes(right)) => left == right,
-            (Self::I64Array(left), Self::I64Array(right)) => left == right,
+            (Self::I64Array(left), Self::I64Array(right))
+            | (Self::DateTimeArray(left), Self::DateTimeArray(right)) => left == right,
             (Self::F64Array(left), Self::F64Array(right)) => {
                 left.len() == right.len()
                     && left
@@ -112,7 +117,8 @@ impl PropertyValue {
                 | Self::F32Array(_)
                 | Self::StringArray(_)
                 | Self::Array(_)
-                | Self::Object(_),
+                | Self::Object(_)
+                | Self::DateTimeArray(_),
                 _,
             ) => false,
         }
@@ -157,6 +163,7 @@ impl PropertyValue {
             PropertyValue::StringArray(_) => 9,
             PropertyValue::Array(_) => 10,
             PropertyValue::Object(_) => 11,
+            PropertyValue::DateTimeArray(_) => 12,
         };
         rank(self)
             .cmp(&rank(other))
@@ -178,7 +185,10 @@ impl PropertyValue {
                 (PropertyValue::DateTime(left), PropertyValue::DateTime(right)) => left.cmp(right),
                 (PropertyValue::String(left), PropertyValue::String(right)) => left.cmp(right),
                 (PropertyValue::Bytes(left), PropertyValue::Bytes(right)) => left.cmp(right),
-                (PropertyValue::I64Array(left), PropertyValue::I64Array(right)) => left.cmp(right),
+                (PropertyValue::I64Array(left), PropertyValue::I64Array(right))
+                | (PropertyValue::DateTimeArray(left), PropertyValue::DateTimeArray(right)) => {
+                    left.cmp(right)
+                }
                 (PropertyValue::F64Array(left), PropertyValue::F64Array(right)) => {
                     total_cmp_f64_slices(left, right)
                 }
@@ -212,7 +222,18 @@ impl PropertyValue {
             (PropertyValue::DateTime(a), PropertyValue::DateTime(b)) => a == b,
             (PropertyValue::String(a), PropertyValue::String(b)) => a == b,
             (PropertyValue::Bytes(a), PropertyValue::Bytes(b)) => a == b,
-            (PropertyValue::I64Array(a), PropertyValue::I64Array(b)) => a == b,
+            (PropertyValue::I64Array(a), PropertyValue::I64Array(b))
+            | (PropertyValue::DateTimeArray(a), PropertyValue::DateTimeArray(b)) => a == b,
+            // A datetime list stored before it had its own variant is a
+            // generic array of datetimes, and still equals the same list.
+            (PropertyValue::DateTimeArray(typed), PropertyValue::Array(generic))
+            | (PropertyValue::Array(generic), PropertyValue::DateTimeArray(typed)) => {
+                typed.len() == generic.len()
+                    && typed
+                        .iter()
+                        .zip(generic)
+                        .all(|(millis, value)| *value == PropertyValue::DateTime(*millis))
+            }
             (PropertyValue::F64Array(a), PropertyValue::F64Array(b)) => {
                 numeric_f64_slices_equal(a, b)
             }
@@ -266,7 +287,8 @@ impl PropertyValue {
             | PropertyValue::F32Array(_)
             | PropertyValue::StringArray(_)
             | PropertyValue::Array(_)
-            | PropertyValue::Object(_) => None,
+            | PropertyValue::Object(_)
+            | PropertyValue::DateTimeArray(_) => None,
         }
     }
 
@@ -302,6 +324,7 @@ impl PropertyValue {
             PropertyValue::F32Array(items) => format!("<f32[{}]>", items.len()),
             PropertyValue::Array(a) => format!("<array[{}]>", a.len()),
             PropertyValue::Object(o) => format!("<object[{}]>", o.len()),
+            PropertyValue::DateTimeArray(a) => format!("<datetime[{}]>", a.len()),
         }
     }
 }
@@ -321,7 +344,8 @@ fn numeric_bits(value: &PropertyValue) -> (u8, u64) {
         | PropertyValue::F32Array(_)
         | PropertyValue::StringArray(_)
         | PropertyValue::Array(_)
-        | PropertyValue::Object(_) => unreachable!("numeric_bits requires a numeric value"),
+        | PropertyValue::Object(_)
+        | PropertyValue::DateTimeArray(_) => unreachable!("numeric_bits requires a numeric value"),
     }
 }
 
@@ -496,6 +520,7 @@ impl std::fmt::Display for PropertyValue {
             PropertyValue::F32Array(items) => write!(f, "<f32[{}]>", items.len()),
             PropertyValue::Array(a) => write!(f, "<array[{}]>", a.len()),
             PropertyValue::Object(o) => write!(f, "<object[{}]>", o.len()),
+            PropertyValue::DateTimeArray(a) => write!(f, "<datetime[{}]>", a.len()),
         }
     }
 }
@@ -505,18 +530,19 @@ impl Serialize for PropertyValue {
     where
         S: Serializer,
     {
+        use serde::ser::{Error, SerializeSeq};
+        let rfc3339 = |millis: i64| {
+            datetime_millis_to_rfc3339(millis).ok_or_else(|| {
+                S::Error::custom(format!(
+                    "datetime millis '{millis}' cannot be rendered as RFC3339"
+                ))
+            })
+        };
         match self {
             PropertyValue::Null => serializer.serialize_unit(),
             PropertyValue::Bool(value) => serializer.serialize_bool(*value),
             PropertyValue::I64(value) => serializer.serialize_i64(*value),
-            PropertyValue::DateTime(value) => {
-                serializer.serialize_str(&datetime_millis_to_rfc3339(*value).ok_or_else(|| {
-                    serde::ser::Error::custom(format!(
-                        "datetime millis '{}' cannot be rendered as RFC3339",
-                        value
-                    ))
-                })?)
-            }
+            PropertyValue::DateTime(value) => serializer.serialize_str(&rfc3339(*value)?),
             PropertyValue::F64(value) => serializer.serialize_f64(*value),
             PropertyValue::F32(value) => serializer.serialize_f64(*value),
             PropertyValue::String(value) => serializer.serialize_str(value),
@@ -527,6 +553,14 @@ impl Serialize for PropertyValue {
             PropertyValue::StringArray(values) => serializer.collect_seq(values),
             PropertyValue::Array(values) => serde::Serialize::serialize(values, serializer),
             PropertyValue::Object(values) => serde::Serialize::serialize(values, serializer),
+            // Each member as a stored datetime is written: RFC 3339 text.
+            PropertyValue::DateTimeArray(values) => {
+                let mut sequence = serializer.serialize_seq(Some(values.len()))?;
+                for value in values {
+                    sequence.serialize_element(&rfc3339(*value)?)?;
+                }
+                sequence.end()
+            }
         }
     }
 }
@@ -596,10 +630,18 @@ mod tests {
                 PropertyValue::StringArray(vec!["a".to_string()]),
                 PropertyValue::StringArray(vec!["a".to_string()]),
             ),
+            (
+                PropertyValue::DateTimeArray(vec![1]),
+                PropertyValue::DateTimeArray(vec![1]),
+            ),
         ];
         assert!(scalar_pairs
             .iter()
             .all(|(left, right)| left.same_v1_representation(right)));
+        assert!(!PropertyValue::DateTimeArray(vec![1])
+            .same_v1_representation(&PropertyValue::I64Array(vec![1])));
+        assert!(!PropertyValue::DateTimeArray(vec![1])
+            .same_v1_representation(&PropertyValue::Array(vec![PropertyValue::DateTime(1)])));
     }
 
     #[test]
@@ -704,11 +746,36 @@ mod tests {
             PropertyValue::StringArray(vec!["a".to_string()]),
             PropertyValue::Array(vec![PropertyValue::I64(1)]),
             PropertyValue::Object(object),
+            PropertyValue::DateTimeArray(vec![1, 2]),
         ];
 
         for value in values {
             assert!(value.eq_value(&value));
         }
+        assert!(!PropertyValue::DateTimeArray(vec![1, 2])
+            .eq_value(&PropertyValue::DateTimeArray(vec![2, 1])));
+        assert!(!PropertyValue::DateTimeArray(vec![1, 2])
+            .eq_value(&PropertyValue::I64Array(vec![1, 2])));
+        let generic = |values: &[i64]| {
+            PropertyValue::Array(
+                values
+                    .iter()
+                    .copied()
+                    .map(PropertyValue::DateTime)
+                    .collect(),
+            )
+        };
+        assert!(PropertyValue::DateTimeArray(vec![1, 2]).eq_value(&generic(&[1, 2])));
+        assert!(generic(&[1, 2]).eq_value(&PropertyValue::DateTimeArray(vec![1, 2])));
+        assert!(!PropertyValue::DateTimeArray(vec![1, 2]).eq_value(&generic(&[1])));
+        assert!(!PropertyValue::DateTimeArray(vec![1, 2]).eq_value(&generic(&[2, 1])));
+        assert!(!PropertyValue::DateTimeArray(vec![1])
+            .eq_value(&PropertyValue::Array(vec![PropertyValue::I64(1)])));
+        assert_eq!(PropertyValue::DateTimeArray(vec![1]).as_f64(), None);
+        assert_eq!(
+            PropertyValue::DateTimeArray(vec![1]).compare(&PropertyValue::DateTimeArray(vec![1])),
+            None
+        );
 
         assert!(PropertyValue::I64(2).eq_value(&PropertyValue::F32(2.0)));
         assert!(PropertyValue::I64(2).eq_value(&PropertyValue::F64(2.0)));
@@ -763,6 +830,11 @@ mod tests {
                 "<array[1]>",
             ),
             (PropertyValue::Object(object), "<object[1]>", "<object[1]>"),
+            (
+                PropertyValue::DateTimeArray(vec![0, 1]),
+                "<datetime[2]>",
+                "<datetime[2]>",
+            ),
         ];
 
         for (value, index, display) in cases {
@@ -778,6 +850,19 @@ mod tests {
     #[test]
     fn serde_rejects_unrenderable_datetime() {
         assert!(serde_json::to_value(PropertyValue::DateTime(i64::MAX)).is_err());
+        assert!(serde_json::to_value(PropertyValue::DateTimeArray(vec![0, i64::MAX])).is_err());
+    }
+
+    #[test]
+    fn serde_writes_a_datetime_list_as_its_members_text() {
+        assert_eq!(
+            serde_json::to_value(PropertyValue::DateTimeArray(vec![0, -1])).unwrap(),
+            serde_json::json!(["1970-01-01T00:00:00.000Z", "1969-12-31T23:59:59.999Z"])
+        );
+        assert_eq!(
+            serde_json::to_value(PropertyValue::DateTimeArray(Vec::new())).unwrap(),
+            serde_json::json!([])
+        );
     }
 
     #[test]
@@ -795,6 +880,7 @@ mod tests {
             PropertyValue::StringArray(Vec::new()),
             PropertyValue::Array(Vec::new()),
             PropertyValue::Object(BTreeMap::new()),
+            PropertyValue::DateTimeArray(Vec::new()),
         ];
         assert!(ranked.windows(2).all(|pair| {
             pair[0].total_order(&pair[1]) == Ordering::Less
@@ -820,6 +906,14 @@ mod tests {
             (
                 PropertyValue::StringArray(vec!["a".to_string()]),
                 PropertyValue::StringArray(vec!["b".to_string()]),
+            ),
+            (
+                PropertyValue::DateTimeArray(vec![-1]),
+                PropertyValue::DateTimeArray(vec![0]),
+            ),
+            (
+                PropertyValue::DateTimeArray(vec![0]),
+                PropertyValue::DateTimeArray(vec![0, i64::MIN]),
             ),
         ];
         assert!(scalar_pairs

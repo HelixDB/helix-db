@@ -8,7 +8,16 @@
 //! `SUM` of no values is null. `ARRAY_AGG` leaves out nulls, as Cypher's
 //! `collect` does, where SQL keeps them. `TRIM` and its variants remove all leading or
 //! trailing whitespace, as Cypher's do, not only spaces. `CAST` uses Cypher's conversions: to an integer it truncates toward zero,
-//! and text that does not convert becomes null rather than an error.
+//! and text that does not convert becomes null rather than an error, except
+//! that a cast to `TIMESTAMP` is Cypher's `datetime`, which fails on such text.
+//! `TRY_CAST` and `SAFE_CAST` use the `…OrNull` conversions, null wherever the
+//! plain cast fails. `CURRENT_TIMESTAMP` and `NOW()` are the statement's UTC
+//! clock, their one optional argument a fractional-seconds precision that
+//! rounds it, and a `TIMESTAMP '…'` literal is a UTC datetime read by
+//! [`helix_planner::relational::parse_datetime`] at translation. `EXTRACT`
+//! reads the datetime property of the same meaning from `requireDatetime(x)`,
+//! so only a datetime has fields, such as `DOY` as `ordinalDay`, and `EPOCH`
+//! as `epochMillis / 1000.0`.
 use super::tables::Scope;
 use super::{binary, call, invalid, literal, unsupported, Translator};
 use crate::syntax::{Expr, ExprKind};
@@ -92,6 +101,50 @@ impl Translator<'_> {
             },
             E::CompoundIdentifier(parts) => scope.column(parts, span()),
             E::Value(value) => self.value(value, false, span()),
+            // A timestamp literal is a UTC datetime, read once like Cypher's
+            // `datetime('…')`; a time zone in the type changes nothing.
+            E::TypedString(ast::TypedString {
+                data_type:
+                    ast::DataType::Timestamp(..)
+                    | ast::DataType::TimestampNtz(_)
+                    | ast::DataType::Datetime(_),
+                value,
+                ..
+            }) => {
+                let span = span();
+                let ast::Value::SingleQuotedString(text) = &value.value else {
+                    return Err(unsupported(
+                        "TIMESTAMP literals other than quoted text",
+                        span,
+                    ));
+                };
+                // PostgreSQL's special values, such as 'epoch', are text
+                // this translation does not read; text in the grammar's form
+                // that names no instant, such as February 30, is an input
+                // error.
+                let millis = r::parse_datetime(text).map_err(|error| match error {
+                    r::DatetimeTextError::OutsideGrammar => unsupported(
+                        "TIMESTAMP text other than RFC 3339, a UTC date and time, or a date",
+                        span,
+                    ),
+                    r::DatetimeTextError::NoSuchInstant => QueryError::compile(
+                        category::ARGUMENT_ERROR,
+                        detail::INVALID_DATETIME,
+                        format!("TIMESTAMP text {text:?} names no instant"),
+                    )
+                    .at(span),
+                    r::DatetimeTextError::OutsideYears => QueryError::compile(
+                        category::ARGUMENT_ERROR,
+                        detail::INVALID_DATETIME,
+                        format!(
+                            "TIMESTAMP text {text:?} names an instant outside the UTC years \
+                             0000 to 9999"
+                        ),
+                    )
+                    .at(span),
+                })?;
+                literal(r::Value::DateTime(millis), span)
+            }
             E::Nested(inner) => self.expr(inner, scope),
             E::BinaryOp { left, op, right } => self.binary_op(expression, left, op, right, scope),
             E::UnaryOp {
@@ -179,15 +232,62 @@ impl Translator<'_> {
                 escape_char: None,
             } => self.like(expr, pattern, true, *negated, scope, span()),
             E::Cast {
-                kind: _,
+                kind,
                 expr,
                 data_type,
                 format: None,
             } => {
                 let span = span();
-                let function = cast_function(data_type)
+                let (strict, or_null) = cast_function(data_type)
                     .ok_or_else(|| unsupported(format!("CAST to `{data_type}`"), span))?;
+                let function = match kind {
+                    ast::CastKind::Cast | ast::CastKind::DoubleColon => strict,
+                    ast::CastKind::TryCast | ast::CastKind::SafeCast => or_null,
+                };
                 call(function, vec![self.expr(expr, scope)?], span)
+            }
+            // Fields whose PostgreSQL meaning is a datetime property. Its
+            // SECOND and MILLISECONDS carry the seconds' fraction, which no
+            // one property holds, and EPOCH is fractional seconds.
+            E::Extract { field, expr, .. } => {
+                use ast::DateTimeField as D;
+                let span = span();
+                let key = match field {
+                    D::Year => "year",
+                    D::Quarter => "quarter",
+                    D::Month => "month",
+                    D::Week(None) => "week",
+                    D::Isoyear => "weekYear",
+                    D::Day => "day",
+                    D::Doy => "ordinalDay",
+                    D::Isodow => "dayOfWeek",
+                    D::Hour => "hour",
+                    D::Minute => "minute",
+                    D::Epoch => "epochMillis",
+                    _ => return Err(unsupported(format!("EXTRACT of `{field}`"), span)),
+                };
+                // Only a datetime has fields: a node's or map's property of the
+                // field's name is never read, and text is never converted.
+                let value = Expr::new(
+                    ExprKind::Property(
+                        Box::new(call(
+                            "requireDatetime",
+                            vec![self.expr(expr, scope)?],
+                            span,
+                        )?),
+                        key.to_owned(),
+                    ),
+                    span,
+                )?;
+                match field {
+                    D::Epoch => binary(
+                        r::Binary::Divide,
+                        value,
+                        literal(r::Value::Float(1000.0), span)?,
+                        span,
+                    ),
+                    _ => Ok(value),
+                }
             }
             E::Function(function) => self.function(function, scope, span()),
             E::Case {
@@ -742,7 +842,69 @@ impl Translator<'_> {
             "stddev_pop" => "stDevP",
             "array_agg" => "collect",
             "elementid" => "id",
-            "current_timestamp" | "now" => "localdatetime",
+            // The statement's UTC clock. Its one argument may only be a
+            // fractional-seconds precision from 0 to 6, as in PostgreSQL's
+            // CURRENT_TIMESTAMP(p) and MySQL's NOW(p), which rounds the clock;
+            // a datetime holds milliseconds, so 3 and above change nothing.
+            // No argument is ever a datetime to read.
+            "current_timestamp" | "now" => {
+                let precision = match arguments.as_slice() {
+                    [] => 3,
+                    [argument] => {
+                        let ExprKind::Literal(r::Value::Integer(precision @ 0..=6)) =
+                            argument.kind()
+                        else {
+                            return Err(QueryError::compile(
+                                category::ARGUMENT_ERROR,
+                                detail::INVALID_ARGUMENT_TYPE,
+                                format!(
+                                    "{} takes only a fractional-seconds precision, an \
+                                     integer from 0 to 6",
+                                    name.value
+                                ),
+                            )
+                            .at(argument.span));
+                        };
+                        *precision
+                    }
+                    _ => {
+                        return Err(invalid(
+                            detail::INVALID_NUMBER_OF_ARGUMENTS,
+                            format!("{} takes at most one argument, a precision", name.value),
+                            span,
+                        ));
+                    }
+                };
+                if precision >= 3 {
+                    return call("datetime", Vec::new(), span);
+                }
+                // datetime({epochMillis: (timestamp() + unit / 2) / unit * unit})
+                let unit = 10_i64.pow(3 - precision as u32);
+                let rounded = binary(
+                    r::Binary::Multiply,
+                    binary(
+                        r::Binary::Divide,
+                        binary(
+                            r::Binary::Add,
+                            call("timestamp", Vec::new(), span)?,
+                            literal(r::Value::Integer(unit / 2), span)?,
+                            span,
+                        )?,
+                        literal(r::Value::Integer(unit), span)?,
+                        span,
+                    )?,
+                    literal(r::Value::Integer(unit), span)?,
+                    span,
+                )?;
+                return call(
+                    "datetime",
+                    vec![Expr::new(
+                        ExprKind::Map(vec![("epochMillis".to_owned(), rounded)]),
+                        span,
+                    )?],
+                    span,
+                );
+            }
             "current_date" => "date",
             "current_time" => "localtime",
             // PostgreSQL's CONCAT: strings joined, nulls skipped.
@@ -1019,6 +1181,7 @@ const CYPHER_FUNCTIONS: &[&str] = &[
     "count",
     "date",
     "datetime",
+    "datetimeOrNull",
     "degrees",
     "exists",
     "exp",
@@ -1046,6 +1209,7 @@ const CYPHER_FUNCTIONS: &[&str] = &[
     "range",
     "relationships",
     "replace",
+    "requireDatetime",
     "reverse",
     "right",
     "round",
@@ -1064,10 +1228,14 @@ const CYPHER_FUNCTIONS: &[&str] = &[
     "time",
     "timestamp",
     "toBoolean",
+    "toBooleanOrNull",
     "toFloat",
+    "toFloatOrNull",
     "toInteger",
+    "toIntegerOrNull",
     "toLower",
     "toString",
+    "toStringOrNull",
     "toUpper",
     "trim",
     "type",
@@ -1120,12 +1288,14 @@ fn substring(value: Expr, start: Option<Expr>, length: Option<Expr>, span: Span)
     )
 }
 
-/// The Cypher conversion a SQL type casts with.
+/// The Cypher conversions a SQL type casts with: the strict one `CAST` and
+/// `::` use, then the one `TRY_CAST` and `SAFE_CAST` use, which is null
+/// wherever the strict one fails to convert.
 #[expect(
     clippy::wildcard_enum_match_arm,
     reason = "sqlparser's type set is open-ended; every other type has no Cypher conversion"
 )]
-fn cast_function(data_type: &ast::DataType) -> Option<&'static str> {
+fn cast_function(data_type: &ast::DataType) -> Option<(&'static str, &'static str)> {
     use ast::DataType as T;
     Some(match data_type {
         T::Character(_)
@@ -1141,7 +1311,7 @@ fn cast_function(data_type: &ast::DataType) -> Option<&'static str> {
         | T::CharLargeObject(_)
         | T::TinyText
         | T::MediumText
-        | T::LongText => "toString",
+        | T::LongText => ("toString", "toStringOrNull"),
         T::TinyInt(_)
         | T::SmallInt(_)
         | T::MediumInt(_)
@@ -1155,7 +1325,7 @@ fn cast_function(data_type: &ast::DataType) -> Option<&'static str> {
         | T::Int32
         | T::Int64
         | T::Signed
-        | T::SignedInteger => "toInteger",
+        | T::SignedInteger => ("toInteger", "toIntegerOrNull"),
         T::Float(_)
         | T::Real
         | T::Double(_)
@@ -1166,8 +1336,9 @@ fn cast_function(data_type: &ast::DataType) -> Option<&'static str> {
         | T::Float64
         | T::Decimal(_)
         | T::Numeric(_)
-        | T::Dec(_) => "toFloat",
-        T::Bool | T::Boolean => "toBoolean",
+        | T::Dec(_) => ("toFloat", "toFloatOrNull"),
+        T::Bool | T::Boolean => ("toBoolean", "toBooleanOrNull"),
+        T::Timestamp(..) | T::TimestampNtz(_) | T::Datetime(_) => ("datetime", "datetimeOrNull"),
         _ => return None,
     })
 }

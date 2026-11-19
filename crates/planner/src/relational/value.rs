@@ -63,6 +63,12 @@ pub enum Value {
     Integer(i64),
     Float(#[serde(with = "float_bits")] f64),
     String(String),
+    /// A UTC instant in epoch milliseconds, the representation of a stored
+    /// datetime property. Datetimes compare chronologically with each other
+    /// and, like any two types, never equal or order against another type.
+    /// Any `i64` is representable, as in storage; only rendering it as text
+    /// ([`format_datetime`]) is limited to chrono's range of years.
+    DateTime(i64),
     List(Vec<Value>),
     Map(BTreeMap<String, Value>),
     Entity(Entity),
@@ -182,6 +188,7 @@ impl Value {
             | Self::Integer(_)
             | Self::Float(_)
             | Self::String(_)
+            | Self::DateTime(_)
             | Self::Entity(_)
             | Self::Path(_) => Ok(()),
         }
@@ -221,25 +228,45 @@ impl Value {
                 .capacity()
                 .saturating_add(p.relationships.capacity())
                 .saturating_mul(size_of::<u64>()),
-            Self::Null | Self::Boolean(_) | Self::Integer(_) | Self::Float(_) | Self::Entity(_) => {
-                0
-            }
+            Self::Null
+            | Self::Boolean(_)
+            | Self::Integer(_)
+            | Self::Float(_)
+            | Self::DateTime(_)
+            | Self::Entity(_) => 0,
         };
         size_of::<Self>().saturating_add(nested)
     }
 
     /// Cypher predicate equality propagates unknown through nested containers.
-    pub fn equals(&self, other: &Self) -> Option<bool> {
-        match (self, other) {
+    /// Values of different types are unequal, except that a datetime and
+    /// text, at any depth, fail with [`datetime_text_comparison`]: text is
+    /// never read as a datetime, so such a comparison is a mistake, not a
+    /// mismatch.
+    ///
+    /// ```
+    /// use helix_planner::relational::{detail, Value};
+    /// assert_eq!(Value::DateTime(0).equals(&Value::DateTime(0)), Ok(Some(true)));
+    /// assert_eq!(Value::DateTime(0).equals(&Value::Integer(0)), Ok(Some(false)));
+    /// let text = Value::String("1970-01-01T00:00:00Z".into());
+    /// let error = Value::DateTime(0).equals(&text).unwrap_err();
+    /// assert_eq!(error.detail, detail::DATETIME_TEXT_COMPARISON);
+    /// assert!(Value::List(vec![text]).equals(&Value::List(vec![Value::DateTime(0)])).is_err());
+    /// ```
+    pub fn equals(&self, other: &Self) -> Result<Option<bool>> {
+        Ok(match (self, other) {
             (Self::Null, _) | (_, Self::Null) => None,
+            (Self::DateTime(_), Self::String(_)) | (Self::String(_), Self::DateTime(_)) => {
+                return Err(datetime_text_comparison());
+            }
             (Self::List(a), Self::List(b)) => {
                 if a.len() != b.len() {
-                    return Some(false);
+                    return Ok(Some(false));
                 }
                 let mut unknown = false;
                 for (a, b) in a.iter().zip(b) {
-                    match a.equals(b) {
-                        Some(false) => return Some(false),
+                    match a.equals(b)? {
+                        Some(false) => return Ok(Some(false)),
                         None => unknown = true,
                         Some(true) => {}
                     }
@@ -248,12 +275,12 @@ impl Value {
             }
             (Self::Map(a), Self::Map(b)) => {
                 if a.keys().ne(b.keys()) {
-                    return Some(false);
+                    return Ok(Some(false));
                 }
                 let mut unknown = false;
                 for (a, b) in a.values().zip(b.values()) {
-                    match a.equals(b) {
-                        Some(false) => return Some(false),
+                    match a.equals(b)? {
+                        Some(false) => return Ok(Some(false)),
                         None => unknown = true,
                         Some(true) => {}
                     }
@@ -264,7 +291,7 @@ impl Value {
                 Some(self.number_cmp(other) == Some(Ordering::Equal))
             }
             _ => Some(self == other),
-        }
+        })
     }
 
     pub fn number_cmp(&self, other: &Self) -> Option<Ordering> {
@@ -278,6 +305,15 @@ impl Value {
     }
 
     /// Total equivalence/order used by grouping, DISTINCT and sorting, not WHERE.
+    /// Types rank in openCypher's ascending order, with datetimes between
+    /// paths and strings.
+    ///
+    /// ```
+    /// use helix_planner::relational::{Path, Value};
+    /// let path = Value::Path(Path::new(vec![1], vec![]).unwrap());
+    /// let ascending = [path, Value::DateTime(-1), Value::DateTime(0), Value::String("".into())];
+    /// assert!(ascending.windows(2).all(|pair| pair[0].total_cmp(&pair[1]).is_lt()));
+    /// ```
     pub fn total_cmp(&self, other: &Self) -> Ordering {
         let rank = |v: &Self| match v {
             Self::Map(_) => 0,
@@ -285,10 +321,11 @@ impl Value {
             Self::Entity(Entity::Relationship(_)) => 2,
             Self::List(_) => 3,
             Self::Path(_) => 4,
-            Self::String(_) => 5,
-            Self::Boolean(_) => 6,
-            Self::Integer(_) | Self::Float(_) => 7,
-            Self::Null => 8,
+            Self::DateTime(_) => 5,
+            Self::String(_) => 6,
+            Self::Boolean(_) => 7,
+            Self::Integer(_) | Self::Float(_) => 8,
+            Self::Null => 9,
         };
         let compare_lists = |a: &[Self], b: &[Self]| {
             a.iter()
@@ -307,6 +344,7 @@ impl Value {
                     _ => Ordering::Less,
                 }),
             (Self::String(a), Self::String(b)) => a.cmp(b),
+            (Self::DateTime(a), Self::DateTime(b)) => a.cmp(b),
             (Self::Boolean(a), Self::Boolean(b)) => a.cmp(b),
             (Self::Entity(a), Self::Entity(b)) => a.cmp(b),
             (Self::List(a), Self::List(b)) => compare_lists(a, b),
@@ -431,8 +469,23 @@ impl std::hash::Hash for GroupingKey {
                         hash_value(value, state);
                     }
                 }
+                Value::DateTime(value) => {
+                    8_u8.hash(state);
+                    value.hash(state);
+                }
             }
         }
         hash_value(&self.0, state);
     }
+}
+
+/// The type error of comparing a datetime with text, which never reads the
+/// text as a datetime.
+pub fn datetime_text_comparison() -> QueryError {
+    QueryError::runtime(
+        category::TYPE_ERROR,
+        detail::DATETIME_TEXT_COMPARISON,
+        "cannot compare a datetime with text; read the text as a datetime with \
+         datetime('…') in Cypher or TIMESTAMP '…' in SQL",
+    )
 }

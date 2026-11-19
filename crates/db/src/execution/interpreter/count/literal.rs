@@ -77,8 +77,13 @@ fn copied_bytes(value: &exec::ExecIndexedEqualityValue) -> usize {
             values.len().saturating_mul(size_of::<String>()),
             |bytes, value| bytes.saturating_add(value.len()),
         ),
-        P::Null | P::Array(_) | P::Object(_) => {
-            unreachable!("exact indexed literals are nonnull and flat")
+        // A datetime list, the only admitted array, is cloned and then
+        // converted to its flat millis.
+        P::Array(values) => values
+            .len()
+            .saturating_mul(size_of::<P>().saturating_add(size_of::<i64>())),
+        P::Null | P::Object(_) => {
+            unreachable!("exact indexed literals are nonnull and not objects")
         }
     }
 }

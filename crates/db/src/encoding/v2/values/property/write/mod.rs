@@ -138,7 +138,7 @@ fn value(value: &PropertyValue, depth: usize) -> Result<Allocation, EncodingErro
         | PropertyValue::F32(_) => (0, 0, 0),
         PropertyValue::String(s) => (s.len(), s.capacity(), 0),
         PropertyValue::Bytes(v) => (v.len(), v.capacity(), 0),
-        PropertyValue::I64Array(v) => (
+        PropertyValue::I64Array(v) | PropertyValue::DateTimeArray(v) => (
             v.len().saturating_mul(size_of::<i64>()),
             v.capacity().saturating_mul(size_of::<i64>()),
             0,

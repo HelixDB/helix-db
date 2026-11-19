@@ -99,7 +99,8 @@ pub(in crate::execution::interpreter::access) fn db_value_to_query_vector(
         | DbPropertyValue::String(_)
         | DbPropertyValue::Bytes(_)
         | DbPropertyValue::StringArray(_)
-        | DbPropertyValue::Object(_)) => {
+        | DbPropertyValue::Object(_)
+        | DbPropertyValue::DateTimeArray(_)) => {
             return Err(HelixDbError::Query(format!(
                 "vector search query expression must evaluate to a numeric array, got {other:?}"
             )));
@@ -122,7 +123,8 @@ fn numeric_property_to_f32(value: DbPropertyValue) -> Result<f32> {
         | DbPropertyValue::F32Array(_)
         | DbPropertyValue::StringArray(_)
         | DbPropertyValue::Array(_)
-        | DbPropertyValue::Object(_)) => Err(HelixDbError::Query(format!(
+        | DbPropertyValue::Object(_)
+        | DbPropertyValue::DateTimeArray(_)) => Err(HelixDbError::Query(format!(
             "vector search query array item must be numeric, got {other:?}"
         ))),
     }

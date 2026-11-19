@@ -18,3 +18,4 @@ mod row_projections;
 mod row_windows;
 mod schema_snapshots;
 mod simple_case;
+mod temporal;

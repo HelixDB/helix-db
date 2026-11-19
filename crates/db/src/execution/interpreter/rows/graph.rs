@@ -426,7 +426,8 @@ pub(super) fn visit_entities(
         | r::Value::Boolean(_)
         | r::Value::Integer(_)
         | r::Value::Float(_)
-        | r::Value::String(_) => {}
+        | r::Value::String(_)
+        | r::Value::DateTime(_) => {}
     }
     Ok(())
 }
@@ -444,6 +445,9 @@ impl GraphBatch {
             r::Value::Float(f) if f.is_finite() => size_of::<serde_json::Value>(),
             r::Value::Integer(_) | r::Value::Float(_) => 2048,
             r::Value::String(s) => size_of::<serde_json::Value>().saturating_add(s.len()),
+            r::Value::DateTime(_) => {
+                size_of::<serde_json::Value>().saturating_add(r::MAX_DATETIME_TEXT_BYTES)
+            }
             r::Value::List(values) => {
                 // Fallible collect may grow geometrically, including the minimum
                 // Vec allocation for a one-element list.
@@ -526,6 +530,14 @@ impl GraphBatch {
                 }
             }
             r::Value::String(s) => json!(s),
+            // Exactly the native response encoding of a stored datetime, its
+            // formatter's spare capacity released to fit `wire_memory`.
+            r::Value::DateTime(millis) => {
+                let mut text = crate::encoding::property::datetime_millis_to_rfc3339(*millis)
+                    .ok_or_else(r::unrenderable_datetime)?;
+                text.shrink_to_fit();
+                J::String(text)
+            }
             r::Value::List(xs) => J::Array(xs.iter().map(|v| self.wire(v)).collect::<Result<_>>()?),
             r::Value::Map(xs) => {
                 let map = xs
@@ -588,6 +600,7 @@ pub(super) fn to_property(value: r::Value) -> Result<P> {
         r::Value::Integer(i) => P::I64(i),
         r::Value::Float(f) => P::F64(f),
         r::Value::String(s) => P::String(s),
+        r::Value::DateTime(millis) => P::DateTime(millis),
         r::Value::List(xs) => {
             if xs.iter().any(|v| {
                 matches!(
@@ -607,9 +620,10 @@ pub(super) fn to_property(value: r::Value) -> Result<P> {
             {
                 return Err(property_type());
             }
-            // Use the existing typed storage forms so equality-index maintenance
-            // accepts homogeneous numeric/string lists. Generic arrays remain
-            // readable, and boolean lists retain their existing storage form.
+            // Use the typed storage forms so equality-index maintenance accepts
+            // homogeneous numeric, string and datetime lists. Generic arrays
+            // remain readable, and boolean lists retain their existing storage
+            // form.
             match xs.first() {
                 None => P::I64Array(Vec::new()),
                 Some(r::Value::Integer(_)) => P::I64Array(
@@ -639,6 +653,16 @@ pub(super) fn to_property(value: r::Value) -> Result<P> {
                                 unreachable!("validated homogeneous list")
                             };
                             value
+                        })
+                        .collect(),
+                ),
+                Some(r::Value::DateTime(_)) => P::DateTimeArray(
+                    xs.into_iter()
+                        .map(|value| {
+                            let r::Value::DateTime(millis) = value else {
+                                unreachable!("validated homogeneous list")
+                            };
+                            millis
                         })
                         .collect(),
                 ),

@@ -22,6 +22,7 @@ fn simple_case_preserves_equality_and_branch_laziness() {
         group: None,
         max_collection_items: usize::MAX,
         memory: r::EvaluationMemory::new(usize::MAX),
+        statement_time: 0,
     };
     for (text, expected) in [
         (

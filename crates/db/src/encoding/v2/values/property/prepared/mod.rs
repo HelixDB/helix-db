@@ -130,7 +130,9 @@ fn value_bytes(value: &V) -> usize {
         V::Null | V::Bool(_) | V::I64(_) | V::DateTime(_) | V::F64(_) | V::F32(_) => 0,
         V::String(value) => value.len(),
         V::Bytes(value) => value.len(),
-        V::I64Array(values) => values.len().saturating_mul(size_of::<i64>()),
+        V::I64Array(values) | V::DateTimeArray(values) => {
+            values.len().saturating_mul(size_of::<i64>())
+        }
         V::F64Array(values) => values.len().saturating_mul(size_of::<f64>()),
         V::F32Array(values) => values.len().saturating_mul(size_of::<f32>()),
         V::StringArray(values) => values.iter().fold(

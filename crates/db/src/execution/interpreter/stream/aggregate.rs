@@ -206,7 +206,8 @@ fn aggregate_numeric_value(value: &DbPropertyValue) -> Option<f64> {
         | DbPropertyValue::F32Array(_)
         | DbPropertyValue::StringArray(_)
         | DbPropertyValue::Array(_)
-        | DbPropertyValue::Object(_) => None,
+        | DbPropertyValue::Object(_)
+        | DbPropertyValue::DateTimeArray(_) => None,
     }
 }
 

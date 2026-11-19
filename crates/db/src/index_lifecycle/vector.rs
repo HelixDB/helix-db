@@ -292,7 +292,8 @@ fn property_vector_to_f32(value: Cow<'_, PropertyValue>) -> Result<Vec<f32>> {
         | PropertyValue::String(_)
         | PropertyValue::Bytes(_)
         | PropertyValue::StringArray(_)
-        | PropertyValue::Object(_)) => Err(HelixDbError::Query(format!(
+        | PropertyValue::Object(_)
+        | PropertyValue::DateTimeArray(_)) => Err(HelixDbError::Query(format!(
             "vector index property must be a numeric array, got {other:?}"
         ))),
     }
@@ -313,7 +314,8 @@ fn numeric_value_to_f32(value: &PropertyValue) -> Result<f32> {
         | PropertyValue::F32Array(_)
         | PropertyValue::StringArray(_)
         | PropertyValue::Array(_)
-        | PropertyValue::Object(_)) => Err(HelixDbError::Query(format!(
+        | PropertyValue::Object(_)
+        | PropertyValue::DateTimeArray(_)) => Err(HelixDbError::Query(format!(
             "vector index array item must be numeric, got {other:?}"
         ))),
     }

@@ -263,7 +263,8 @@ fn classify(value: &PropertyValue) -> Option<std::result::Result<(), SkipReason>
         | PropertyValue::F32Array(_)
         | PropertyValue::StringArray(_)
         | PropertyValue::Array(_)
-        | PropertyValue::Object(_) => Some(Err(SkipReason::MixedTypes)),
+        | PropertyValue::Object(_)
+        | PropertyValue::DateTimeArray(_) => Some(Err(SkipReason::MixedTypes)),
     }
 }
 

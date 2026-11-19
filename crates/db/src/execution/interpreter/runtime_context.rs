@@ -307,6 +307,9 @@ pub(in crate::execution::interpreter) struct ExecutionContext<'db> {
     /// a write request's transaction changes (see
     /// [`super::access::PendingSets`]).
     pub(in crate::execution::interpreter) pending_sets: Arc<super::access::PendingSets>,
+    /// UTC epoch milliseconds read once when the request starts: the statement
+    /// clock every Cypher `datetime()` and `timestamp()` returns.
+    pub(in crate::execution::interpreter) statement_time: i64,
     #[cfg(test)]
     pub(in crate::execution::interpreter) projection_reads: Arc<ProjectionReadCounters>,
     #[cfg(test)]
@@ -388,6 +391,7 @@ impl<'db> ExecutionContext<'db> {
             durable_wait_limit: crate::transaction::DURABLE_WAIT_LIMIT,
             shared_index_reads: Arc::default(),
             pending_sets: Arc::default(),
+            statement_time: chrono::Utc::now().timestamp_millis(),
             #[cfg(test)]
             projection_reads: Arc::new(ProjectionReadCounters::default()),
             #[cfg(test)]

@@ -28,6 +28,9 @@ pub(in crate::execution::interpreter) fn property_value_is_in(
         DbPropertyValue::I64Array(values) => values
             .iter()
             .any(|item| DbPropertyValue::I64(*item).eq_value(value)),
+        DbPropertyValue::DateTimeArray(values) => values
+            .iter()
+            .any(|item| DbPropertyValue::DateTime(*item).eq_value(value)),
         DbPropertyValue::F64Array(values) => values
             .iter()
             .any(|item| DbPropertyValue::F64(*item).eq_value(value)),

@@ -358,7 +358,7 @@ fn expressions_translate_with_sql_semantics() {
         ),
         (
             "SELECT 1::varchar, TRY_CAST('1' AS INT), 1 % 2, 'a' || 1",
-            "RETURN toString(1), toInteger('1'), 1 % 2, 'a' + toString(1)",
+            "RETURN toString(1), toIntegerOrNull('1'), 1 % 2, 'a' + toString(1)",
         ),
         (
             "SELECT array_agg(t.a), stddev(t.a) FROM t",
@@ -373,7 +373,7 @@ fn expressions_translate_with_sql_semantics() {
         assert_eq!(cypher(sql), expected, "{sql}");
     }
     for sql in [
-        "SELECT EXTRACT(YEAR FROM t.d) FROM t",
+        "SELECT EXTRACT(SECOND FROM t.d) FROM t",
         "SELECT INTERVAL '1' DAY",
         "SELECT DATE '2020-01-01'",
         "SELECT CAST(1 AS DATE)",
@@ -1167,7 +1167,58 @@ fn rare_forms_follow_their_rules() {
         Err(error) => format!("{} {}", error.category, error.detail),
     };
     for (sql, expected) in [
-        ("SELECT CURRENT_TIMESTAMP", "ok RETURN localdatetime()"),
+        ("SELECT CURRENT_TIMESTAMP", "ok RETURN datetime()"),
+        // The clock's one argument is a fractional-seconds precision, which
+        // rounds it; a datetime holds milliseconds, so 3 to 6 change nothing.
+        (
+            "SELECT CURRENT_TIMESTAMP(3), NOW(6), NOW()",
+            "ok RETURN datetime(), datetime(), datetime()",
+        ),
+        (
+            "SELECT CURRENT_TIMESTAMP(0), NOW(2)",
+            "ok RETURN datetime({epochMillis: (timestamp() + 500) / 1000 * 1000}), \
+             datetime({epochMillis: (timestamp() + 5) / 10 * 10})",
+        ),
+        (
+            "SELECT NOW('2020-01-01')",
+            "argument_error invalid_argument_type",
+        ),
+        (
+            "SELECT CURRENT_TIMESTAMP(7)",
+            "argument_error invalid_argument_type",
+        ),
+        (
+            "SELECT CURRENT_TIMESTAMP(-1)",
+            "argument_error invalid_argument_type",
+        ),
+        (
+            "SELECT NOW(t.p) FROM t",
+            "argument_error invalid_argument_type",
+        ),
+        (
+            "SELECT NOW(3, 3)",
+            "syntax_error invalid_number_of_arguments",
+        ),
+        // A safe cast is null where the plain cast fails, for every type.
+        (
+            "SELECT TRY_CAST(t.a AS TIMESTAMP), SAFE_CAST(t.a AS INT), TRY_CAST(t.a AS FLOAT), \
+             TRY_CAST(t.a AS BOOLEAN), SAFE_CAST(t.a AS TEXT) FROM t",
+            "ok MATCH (t:t) RETURN datetimeOrNull(t.a), toIntegerOrNull(t.a), toFloatOrNull(t.a), \
+             toBooleanOrNull(t.a), toStringOrNull(t.a)",
+        ),
+        (
+            "SELECT CAST(t.a AS TIMESTAMP), t.a::INT FROM t",
+            "ok MATCH (t:t) RETURN datetime(t.a), toInteger(t.a)",
+        ),
+        (
+            "SELECT TRY_CAST(t.a AS DATE) FROM t",
+            "unsupported_feature sql_construct",
+        ),
+        // EXTRACT reads a field only from a datetime.
+        (
+            "SELECT EXTRACT(YEAR FROM t.a) FROM t",
+            "ok MATCH (t:t) RETURN requireDatetime(t.a).year",
+        ),
         (
             "SELECT ARRAY(SELECT 1)",
             "unsupported_feature procedures_and_subqueries",

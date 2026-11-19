@@ -589,9 +589,22 @@ fn verdicts_follow_every_value_kind() {
             "skip_is_final",
             PropertyValue::String("2026-01-01T00:00:00Z".to_owned()),
         ),
+        // A datetime list is a list, not a datetime, like any other array.
+        (
+            "string_then_datetime_list",
+            PropertyValue::String("2026-01-01T00:00:00Z".to_owned()),
+        ),
+        (
+            "string_then_datetime_list",
+            PropertyValue::DateTimeArray(vec![1]),
+        ),
     ] {
         observe(&mut tracked, key(name), &value);
     }
+    assert_eq!(
+        tracked[&key("string_then_datetime_list")].verdict,
+        Verdict::Skipped(SkipReason::MixedTypes)
+    );
     assert!(!tracked.contains_key(&key("null_only")));
     assert_eq!(tracked[&key("datetime_only")].verdict, Verdict::Datetimes);
     assert_eq!(
@@ -629,4 +642,98 @@ async fn an_undecodable_row_is_reported_without_stalling_the_job() {
     let report = run_to_completion(&db).await;
     assert_eq!(report.undecodable_rows, 1, "{report:?}");
     assert_eq!(report.converted_values, 1);
+}
+
+/// Cypher and SQL read the converted rows as datetimes: before the job the
+/// legacy strings never compare with a datetime, after it every converted
+/// row filters, orders and aggregates chronologically, and a property the
+/// job left as stored still reads as its string.
+#[tokio::test]
+async fn cypher_and_sql_read_converted_rows_as_datetimes() {
+    let db = open(2).await;
+    let u = DataScope::LegacyUnscoped;
+    for (name, at) in [
+        ("a", s("2026-01-01T00:00:00Z")),
+        ("b", s("2026-06-01T05:00:00+09:00")),
+        ("c", dt("2026-03-01T00:00:00Z")),
+        ("d", s("2025-12-31T23:59:59.999Z")),
+    ] {
+        add_node(&db, u, "Event", vec![("name", s(name)), ("at", at)]).await;
+    }
+    add_node(
+        &db,
+        u,
+        "Note",
+        vec![("name", s("n1")), ("at", s("2026-01-01T00:00:00Z"))],
+    )
+    .await;
+    add_node(&db, u, "Note", vec![("name", s("n2")), ("at", s("soon"))]).await;
+    let cypher = |text: &str| {
+        let db = &db;
+        let text = text.to_owned();
+        async move {
+            db.cypher(crate::cypher::Request::new(text.clone()))
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+                .rows
+        }
+    };
+    let compared = |text: &str| {
+        let db = &db;
+        let text = text.to_owned();
+        async move {
+            let Err(crate::cypher::Error::Query(error)) =
+                db.cypher(crate::cypher::Request::new(text.clone())).await
+            else {
+                panic!("{text}: compares a datetime with text");
+            };
+            assert_eq!(
+                error.detail,
+                helix_planner::relational::detail::DATETIME_TEXT_COMPARISON,
+                "{text}"
+            );
+        }
+    };
+    let since = "MATCH (e:Event) WHERE e.at >= datetime('2026-01-01') RETURN e.name ORDER BY e.at";
+    // Before the job runs the property mixes text with the datetime written
+    // as a literal, so comparing it with a datetime fails, never silently
+    // leaving the text out.
+    compared(since).await;
+    let report = run_to_completion(&db).await;
+    assert_eq!(report.converted_values, 3, "{report:?}");
+    assert_eq!(
+        cypher(since).await,
+        vec![vec![json!("a")], vec![json!("c")], vec![json!("b")]]
+    );
+    assert_eq!(
+        cypher("MATCH (e:Event) RETURN min(e.at), max(e.at), count(DISTINCT e.at)").await,
+        vec![vec![
+            json!("2025-12-31T23:59:59.999Z"),
+            json!("2026-05-31T20:00:00.000Z"),
+            json!(4)
+        ]]
+    );
+    assert_eq!(
+        cypher("MATCH (e:Event {name: 'b'}) RETURN e.at = datetime('2026-06-01T05:00:00+09:00')")
+            .await,
+        vec![vec![json!(true)]]
+    );
+    // The Note property mixes a plain string, so the job leaves it as text,
+    // which compares with a datetime no more than it did.
+    assert_eq!(
+        cypher("MATCH (n:Note) RETURN n.name, n.at ORDER BY n.name").await,
+        vec![
+            vec![json!("n1"), json!("2026-01-01T00:00:00Z")],
+            vec![json!("n2"), json!("soon")],
+        ]
+    );
+    compared("MATCH (n:Note) RETURN n.at < datetime()").await;
+    let sql = db
+        .sql(crate::cypher::sql::request::Request::new(
+            "SELECT e.name FROM Event e WHERE e.at < TIMESTAMP '2026-02-01 00:00:00' ORDER BY e.at",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(sql.rows, vec![vec![json!("d")], vec![json!("a")]]);
+    db.close().await.unwrap();
 }

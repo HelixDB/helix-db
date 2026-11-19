@@ -16,7 +16,7 @@ async fn create_hydrates_only_its_property_expressions_before_staging() {
             Property::string("$label", "Source"),
             Property::i64("small", 17),
             Property::new("large", P::I64Array(vec![1; 16 * 1024])),
-            Property::new("future", P::DateTime(1)),
+            Property::new("future", P::Bytes(vec![1])),
         ]);
         db.inner_db()
             .put(

@@ -282,6 +282,38 @@ fn values_without_literal_syntax_print_as_equivalent_expressions() {
         r::Value::Map([("k".to_owned(), r::Value::Null)].into()),
     ])));
     assert_eq!(nested.to_string(), "[1, {k: NULL}]");
+    // A datetime literal prints as the call that binds back to it; one past
+    // RFC 3339's years prints its epoch milliseconds instead.
+    for (millis, expected) in [
+        (0, "datetime('1970-01-01T00:00:00.000Z')"),
+        (-1, "datetime('1969-12-31T23:59:59.999Z')"),
+        (253_402_300_799_999, "datetime('9999-12-31T23:59:59.999Z')"),
+        (-62_167_219_200_000, "datetime('0000-01-01T00:00:00.000Z')"),
+        // Rendered as `+10000-…` and `-0001-…`, text the grammar does not read.
+        (
+            253_402_300_800_000,
+            "datetime({epochMillis: 253402300800000})",
+        ),
+        (
+            -62_167_219_200_001,
+            "datetime({epochMillis: -62167219200001})",
+        ),
+        (i64::MAX, "datetime({epochMillis: 9223372036854775807})"),
+        (i64::MIN, "datetime({epochMillis: -9223372036854775808})"),
+    ] {
+        let literal = node(ExprKind::Literal(r::Value::DateTime(millis)));
+        assert_eq!(literal.to_string(), expected);
+        let statement = crate::parse(&format!("RETURN {expected} AS t")).unwrap();
+        assert_eq!(statement.to_string(), format!("RETURN {expected} AS t"));
+        crate::resolve(&statement).unwrap();
+    }
+    assert_eq!(
+        node(ExprKind::List(vec![node(ExprKind::Literal(
+            r::Value::DateTime(1)
+        ))]))
+        .to_string(),
+        "[datetime('1970-01-01T00:00:00.001Z')]"
+    );
     assert_eq!(
         node(ExprKind::PatternPredicate(vec!["a".to_owned()])).to_string(),
         "(a)--()"

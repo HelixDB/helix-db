@@ -761,7 +761,7 @@ async fn unreadable_probe_properties_scan_and_fail_only_with_candidates() {
             ))),
             property::encode_properties(&[
                 Property::string("$label", "B"),
-                Property::new("key", P::DateTime(1)),
+                Property::new("key", P::Bytes(vec![1])),
             ]),
         )
         .await

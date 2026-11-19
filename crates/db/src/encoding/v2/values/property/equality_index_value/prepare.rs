@@ -14,6 +14,7 @@ enum Kind<'a> {
     String(&'a str),
     Bytes(&'a [u8]),
     Integers(&'a [i64]),
+    DateTimes(&'a [i64]),
     Doubles(&'a [f64]),
     Floats(&'a [f32]),
     Strings(&'a [String]),
@@ -57,6 +58,11 @@ impl PreparedEqualityValue<'_> {
             Kind::Integers(values) => {
                 bytes.put_u8(I64_ARRAY_TAG);
                 put_count(&mut bytes, values.len()).expect("prepared integer count");
+                values.iter().for_each(|value| bytes.put_i64(*value));
+            }
+            Kind::DateTimes(values) => {
+                bytes.put_u8(DATETIME_ARRAY_TAG);
+                put_count(&mut bytes, values.len()).expect("prepared datetime count");
                 values.iter().for_each(|value| bytes.put_i64(*value));
             }
             Kind::Doubles(values) => {
@@ -137,6 +143,20 @@ pub(crate) fn prepare_equality_value(
             }
             (
                 Kind::Integers(values),
+                values
+                    .len()
+                    .saturating_mul(size_of::<i64>())
+                    .saturating_add(TAG_LEN + COUNT_LEN),
+            )
+        }
+        // The integer list's frame under its own tag: a datetime list never
+        // equals an integer list, as a datetime never equals its millis.
+        PropertyValue::DateTimeArray(values) => {
+            if u32::try_from(values.len()).is_err() {
+                return oversized(TAG_LEN);
+            }
+            (
+                Kind::DateTimes(values),
                 values
                     .len()
                     .saturating_mul(size_of::<i64>())
@@ -255,6 +275,16 @@ mod tests {
                 PropertyValue::StringArray(vec!["".into(), "é".into()]),
                 vec![9, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 2, 0xc3, 0xa9],
             ),
+            (
+                PropertyValue::DateTimeArray(vec![-1, 7]),
+                vec![
+                    10, 0, 0, 0, 2, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 7,
+                ],
+            ),
+            (
+                PropertyValue::DateTimeArray(Vec::new()),
+                vec![10, 0, 0, 0, 0],
+            ),
         ];
         for (value, expected) in fixtures {
             let (prepared, allocation) =
@@ -304,6 +334,7 @@ mod tests {
         }
         for value in [
             PropertyValue::I64Array(vec![1; MAX_EQUALITY_CANONICAL_LEN / size_of::<i64>()]),
+            PropertyValue::DateTimeArray(vec![1; MAX_EQUALITY_CANONICAL_LEN / size_of::<i64>()]),
             PropertyValue::F64Array(vec![1.0; MAX_EQUALITY_CANONICAL_LEN / 11]),
             PropertyValue::F32Array(vec![1.0; MAX_EQUALITY_CANONICAL_LEN / 11]),
             PropertyValue::StringArray(vec![largest, "".into()]),

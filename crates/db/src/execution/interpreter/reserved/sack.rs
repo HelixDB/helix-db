@@ -113,7 +113,8 @@ fn numeric_sack_value(value: &DbPropertyValue) -> Option<SackNumber> {
         | DbPropertyValue::F32Array(_)
         | DbPropertyValue::StringArray(_)
         | DbPropertyValue::Array(_)
-        | DbPropertyValue::Object(_) => None,
+        | DbPropertyValue::Object(_)
+        | DbPropertyValue::DateTimeArray(_) => None,
     }
 }
 

@@ -73,3 +73,60 @@ fn query_values_convert_nested_shapes_without_losing_types() {
         )]))
     );
 }
+
+#[test]
+fn homogeneous_datetime_lists_convert_to_the_typed_datetime_array_at_any_depth() {
+    let ast = |values: Vec<AstPropertyValue>| {
+        value_conversion::ast_to_db_value(AstPropertyValue::Object(BTreeMap::from([(
+            "list".to_string(),
+            AstPropertyValue::Array(values),
+        )])))
+    };
+    let query = |values: Vec<QueryValue>| {
+        value_conversion::query_value_to_db_value(QueryValue::Object(BTreeMap::from([(
+            "list".to_string(),
+            QueryValue::Array(values),
+        )])))
+    };
+    let db = |value: DbPropertyValue| {
+        DbPropertyValue::Object(BTreeMap::from([("list".to_string(), value)]))
+    };
+    assert_eq!(
+        ast(vec![
+            AstPropertyValue::DateTime(-1),
+            AstPropertyValue::DateTime(2)
+        ]),
+        db(DbPropertyValue::DateTimeArray(vec![-1, 2]))
+    );
+    assert_eq!(
+        query(vec![QueryValue::DateTime(-1), QueryValue::DateTime(2)]),
+        db(DbPropertyValue::DateTimeArray(vec![-1, 2]))
+    );
+    // An empty list has no member type, and a mixed list no single one.
+    assert_eq!(ast(Vec::new()), db(DbPropertyValue::Array(Vec::new())));
+    assert_eq!(query(Vec::new()), db(DbPropertyValue::Array(Vec::new())));
+    assert_eq!(
+        ast(vec![AstPropertyValue::DateTime(1), AstPropertyValue::Null]),
+        db(DbPropertyValue::Array(vec![
+            DbPropertyValue::DateTime(1),
+            DbPropertyValue::Null
+        ]))
+    );
+    assert_eq!(
+        query(vec![
+            QueryValue::DateTime(1),
+            QueryValue::String("1970-01-01T00:00:00.001Z".to_string())
+        ]),
+        db(DbPropertyValue::Array(vec![
+            DbPropertyValue::DateTime(1),
+            DbPropertyValue::String("1970-01-01T00:00:00.001Z".to_string())
+        ]))
+    );
+    assert_eq!(
+        query(vec![QueryValue::I64(1), QueryValue::I64(2)]),
+        db(DbPropertyValue::Array(vec![
+            DbPropertyValue::I64(1),
+            DbPropertyValue::I64(2)
+        ]))
+    );
+}

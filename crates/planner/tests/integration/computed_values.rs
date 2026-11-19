@@ -47,6 +47,7 @@ fn computed_containers_enforce_depth_across_independent_evaluations() {
                 group: None,
                 max_collection_items: usize::MAX,
                 memory: r::EvaluationMemory::new(usize::MAX),
+                statement_time: 0,
             };
             let result = evaluation.eval(&wrapper);
             if depth == r::MAX_EXPRESSION_DEPTH {
@@ -75,6 +76,7 @@ fn borrowed_values_are_checked_before_use_and_short_circuits_stay_lazy() {
                 group: None,
                 max_collection_items: usize::MAX,
                 memory: r::EvaluationMemory::new(usize::MAX),
+                statement_time: 0,
             };
             for expression in [
                 E::Literal(value.clone()),
@@ -218,6 +220,7 @@ fn runtime_depth_does_not_apply_the_literal_cardinality_limit() {
         group: None,
         max_collection_items: usize::MAX,
         memory: r::EvaluationMemory::new(usize::MAX),
+        statement_time: 0,
     };
     assert_eq!(
         evaluation.eval(&r::Expression::Slot(r::Slot(0))).unwrap(),
@@ -315,6 +318,7 @@ fn grouped_scalar_average_shares_numeric_and_null_semantics() {
             group: Some(&rows),
             max_collection_items: 10,
             memory: r::EvaluationMemory::new(4096),
+            statement_time: 0,
         };
         let expression = r::Expression::Aggregate {
             function: r::Aggregate::Avg,

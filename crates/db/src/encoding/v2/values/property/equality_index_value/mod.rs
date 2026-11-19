@@ -25,6 +25,7 @@ const I64_ARRAY_TAG: u8 = 0x06;
 const F64_ARRAY_TAG: u8 = 0x07;
 const F32_ARRAY_TAG: u8 = 0x08;
 const STRING_ARRAY_TAG: u8 = 0x09;
+const DATETIME_ARRAY_TAG: u8 = 0x0A;
 
 const NEGATIVE_INFINITY_TAG: u8 = 0x01;
 const NEGATIVE_FINITE_TAG: u8 = 0x02;
@@ -178,7 +179,7 @@ fn validate_canonical(canonical: &[u8]) -> Result<(), EncodingError> {
         BYTES_TAG => {
             decoder.take_length_delimited()?;
         }
-        I64_ARRAY_TAG => {
+        I64_ARRAY_TAG | DATETIME_ARRAY_TAG => {
             let count = decoder.take_u32()? as usize;
             decoder.take_raw(count.checked_mul(core::mem::size_of::<i64>()).ok_or_else(
                 || EncodingError::InvalidKey("equality i64 array length overflowed".to_string()),
@@ -315,6 +316,20 @@ mod tests {
             indexed(&PropertyValue::I64Array(vec![1, 2])),
             indexed(&PropertyValue::I64Array(vec![3, 4]))
         );
+        // A datetime list never equals the integer list of its millis, as a
+        // datetime never equals its millis.
+        assert_ne!(
+            indexed(&PropertyValue::DateTimeArray(vec![1, 2])),
+            indexed(&PropertyValue::I64Array(vec![1, 2]))
+        );
+        assert_ne!(
+            indexed(&PropertyValue::DateTimeArray(vec![1, 2])),
+            indexed(&PropertyValue::DateTimeArray(vec![2, 1]))
+        );
+        assert_eq!(
+            indexed(&PropertyValue::DateTimeArray(vec![1, 2])),
+            indexed(&PropertyValue::DateTimeArray(vec![1, 2]))
+        );
     }
 
     #[test]
@@ -418,6 +433,8 @@ mod tests {
             PropertyValue::F64Array(vec![f64::NEG_INFINITY, -1.5, 0.0, f64::INFINITY]),
             PropertyValue::F32Array(vec![f32::NEG_INFINITY, -1.5, 0.0, f32::INFINITY]),
             PropertyValue::StringArray(vec!["left".to_string(), "right".to_string()]),
+            PropertyValue::DateTimeArray(vec![i64::MIN, 0, i64::MAX]),
+            PropertyValue::DateTimeArray(Vec::new()),
         ];
         for value in indexed_values {
             let EqualityValueProjection::Indexed(projected) = project_equality_value(&value) else {
@@ -474,6 +491,10 @@ mod tests {
             vec![F64_ARRAY_TAG, 0, 0, 0, 1],
             vec![F32_ARRAY_TAG, 0, 0, 0, 1, 0xFE],
             vec![STRING_ARRAY_TAG, 0, 0, 0, 1, 0, 0, 0, 1, 0xFF],
+            vec![DATETIME_ARRAY_TAG],
+            vec![DATETIME_ARRAY_TAG, 0, 0, 0, 1, 0],
+            vec![DATETIME_ARRAY_TAG, 0, 0, 0, 0, 0],
+            vec![0x0B],
             vec![0xFF],
             vec![BOOL_TAG, 0, 0],
         ];

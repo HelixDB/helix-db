@@ -861,7 +861,8 @@ impl Serialize for PropertyJson<'_> {
             | DbPropertyValue::Bytes(_)
             | DbPropertyValue::I64Array(_)
             | DbPropertyValue::F64Array(_)
-            | DbPropertyValue::StringArray(_) => self.0.serialize(serializer),
+            | DbPropertyValue::StringArray(_)
+            | DbPropertyValue::DateTimeArray(_) => self.0.serialize(serializer),
         }
     }
 }

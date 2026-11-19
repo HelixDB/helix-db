@@ -16,7 +16,7 @@ async fn selected_native_and_graph_fields_skip_large_decoded_payloads_and_releas
         Property::i64("small", 17),
         Property::new("large", P::I64Array(vec![1; 16 * 1024])),
         Property::new("null", P::Null),
-        Property::new("future", P::DateTime(1)),
+        Property::new("future", P::Bytes(vec![1])),
         Property::string("$internal", "hidden"),
     ]);
     for kind in [
