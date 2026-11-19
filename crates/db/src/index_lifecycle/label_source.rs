@@ -14,6 +14,13 @@
 //! spans the publication reads hash rows in its steps before it and exact
 //! rows after, each complete in its own snapshot.
 //!
+//! Every step reads and decodes the label's whole bitmap, so a build of `N`
+//! members reads `N / max_entities` bitmaps: quadratic in `N`, with a small
+//! constant. Decoding one on a c6i.8xlarge took 0.5 ms at 10M members (about
+//! 10 s across a build at 512 a step) and 7 to 22 ms at 100M (dense or every
+//! third id; 20 to 70 minutes across a build, a few percent to a tenth of its
+//! row reads). A label far past that would keep the bitmap across steps.
+//!
 //! The scan keeps the progress it always had: the cursor is the complete
 //! property-by-ID key of the last member taken, whether or not its row still
 //! exists, so ascending ids keep the key order the stored cursor and
