@@ -466,21 +466,32 @@ async fn an_oversized_row_of_the_label_still_blocks_the_build() {
     db.close().await.expect("database closes");
 }
 
+/// How a label's members lie among other labels' rows, and so how a step of
+/// 25 reads them ([`crate::index_lifecycle::label_source`]): two ids in
+/// three fill more than half a step's key range, which it scans; one in
+/// three does not, and it reads its ids by point.
+const DENSITIES: [(&str, fn(u64) -> bool); 2] =
+    [("range", |id| id % 3 != 2), ("points", |id| id % 3 == 0)];
+
 /// Writes during the scan move rows into and out of the label, delete them
 /// and create them at, below and above the bound; the build converges on
-/// the rows as they end.
+/// the rows as they end, whether its steps scan their ranges or read by
+/// point.
 #[tokio::test]
 async fn writes_racing_the_scan_converge() {
     let scope = DataScope::LegacyUnscoped;
     let node = IndexElementKind::Node;
-    for definition in [
-        SecondaryIndexDefinition::node_equality("User", "email"),
-        SecondaryIndexDefinition::node_unique_equality("User", "email"),
-        SecondaryIndexDefinition::node_range("User", "email"),
-    ] {
+    for (definition, (density, users)) in DENSITIES.into_iter().flat_map(|density| {
+        [
+            SecondaryIndexDefinition::node_equality("User", "email"),
+            SecondaryIndexDefinition::node_unique_equality("User", "email"),
+            SecondaryIndexDefinition::node_range("User", "email"),
+        ]
+        .map(|definition| (definition, density))
+    }) {
         let definition = validated(definition.expect("definition"));
-        let db = test_db("label-source-racing-writes").await;
-        let mut sources = seed(&db, 600, |id| id % 3 == 0).await;
+        let db = test_db(&format!("label-source-racing-writes-{density}")).await;
+        let mut sources = seed(&db, 600, users).await;
         let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 599).await;
         let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
         let mut claim_sequence = 1;
@@ -527,10 +538,129 @@ async fn writes_racing_the_scan_converge() {
                 | CommittedOperationStep::TransientFailure) => break end,
             }
         };
-        assert_eq!(end, CommittedOperationStep::Completed);
+        assert_eq!(end, CommittedOperationStep::Completed, "{density}");
         assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources)
             .await;
         db.close().await.expect("database closes");
+    }
+}
+
+/// Progressed Scan steps do not wait for their WAL upload, so a crash can
+/// lose the newest of them together with writes committed among them, a row
+/// leaving the label behind the cursor and one joining it ahead. The
+/// restarted build resumes at its last durable cursor, in scanned and point
+/// steps alike, and converges on the rows that survived.
+#[tokio::test]
+async fn a_lost_wal_tail_resumes_at_the_durable_cursor() {
+    use crate::search::vector::gated_wal::{GatedWalStore, WalUploads};
+
+    let scope = DataScope::LegacyUnscoped;
+    let node = IndexElementKind::Node;
+    for (density, users) in DENSITIES {
+        let path = format!("label-source-lost-tail-{density}");
+        let open = |store: &Arc<GatedWalStore>| {
+            Db::builder(
+                path.clone(),
+                Arc::clone(store) as Arc<dyn slatedb::object_store::ObjectStore>,
+            )
+            .with_merge_operator(Arc::new(crate::merge_operator::HelixMergeOperator::new()))
+            .build()
+        };
+        let store = Arc::new(GatedWalStore::new());
+        let db = open(&store).await.expect("lost-tail database opens");
+        bootstrap_writer(&db)
+            .await
+            .expect("lost-tail database bootstraps");
+        let sources = seed(&db, 600, users).await;
+        let definition = email_index();
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 599).await;
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let limits = batch_limits(25, 1 << 20, 1 << 20, 1 << 30);
+        let mut claim_sequence = 1;
+        for _ in 0..3 {
+            assert_eq!(
+                drive_one_with_limits(&db, &driver, operation_id, &mut claim_sequence, limits)
+                    .await,
+                CommittedOperationStep::Progressed
+            );
+        }
+        db.flush().await.expect("the first steps upload");
+        let durable = read_operation(&db, scope, operation_id)
+            .await
+            .expect("operation is readable");
+
+        store.uploads.send_replace(WalUploads::Held);
+        // Id 3, which the durable steps read, leaves the label; id 590, a row
+        // of another label they have not reached, joins it. Neither upload
+        // lands.
+        for (id, after) in [
+            (3, labelled("Other", "left@example.com")),
+            (590, labelled("User", "joined@example.com")),
+        ] {
+            let before = &sources[&id];
+            let transaction = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .expect("lost write begins");
+            let mutations = load_mutation_set(&transaction, scope)
+                .await
+                .expect("mutation set loads");
+            let staged = maintain_entity(&transaction, scope, &mutations, node, id, before, &after)
+                .await
+                .expect("the write stages its delta");
+            testing::stage_labels(&transaction, scope, node, id, before, &after).await;
+            transaction
+                .put(source_key(scope, node, id), encode_properties(&after))
+                .expect("lost row stages");
+            transaction
+                .commit_with_options(&crate::transaction::CommitDurability::Applied.write_options())
+                .await
+                .expect("lost write applies");
+            driver.scope_gates.delta_ledgers().record(staged);
+        }
+        for _ in 0..3 {
+            let step = tokio::time::timeout(
+                Duration::from_secs(30),
+                drive_one_with_limits(&db, &driver, operation_id, &mut claim_sequence, limits),
+            )
+            .await
+            .expect("a progressed step does not wait for its WAL upload");
+            assert_eq!(step, CommittedOperationStep::Progressed, "{density}");
+        }
+        assert_ne!(
+            read_operation(&db, scope, operation_id)
+                .await
+                .expect("operation is readable"),
+            durable,
+            "{density}: the lost steps progressed"
+        );
+        drop(db);
+
+        // The restarted process has neither the uploads held nor the ledgers.
+        let store = Arc::new(store.restarted());
+        let db = open(&store).await.expect("lost-tail database reopens");
+        assert_eq!(
+            read_operation(&db, scope, operation_id)
+                .await
+                .expect("operation is readable"),
+            durable,
+            "{density}: the build resumes at its last durable cursor"
+        );
+        for id in [3, 590] {
+            assert_eq!(
+                db.get(source_key(scope, node, id))
+                    .await
+                    .expect("source row reads"),
+                Some(encode_properties(&sources[&id])),
+                "{density}: the lost write of {id} is gone"
+            );
+        }
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let (_, end) = drive_build(&db, &driver, operation_id, &mut claim_sequence, limits).await;
+        assert_eq!(end, CommittedOperationStep::Completed, "{density}");
+        assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources)
+            .await;
+        db.close().await.expect("lost-tail database closes");
     }
 }
 
