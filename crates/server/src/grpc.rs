@@ -1,12 +1,14 @@
 use std::net::SocketAddr;
+use std::time::Instant;
 
-use db::query_service::{QueryMode, QueryServiceError};
+use db::query_service::{CommitTimings, QueryMode, QueryServiceError};
 use helix_ast::error_code;
 use helix_ast::query::{QueryRequest, QueryRequestType};
 use tokio::sync::watch;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 
+use crate::server_timing;
 use crate::state::ServerState;
 use crate::MAX_QUERY_BODY_BYTES;
 
@@ -59,12 +61,13 @@ pub(crate) fn server_service(state: ServerState) -> HelixDbServerServer<GrpcServ
 impl GrpcService {
     /// Route and execute a compiled Cypher or SQL statement under the
     /// request's options, recording telemetry with the request's `context`.
+    /// The response comes with the time the statement spent committing.
     async fn execute_compiled(
         &self,
         request: QueryJsonRequest,
         query: db::cypher::CompiledRequest,
         context: helix_metrics::query::RequestContext,
-    ) -> Result<Response<QueryJsonResponse>, Status> {
+    ) -> Result<(QueryJsonResponse, CommitTimings), Status> {
         validate_options_for_request_type(
             request.warm_only,
             request.require_writer,
@@ -85,9 +88,13 @@ impl GrpcService {
             )
             .await
             .map_err(cypher_status)?;
-        Ok(Response::new(QueryJsonResponse {
-            body: response.into_bytes(),
-        }))
+        let commit = response.resources.commit;
+        Ok((
+            QueryJsonResponse {
+                body: response.into_bytes(),
+            },
+            commit,
+        ))
     }
 
     /// Plan a compiled Cypher or SQL statement without executing it. Explaining
@@ -127,12 +134,17 @@ impl HelixDbServer for GrpcService {
         &self,
         request: Request<QueryJsonRequest>,
     ) -> Result<Response<QueryJsonResponse>, Status> {
+        let received = Instant::now();
         let context = metrics_context(&request);
         let request = request.into_inner();
-        let query = json_request::<db::cypher::Request>(&request.body)?
-            .compile()
-            .map_err(|e| cypher_status(e.into()))?;
-        self.execute_compiled(request, query, context).await
+        let result = async {
+            let query = json_request::<db::cypher::Request>(&request.body)?
+                .compile()
+                .map_err(|e| cypher_status(e.into()))?;
+            self.execute_compiled(request, query, context).await
+        }
+        .await;
+        timed(received, result)
     }
 
     async fn explain_cypher(
@@ -150,12 +162,17 @@ impl HelixDbServer for GrpcService {
         &self,
         request: Request<QueryJsonRequest>,
     ) -> Result<Response<QueryJsonResponse>, Status> {
+        let received = Instant::now();
         let context = metrics_context(&request);
         let request = request.into_inner();
-        let query = json_request::<db::cypher::sql::request::Request>(&request.body)?
-            .compile()
-            .map_err(|e| cypher_status(e.into()))?;
-        self.execute_compiled(request, query, context).await
+        let result = async {
+            let query = json_request::<db::cypher::sql::request::Request>(&request.body)?
+                .compile()
+                .map_err(|e| cypher_status(e.into()))?;
+            self.execute_compiled(request, query, context).await
+        }
+        .await;
+        timed(received, result)
     }
 
     async fn explain_sql(
@@ -173,51 +190,57 @@ impl HelixDbServer for GrpcService {
         &self,
         request: Request<QueryJsonRequest>,
     ) -> Result<Response<QueryJsonResponse>, Status> {
+        let received = Instant::now();
         let metrics_context = metrics_context(&request);
-        let QueryJsonRequest {
-            body,
-            warm_only,
-            require_writer,
-            await_durable,
-        } = request.into_inner();
-        if body.len() > MAX_QUERY_BODY_BYTES {
-            return Err(status_with_error_code(
-                error_code::QueryErrorCode::InvalidRequestBody,
-                format!("query body exceeds {MAX_QUERY_BODY_BYTES} bytes"),
-            ));
+        let result = async {
+            let QueryJsonRequest {
+                body,
+                warm_only,
+                require_writer,
+                await_durable,
+            } = request.into_inner();
+            if body.len() > MAX_QUERY_BODY_BYTES {
+                return Err(status_with_error_code(
+                    error_code::QueryErrorCode::InvalidRequestBody,
+                    format!("query body exceeds {MAX_QUERY_BODY_BYTES} bytes"),
+                ));
+            }
+            // simd-json parses a uniquely owned body in place and copies a shared
+            // one. The request owns everything it needs, so the body is freed here
+            // rather than held through planning and execution.
+            let parsed = match body.try_into_mut() {
+                Ok(mut body) => QueryRequest::from_json_slice_mut(&mut body),
+                Err(shared) => QueryRequest::from_json_slice(&shared),
+            };
+            let query = parsed.map_err(|error| {
+                status_with_error_code(
+                    error_code::QueryErrorCode::InvalidQueryJson,
+                    format!("invalid query JSON: {error}"),
+                )
+            })?;
+            validate_options_for_request_type(
+                warm_only,
+                require_writer,
+                await_durable,
+                query.request_type(),
+                self.state.db_mode(),
+            )?;
+            let response = self
+                .state
+                .query_service()
+                .execute_query_with_mode_and_metrics_context(
+                    query,
+                    query_mode(warm_only, await_durable),
+                    metrics_context,
+                )
+                .await
+                .map_err(status_from_service_error)?;
+            let commit = response.commit_timings();
+            let body = response.into_json_bytes().into();
+            Ok((QueryJsonResponse { body }, commit))
         }
-        // simd-json parses a uniquely owned body in place and copies a shared
-        // one. The request owns everything it needs, so the body is freed here
-        // rather than held through planning and execution.
-        let parsed = match body.try_into_mut() {
-            Ok(mut body) => QueryRequest::from_json_slice_mut(&mut body),
-            Err(shared) => QueryRequest::from_json_slice(&shared),
-        };
-        let query = parsed.map_err(|error| {
-            status_with_error_code(
-                error_code::QueryErrorCode::InvalidQueryJson,
-                format!("invalid query JSON: {error}"),
-            )
-        })?;
-        validate_options_for_request_type(
-            warm_only,
-            require_writer,
-            await_durable,
-            query.request_type(),
-            self.state.db_mode(),
-        )?;
-        let response = self
-            .state
-            .query_service()
-            .execute_query_with_mode_and_metrics_context(
-                query,
-                query_mode(warm_only, await_durable),
-                metrics_context,
-            )
-            .await
-            .map_err(status_from_service_error)?;
-        let body = response.into_json_bytes().into();
-        Ok(Response::new(QueryJsonResponse { body }))
+        .await;
+        timed(received, result)
     }
 
     async fn health(
@@ -230,6 +253,34 @@ impl HelixDbServer for GrpcService {
             index_runtime: self.state.index_readiness().code().to_string(),
             blocked_index_entity_count: self.state.blocked_index_entity_count(),
         }))
+    }
+}
+
+/// Attach where the server time since `received` went to the response
+/// metadata. A failed request reports execution alone.
+fn timed(
+    received: Instant,
+    result: Result<(QueryJsonResponse, CommitTimings), Status>,
+) -> Result<Response<QueryJsonResponse>, Status> {
+    let metadata = |commit| {
+        server_timing::value(received.elapsed(), commit)
+            .parse::<tonic::metadata::AsciiMetadataValue>()
+            .expect("server timing is visible ASCII")
+    };
+    match result {
+        Ok((response, commit)) => {
+            let mut response = Response::new(response);
+            response
+                .metadata_mut()
+                .insert(server_timing::NAME, metadata(commit));
+            Ok(response)
+        }
+        Err(mut status) => {
+            status
+                .metadata_mut()
+                .insert(server_timing::NAME, metadata(CommitTimings::default()));
+            Err(status)
+        }
     }
 }
 
