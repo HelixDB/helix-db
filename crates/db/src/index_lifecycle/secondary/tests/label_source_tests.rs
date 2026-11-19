@@ -505,7 +505,7 @@ async fn writes_racing_the_scan_converge() {
                     }
                 };
                 let before = sources.get(&id).cloned().unwrap_or_default();
-                mutate_source(&db, scope, node, id, &before, &after)
+                mutate_source(&db, &driver, scope, node, id, &before, &after)
                     .await
                     .expect("the write records its delta");
                 if after.is_empty() {
