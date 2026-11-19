@@ -832,10 +832,9 @@ mod tests {
             .put(
                 keys::DataKey::Data {
                     scope: keys::scope::DataScope::LegacyUnscoped,
-                    kind: keys::DataKeyKind::PropertyIndex(indexes::PropertyIndexKey::Equality(
-                        indexes::equality::EqualityIndexKey::new(
-                            indexes::hash_property_name("$label"),
-                            indexes::hash_property_value("User"),
+                    kind: keys::DataKeyKind::PropertyIndex(indexes::PropertyIndexKey::NodeLabel(
+                        crate::encoding::indexes::label::NodeLabelKey::new(
+                            crate::encoding::indexes::label::LabelIdentity::new("User").unwrap(),
                         ),
                     )),
                 }

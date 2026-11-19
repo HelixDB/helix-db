@@ -80,6 +80,9 @@ pub(crate) struct Owned {
     raw: DbTransaction,
     tracking: Option<Box<read_tracking::Tracker>>,
     merges: Option<Box<merges::Tracker>>,
+    /// Where this transaction's snapshot files label rows, and so where its
+    /// graph writes put them.
+    label_rows: crate::index_lifecycle::repository::LabelRowWrites,
     /// Read calls on this transaction, for round-trip contracts. The backend
     /// resolves a key with staged merges in a multi-get by its own point get.
     #[cfg(test)]
@@ -89,9 +92,16 @@ pub(crate) struct Owned {
 impl Owned {
     /// Open a fresh serializable transaction with admission already installed.
     /// Accepting an existing transaction could hide reads made before wrapping.
+    ///
+    /// `known_label_rows` is where the store files label rows, when the caller
+    /// knows it is published (see [`crate::HelixWriter::known_label_row_writes`]).
+    /// Otherwise the transaction reads the storage marker in its snapshot. The
+    /// read conflicts with the commit that publishes exact label rows, so a
+    /// transaction that read the copy still running cannot commit after it.
     pub(crate) async fn begin(
         db: &slatedb::Db,
         budget: Option<&query_resources::Budget>,
+        known_label_rows: Option<crate::index_lifecycle::repository::LabelRowWrites>,
     ) -> Result<Self> {
         let tracking = budget
             .map(read_tracking::Tracker::new)
@@ -102,10 +112,17 @@ impl Owned {
         let raw = db
             .begin(slatedb::IsolationLevel::SerializableSnapshot)
             .await?;
+        let label_rows = match known_label_rows {
+            Some(known) => known,
+            None => crate::index_lifecycle::repository::LabelRowWrites::of_stored_version(
+                crate::migrations::startup::stored_storage_version(&raw).await?,
+            ),
+        };
         Ok(Self {
             raw,
             tracking,
             merges,
+            label_rows,
             #[cfg(test)]
             reads: std::sync::atomic::AtomicUsize::new(0),
         })
@@ -114,6 +131,11 @@ impl Owned {
     /// The sequence of the snapshot this transaction reads.
     pub(crate) fn snapshot_sequence(&self) -> u64 {
         self.raw.seqnum()
+    }
+
+    /// Where this transaction's graph writes file label rows.
+    pub(crate) const fn label_rows(&self) -> crate::index_lifecycle::repository::LabelRowWrites {
+        self.label_rows
     }
 
     /// Read calls made on this transaction.
@@ -133,6 +155,7 @@ impl Owned {
             raw,
             tracking,
             merges,
+            label_rows: _,
             #[cfg(test)]
                 reads: _,
         } = self;
@@ -155,6 +178,21 @@ mod sealed {
     pub trait Sealed {}
 }
 impl sealed::Sealed for DbTransaction {}
+/// Only the interpreter begins an owned transaction, for a request on a
+/// serving writer, whose store has equality bitmaps: only where its snapshot
+/// files label rows differs.
+impl crate::index_lifecycle::repository::LayoutView for Owned {
+    type Reads = Self;
+
+    fn reads(&self) -> &Self {
+        self
+    }
+
+    fn compatibility(&self) -> crate::index_lifecycle::repository::ReaderStorageCompatibility {
+        self.label_rows.reads()
+    }
+}
+
 impl sealed::Sealed for Owned {}
 impl sealed::Sealed for View<'_> {}
 impl sealed::Sealed for crate::search::vector::MeasuredVectorTransaction<'_> {}

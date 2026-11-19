@@ -13,16 +13,28 @@ use crate::encoding::{
 
 use super::property::INDEX_PREFIX_LEN;
 
+/// Index byte of exact edge-label neighbor rows; a direction byte follows.
+pub(crate) const EDGE_LABEL_NEIGHBOR_INDEX_PREFIX: u8 = 0x13;
+
+/// Index kinds of live property index rows.
+///
+/// The retired hash-keyed label bytes `0x04` and `0x10` are not live kinds:
+/// only the legacy label hash codec parses those rows, and no live kind reuses
+/// them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum IndexPrefix {
     Equality,
     Range(RangeIndexDirection),
     EdgeEquality,
-    EdgeLabel,
-    EdgeLabelNeighbor(EdgeDirection),
     EdgeRange(EdgeRangeIndexDirection, EdgeDirection),
     GlobalEdgeEquality,
     GlobalEdgeRange(RangeIndexDirection),
+    /// Exact node label rows (`0x11`).
+    NodeLabel,
+    /// Exact global edge label rows (`0x12`).
+    EdgeLabel,
+    /// Exact edge-label neighbor rows (`0x13`).
+    EdgeLabelNeighbor(EdgeDirection),
 }
 
 impl IndexPrefix {
@@ -34,10 +46,11 @@ impl IndexPrefix {
                 RangeIndexDirection::Desc => &[0x05],
             },
             IndexPrefix::EdgeEquality => &[0x02],
-            IndexPrefix::EdgeLabel => &[0x04],
+            IndexPrefix::NodeLabel => &[0x11],
+            IndexPrefix::EdgeLabel => &[0x12],
             IndexPrefix::EdgeLabelNeighbor(direction) => match direction {
-                EdgeDirection::Out => &[0x10, 0x00],
-                EdgeDirection::In => &[0x10, 0x01],
+                EdgeDirection::Out => &[EDGE_LABEL_NEIGHBOR_INDEX_PREFIX, 0x00],
+                EdgeDirection::In => &[EDGE_LABEL_NEIGHBOR_INDEX_PREFIX, 0x01],
             },
             IndexPrefix::GlobalEdgeEquality => &[0x08],
             IndexPrefix::GlobalEdgeRange(direction) => match direction {
@@ -87,11 +100,12 @@ impl IndexPrefix {
             0x01 => Ok(IndexPrefix::Range(RangeIndexDirection::Asc)),
             0x05 => Ok(IndexPrefix::Range(RangeIndexDirection::Desc)),
             0x02 => Ok(IndexPrefix::EdgeEquality),
-            0x04 => Ok(IndexPrefix::EdgeLabel),
             0x08 => Ok(IndexPrefix::GlobalEdgeEquality),
             0x09 => Ok(IndexPrefix::GlobalEdgeRange(RangeIndexDirection::Asc)),
             0x0a => Ok(IndexPrefix::GlobalEdgeRange(RangeIndexDirection::Desc)),
-            0x10 => {
+            0x11 => Ok(IndexPrefix::NodeLabel),
+            0x12 => Ok(IndexPrefix::EdgeLabel),
+            EDGE_LABEL_NEIGHBOR_INDEX_PREFIX => {
                 if slice.len() < PREFIX_LEN + INDEX_PREFIX_LEN + size_of::<EdgeDirection>() {
                     return Err(EncodingError::BufferTooShort {
                         expected: PREFIX_LEN + INDEX_PREFIX_LEN + size_of::<EdgeDirection>(),
@@ -99,8 +113,9 @@ impl IndexPrefix {
                     });
                 }
 
-                let edge_direction = EdgeDirection::from_u8(slice[PREFIX_LEN + INDEX_PREFIX_LEN])?;
-                Ok(IndexPrefix::EdgeLabelNeighbor(edge_direction))
+                Ok(IndexPrefix::EdgeLabelNeighbor(EdgeDirection::from_u8(
+                    slice[PREFIX_LEN + INDEX_PREFIX_LEN],
+                )?))
             }
             0x03 | 0x06 => {
                 if slice.len() < PREFIX_LEN + INDEX_PREFIX_LEN + size_of::<EdgeDirection>() {
@@ -140,7 +155,7 @@ pub(crate) fn exclusive_prefix_end_bound(prefix: &Bytes) -> Option<Bytes> {
 mod tests {
     use super::super::direction::EdgeDirection as RangeEdgeDirection;
     use super::super::equality::{scans::*, EdgeDirection as EqualityEdgeDirection};
-    use super::super::label::{EdgeLabelNeighborScanPrefix, EdgeLabelScanPrefix};
+    use super::super::label::LabelScanPrefix;
     use super::super::range::scans::*;
     use super::*;
     use crate::encoding::indexes::{PropertyHash, ValueHash};
@@ -290,54 +305,37 @@ mod tests {
     }
 
     #[test]
-    fn edge_label_prefixes_encode_label_hash_layouts() {
-        let node_id = 0x0102_0304_0506_0708u64;
+    fn label_scan_prefixes_cover_exact_keyspaces() {
         assert_eq!(
-            EdgeLabelScanPrefix::Index.to_bytes().as_ref(),
-            &[0x03, 0x04]
+            LabelScanPrefix::NodeLabels.to_bytes().as_ref(),
+            &[0x03, 0x11]
         );
         assert_eq!(
-            EdgeLabelScanPrefix::Label { label_hash: VALUE }
-                .to_bytes()
-                .as_ref(),
-            &[0x03, 0x04, 5, 6, 7, 8, 9, 10, 11, 12]
+            LabelScanPrefix::EdgeLabels.to_bytes().as_ref(),
+            &[0x03, 0x12]
         );
         assert_eq!(
-            EdgeLabelNeighborScanPrefix::Index.to_bytes().as_ref(),
-            &[0x03, 0x10]
+            LabelScanPrefix::EdgeLabelNeighbors.to_bytes().as_ref(),
+            &[0x03, 0x13]
         );
         assert_eq!(
-            EdgeLabelNeighborScanPrefix::Direction {
-                direction: RangeEdgeDirection::Out,
-            }
-            .to_bytes()
-            .as_ref(),
-            &[0x03, 0x10, 0x00]
+            IndexPrefix::from_slice(&[0x03, 0x13, RangeEdgeDirection::In as u8]).unwrap(),
+            IndexPrefix::EdgeLabelNeighbor(RangeEdgeDirection::In)
         );
-
-        let mut endpoint = vec![0x03, 0x10, 0x01];
-        endpoint.extend_from_slice(&node_id.to_be_bytes());
-        assert_eq!(
-            EdgeLabelNeighborScanPrefix::Endpoint {
-                direction: RangeEdgeDirection::In,
-                node_id,
-            }
-            .to_bytes()
-            .as_ref(),
-            endpoint.as_slice()
-        );
-
-        endpoint.extend_from_slice(&VALUE);
-        assert_eq!(
-            EdgeLabelNeighborScanPrefix::Label {
-                direction: RangeEdgeDirection::In,
-                node_id,
-                label_hash: VALUE,
-            }
-            .to_bytes()
-            .as_ref(),
-            endpoint.as_slice()
-        );
+        // The retired hash-keyed label bytes are no live kind.
+        for retired in [
+            [0x03, 0x04, 0x00],
+            [0x03, 0x10, RangeEdgeDirection::Out as u8],
+        ] {
+            assert!(matches!(
+                IndexPrefix::from_slice(&retired),
+                Err(EncodingError::InvalidIndexPrefix(_))
+            ));
+        }
+        assert!(matches!(
+            IndexPrefix::from_slice(&[0x03, 0x13]),
+            Err(EncodingError::BufferTooShort { .. })
+        ));
     }
 
     #[test]

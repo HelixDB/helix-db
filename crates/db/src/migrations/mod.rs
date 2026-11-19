@@ -9,6 +9,9 @@
 
 pub(crate) mod background;
 mod indexes;
+pub(crate) use indexes::label_identity::start_label_identity_copy;
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
+pub(crate) use indexes::label_identity::{copy_hash_label_rows_once, LabelCopySession};
 pub(crate) mod startup;
 mod tenant;
 mod vector_properties;
@@ -1173,6 +1176,37 @@ pub(crate) async fn ensure_migration_job(
     Ok(())
 }
 
+/// Records `id` complete without running it, because the store already holds
+/// what it would produce. A completed job is left alone; one an earlier open
+/// began keeps the rows it counted.
+async fn complete_migration_job(
+    db: &Db,
+    scope: DataScope,
+    id: MigrationId,
+    mode: MigrationMode,
+) -> Result<()> {
+    let key = MigrationJobKey::new(scope, id);
+    let txn = db.begin(IsolationLevel::Snapshot).await?;
+    let mut job = match txn.get(key.as_ref()).await? {
+        Some(value) => decode_json::<MigrationJob>(&value)?,
+        None => MigrationJob::new(id, mode),
+    };
+    if job.is_completed() {
+        txn.rollback();
+        return Ok(());
+    }
+    job.complete();
+    Mutation::put(&txn, key.into_bytes(), encode_json(&job)?)?;
+    txn.commit().await?;
+    tracing::info!(
+        migration_id = id.log_name(),
+        migration_mode = mode.log_name(),
+        scope = ?scope,
+        "kv migration job had nothing to do and is recorded complete"
+    );
+    Ok(())
+}
+
 /// Return true when the migration has completed for this scope.
 pub(crate) async fn migration_completed(
     read: &(impl DbReadOps + Send + Sync),
@@ -1451,19 +1485,36 @@ async fn publish_storage_schema_completion(db: &Db, scope: DataScope) -> Result<
 }
 
 /// Runs graph rewrite before converging every persisted legacy definition.
+///
+/// Each step that has nothing to do is recorded complete in one commit
+/// instead of being run: a store whose graph is already in the current
+/// format, as a managed store is from its bootstrap, has nothing to rewrite
+/// and no allocator to reserve, and a store without legacy vector definitions
+/// has no vector property to restore. Running either would rewrite or scan
+/// every node and edge while the writer serves nothing.
 pub(crate) async fn run_blocking_startup_migration(
     writer: &HelixWriter,
     tuning: config::MigrationTuning,
 ) -> Result<()> {
     let started = Instant::now();
     let scope = DataScope::LegacyUnscoped;
-    ensure_migration_job(
-        writer.db(),
-        scope,
-        MigrationId::GraphFormatV1Rewrite,
-        MigrationMode::BlockingStartup,
-    )
-    .await?;
+    if graph_format_v1_ready(writer.db(), scope).await? {
+        complete_migration_job(
+            writer.db(),
+            scope,
+            MigrationId::GraphFormatV1Rewrite,
+            MigrationMode::BlockingStartup,
+        )
+        .await?;
+    } else {
+        ensure_migration_job(
+            writer.db(),
+            scope,
+            MigrationId::GraphFormatV1Rewrite,
+            MigrationMode::BlockingStartup,
+        )
+        .await?;
+    }
     let rewrite_completed =
         migration_completed(writer.db(), scope, MigrationId::GraphFormatV1Rewrite).await?;
     if !rewrite_completed {
@@ -1479,15 +1530,25 @@ pub(crate) async fn run_blocking_startup_migration(
         }
     }
     ensure_graph_format_v1_ready(writer.db(), scope).await?;
-    ensure_migration_job(
-        writer.db(),
-        scope,
-        MigrationId::LegacyVectorPropertyMaterialization,
-        MigrationMode::BlockingStartup,
-    )
-    .await?;
     let vector_property_catalog =
         vector_properties::LegacyVectorPropertyCatalog::load(writer.db(), scope).await?;
+    if vector_property_catalog.is_empty() {
+        complete_migration_job(
+            writer.db(),
+            scope,
+            MigrationId::LegacyVectorPropertyMaterialization,
+            MigrationMode::BlockingStartup,
+        )
+        .await?;
+    } else {
+        ensure_migration_job(
+            writer.db(),
+            scope,
+            MigrationId::LegacyVectorPropertyMaterialization,
+            MigrationMode::BlockingStartup,
+        )
+        .await?;
+    }
     while !migration_completed(
         writer.db(),
         scope,
@@ -3542,12 +3603,16 @@ async fn rewrite_legacy_edge_pair_batch(
         mark_legacy_edge_equivalents(txn, scope, &mut rows, &candidates).await?;
     }
 
+    let labels = crate::index_lifecycle::repository::LabelRowWrites::of_stored_version(
+        startup::stored_storage_version(txn).await?,
+    );
     for row in rows {
         if !row.equivalent {
             let edge_id = writer.edge_ids().allocate().await?;
             maintain_current_edge_rows(
                 txn,
                 scope,
+                labels,
                 edge_id,
                 row.from,
                 row.to,
@@ -3622,12 +3687,16 @@ async fn rebuild_edge_endpoint_batch(
         })
         .collect::<Vec<_>>();
     let property_rows = txn.multi_get(&property_keys).await?;
+    let labels = crate::index_lifecycle::repository::LabelRowWrites::of_stored_version(
+        startup::stored_storage_version(txn).await?,
+    );
     for ((edge_id, from, to), property_row) in rows.into_iter().zip(property_rows) {
         let properties = match property_row {
             Some(property_row) => decode_properties(&property_row)?,
             None => Vec::new(),
         };
-        maintain_current_edge_rows(txn, scope, edge_id, from, to, Some(&properties)).await?;
+        maintain_current_edge_rows(txn, scope, labels, edge_id, from, to, Some(&properties))
+            .await?;
     }
     #[cfg(test)]
     trip_migration_failpoint(MigrationFailpoint::BatchReadAfter)?;
@@ -3882,9 +3951,15 @@ async fn mark_legacy_edge_equivalents(
     Ok(())
 }
 
+/// Stages one edge's current rows. Its label rows go under the keys `labels`
+/// names, those graph writes use on the store: a store before label identity
+/// keeps hash rows, which the label identity copy copies once it starts; a
+/// store whose copy runs keeps both; a published store keeps exact rows only,
+/// since nothing copies a hash row there and its cleanup may already be done.
 async fn maintain_current_edge_rows(
     txn: &DbTransaction,
     scope: DataScope,
+    labels: crate::index_lifecycle::repository::LabelRowWrites,
     edge_id: EdgeId,
     from: NodeId,
     to: NodeId,
@@ -3898,8 +3973,14 @@ async fn maintain_current_edge_rows(
     add_adjacency(txn, scope, from, to, EdgeAdjacencyDirection::Out)?;
     add_adjacency(txn, scope, to, from, EdgeAdjacencyDirection::In)?;
 
-    let properties = properties.unwrap_or(&[]);
-    if let Some(label) = label_of(properties) {
+    let Some(label) = label_of(properties.unwrap_or(&[])) else {
+        return Ok(());
+    };
+    if labels.hash() {
+        search::add_to_legacy_edge_label_index_scoped(txn, from, to, label, scope)?;
+        search::add_to_legacy_global_edge_label_index_scoped(txn, label, edge_id, scope)?;
+    }
+    if labels.exact() {
         search::add_to_edge_label_index_scoped(txn, from, to, label, scope)?;
         search::add_to_global_edge_label_index_scoped(txn, label, edge_id, scope)?;
     }
@@ -5013,6 +5094,26 @@ mod tests {
         )
         .await
         .expect("db opens and runs startup migration");
+        // The edges labeled FOLLOWS, read where the store files its label
+        // rows: the hash rows until the label identity copy publishes.
+        async fn follows(db: &HelixDB) -> roaring::RoaringTreemap {
+            let read = db.inner_db().snapshot().await.unwrap();
+            let layout =
+                crate::index_lifecycle::repository::ReaderStorageCompatibility::of_version(
+                    startup::storage_version(read.as_ref()).await.unwrap(),
+                )
+                .label_rows();
+            search::read_global_edge_label(
+                read.as_ref(),
+                layout,
+                "FOLLOWS",
+                DataScope::LegacyUnscoped,
+                None,
+            )
+            .await
+            .expect("label lookup succeeds")
+            .into_unbudgeted()
+        }
 
         let pair_ids = search::lookup_edge_pair_index(db.inner_db().as_ref(), from, to)
             .await
@@ -5032,12 +5133,7 @@ mod tests {
                 .expect("edge properties lookup succeeds"),
             properties
         );
-        assert!(
-            search::lookup_global_edge_label_index(db.inner_db().as_ref(), "FOLLOWS")
-                .await
-                .expect("label lookup succeeds")
-                .contains(edge_id)
-        );
+        assert!(follows(&db).await.contains(edge_id));
         assert!(db
             .inner_db()
             .get(&legacy_key)
@@ -5054,12 +5150,7 @@ mod tests {
             .await
             .expect("legacy key read succeeds")
             .is_none());
-        assert!(
-            search::lookup_global_edge_label_index(db.inner_db().as_ref(), "FOLLOWS")
-                .await
-                .expect("label lookup succeeds")
-                .contains(edge_id)
-        );
+        assert!(follows(&db).await.contains(edge_id));
     }
 
     #[tokio::test]

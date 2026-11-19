@@ -247,8 +247,12 @@ impl<'db> ExecutionContext<'db> {
         match direction {
             ir::ExpandDirection::Out | ir::ExpandDirection::Both => {
                 out.extend(
-                    self.lookup_out_neighbors_by_label(node_id, label.as_ref())
-                        .await?,
+                    self.lookup_neighbors_by_label(
+                        crate::encoding::indexes::EdgeDirection::Out,
+                        node_id,
+                        label.as_ref(),
+                    )
+                    .await?,
                 );
             }
             ir::ExpandDirection::In => {}
@@ -256,8 +260,12 @@ impl<'db> ExecutionContext<'db> {
         match direction {
             ir::ExpandDirection::In | ir::ExpandDirection::Both => {
                 out.extend(
-                    self.lookup_in_neighbors_by_label(node_id, label.as_ref())
-                        .await?,
+                    self.lookup_neighbors_by_label(
+                        crate::encoding::indexes::EdgeDirection::In,
+                        node_id,
+                        label.as_ref(),
+                    )
+                    .await?,
                 );
             }
             ir::ExpandDirection::Out => {}
@@ -399,7 +407,7 @@ mod tests {
                                 indexes::label::EdgeLabelNeighborKey::new(
                                     index_direction,
                                     node,
-                                    indexes::hash_property_value(label.as_ref()),
+                                    indexes::label::LabelIdentity::new(label.as_ref()).unwrap(),
                                 ),
                             ),
                         ),

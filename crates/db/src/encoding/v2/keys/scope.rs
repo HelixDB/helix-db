@@ -94,6 +94,27 @@ impl DataScope {
         }
     }
 
+    /// Exclusive upper bound of every data scope's physical keys: unscoped
+    /// keys sort before every tenant envelope, and tenant envelopes after
+    /// every other data key.
+    pub(crate) const PHYSICAL_KEYS_END: &'static [u8] = &[TENANT_KEY_PREFIX + 1];
+
+    /// The scope of the physical data key `key`, and its logical suffix. A
+    /// key that opens a tenant envelope too short to hold a tenant ID is no
+    /// data key.
+    pub(crate) fn split_physical_key(key: &[u8]) -> Result<(Self, &[u8]), EncodingError> {
+        match Self::strip_tenant_envelope(key) {
+            Some((tenant, logical)) => Ok((Self::Tenant(tenant), logical)),
+            None if key.first() == Some(&TENANT_KEY_PREFIX) => {
+                Err(EncodingError::InvalidTenantId(format!(
+                    "a {}-byte key opens a {TENANT_ENVELOPE_LEN}-byte tenant envelope",
+                    key.len()
+                )))
+            }
+            None => Ok((Self::LegacyUnscoped, key)),
+        }
+    }
+
     /// Decode the tenant scope and logical suffix from a physically enveloped key.
     pub(crate) fn strip_tenant_envelope(key: &[u8]) -> Option<(TenantId, &[u8])> {
         const TENANT_ID_OFFSET: usize = core::mem::size_of::<u8>();
@@ -245,6 +266,28 @@ mod tests {
             let tenant = TenantId::from_ulid_str(&ulid).expect("valid Crockford character");
             assert_eq!(tenant.as_u128(), value);
         }
+    }
+
+    #[test]
+    fn physical_keys_split_into_their_scope_and_sort_below_the_end_bound() {
+        let tenant = TenantId::from_u128(u128::MAX);
+        let mut enveloped = Vec::new();
+        DataScope::Tenant(tenant).encode_key_prefix(&mut enveloped);
+        enveloped.extend_from_slice(b"\x03logical");
+        assert_eq!(
+            DataScope::split_physical_key(&enveloped).unwrap(),
+            (DataScope::Tenant(tenant), &b"\x03logical"[..])
+        );
+        assert_eq!(
+            DataScope::split_physical_key(b"\x03logical").unwrap(),
+            (DataScope::LegacyUnscoped, &b"\x03logical"[..])
+        );
+        assert!(matches!(
+            DataScope::split_physical_key(&enveloped[..TENANT_ENVELOPE_LEN - 1]),
+            Err(EncodingError::InvalidTenantId(_))
+        ));
+        assert!(enveloped.as_slice() < DataScope::PHYSICAL_KEYS_END);
+        assert!(&b"\x03logical"[..] < DataScope::PHYSICAL_KEYS_END);
     }
 
     #[test]

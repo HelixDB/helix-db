@@ -127,8 +127,12 @@ pub(crate) enum StableRequestReadView {
         snapshot: Arc<DbSnapshot>,
         compatibility: crate::index_lifecycle::repository::ReaderStorageCompatibility,
     },
-    /// A writer-node snapshot, always on the current storage layout.
-    WriterSnapshot(Arc<DbSnapshot>),
+    /// A writer-node snapshot. Its store has equality bitmaps, and files
+    /// label rows by hash until the label identity copy is published.
+    WriterSnapshot {
+        snapshot: Arc<DbSnapshot>,
+        compatibility: crate::index_lifecycle::repository::ReaderStorageCompatibility,
+    },
 }
 
 impl StableRequestReadView {
@@ -142,20 +146,38 @@ impl StableRequestReadView {
                         snapshot.as_ref(),
                     )
                     .await?;
-                db.observe_reader_storage_compatibility(compatibility)?;
+                db.observe_reader_storage_compatibility(compatibility, snapshot.seq())?;
                 Self::ReaderSnapshot {
                     snapshot,
                     compatibility,
                 }
             }
-            HelixStorage::Writer(writer) => Self::WriterSnapshot(writer.db().snapshot().await?),
+            HelixStorage::Writer(writer) => {
+                // Read before the snapshot opens: publication known by now is in
+                // the snapshot, so its exact rows are complete there. Known only
+                // afterwards, it could follow a snapshot whose exact rows are not.
+                let known = writer.known_label_row_writes();
+                let snapshot = writer.db().snapshot().await?;
+                let writes = match known {
+                    Some(known) => known,
+                    None => crate::index_lifecycle::repository::LabelRowWrites::of_stored_version(
+                        crate::migrations::startup::stored_storage_version(snapshot.as_ref())
+                            .await?,
+                    ),
+                };
+                let compatibility = writes.reads();
+                Self::WriterSnapshot {
+                    snapshot,
+                    compatibility,
+                }
+            }
         })
     }
 
     /// Returns the sequence visible to this request-scoped storage view.
     pub(crate) fn comparable_sequence(&self) -> u64 {
         match self {
-            Self::ReaderSnapshot { snapshot, .. } | Self::WriterSnapshot(snapshot) => {
+            Self::ReaderSnapshot { snapshot, .. } | Self::WriterSnapshot { snapshot, .. } => {
                 snapshot.seq()
             }
         }
@@ -168,17 +190,15 @@ impl StableRequestReadView {
     /// on reader nodes, which serve no queued-index overlays. Lifting that is
     /// a separate scheduling change, not a property of the snapshot.
     pub(in crate::execution::interpreter) const fn requires_serial_stages(&self) -> bool {
-        matches!(self, Self::WriterSnapshot(_))
+        matches!(self, Self::WriterSnapshot { .. })
     }
 
     pub(in crate::execution::interpreter) const fn storage_compatibility(
         &self,
     ) -> crate::index_lifecycle::repository::ReaderStorageCompatibility {
         match self {
-            Self::ReaderSnapshot { compatibility, .. } => *compatibility,
-            Self::WriterSnapshot(_) => {
-                crate::index_lifecycle::repository::ReaderStorageCompatibility::Current
-            }
+            Self::ReaderSnapshot { compatibility, .. }
+            | Self::WriterSnapshot { compatibility, .. } => *compatibility,
         }
     }
 
@@ -200,10 +220,22 @@ impl StableRequestReadView {
     /// Ends the request view and releases its pinned snapshot.
     pub(crate) fn close(self) {
         match self {
-            Self::ReaderSnapshot { snapshot, .. } | Self::WriterSnapshot(snapshot) => {
+            Self::ReaderSnapshot { snapshot, .. } | Self::WriterSnapshot { snapshot, .. } => {
                 drop(snapshot)
             }
         }
+    }
+}
+
+impl crate::index_lifecycle::repository::LayoutView for StableRequestReadView {
+    type Reads = Self;
+
+    fn reads(&self) -> &Self {
+        self
+    }
+
+    fn compatibility(&self) -> crate::index_lifecycle::repository::ReaderStorageCompatibility {
+        self.storage_compatibility()
     }
 }
 
@@ -215,7 +247,7 @@ impl DbReadOps for StableRequestReadView {
         options: &slatedb::config::ReadOptions,
     ) -> std::result::Result<Option<bytes::Bytes>, slatedb::Error> {
         match self {
-            Self::ReaderSnapshot { snapshot, .. } | Self::WriterSnapshot(snapshot) => {
+            Self::ReaderSnapshot { snapshot, .. } | Self::WriterSnapshot { snapshot, .. } => {
                 snapshot.get_with_options(key, options).await
             }
         }
@@ -227,7 +259,7 @@ impl DbReadOps for StableRequestReadView {
         options: &slatedb::config::ReadOptions,
     ) -> std::result::Result<Option<slatedb::KeyValue>, slatedb::Error> {
         match self {
-            Self::ReaderSnapshot { snapshot, .. } | Self::WriterSnapshot(snapshot) => {
+            Self::ReaderSnapshot { snapshot, .. } | Self::WriterSnapshot { snapshot, .. } => {
                 snapshot.get_key_value_with_options(key, options).await
             }
         }
@@ -242,7 +274,7 @@ impl DbReadOps for StableRequestReadView {
         K: AsRef<[u8]> + Send + Sync,
     {
         match self {
-            Self::ReaderSnapshot { snapshot, .. } | Self::WriterSnapshot(snapshot) => {
+            Self::ReaderSnapshot { snapshot, .. } | Self::WriterSnapshot { snapshot, .. } => {
                 snapshot.multi_get_with_options(keys, options).await
             }
         }
@@ -257,7 +289,7 @@ impl DbReadOps for StableRequestReadView {
         T: slatedb::ByteRangeBounds + Send,
     {
         match self {
-            Self::ReaderSnapshot { snapshot, .. } | Self::WriterSnapshot(snapshot) => {
+            Self::ReaderSnapshot { snapshot, .. } | Self::WriterSnapshot { snapshot, .. } => {
                 snapshot.scan_with_options(range, options).await
             }
         }
@@ -274,7 +306,7 @@ impl DbReadOps for StableRequestReadView {
         T: slatedb::ByteRangeBounds + Send,
     {
         match self {
-            Self::ReaderSnapshot { snapshot, .. } | Self::WriterSnapshot(snapshot) => {
+            Self::ReaderSnapshot { snapshot, .. } | Self::WriterSnapshot { snapshot, .. } => {
                 snapshot
                     .scan_prefix_with_options(prefix, subrange, options)
                     .await
@@ -463,8 +495,10 @@ mod tests {
             .expect("writer opens");
         db.put(b"key", b"before").await.expect("initial value");
         db.put(b"key-2", b"kept").await.expect("second value");
-        let view =
-            StableRequestReadView::WriterSnapshot(db.snapshot().await.expect("snapshot opens"));
+        let view = StableRequestReadView::WriterSnapshot {
+            snapshot: db.snapshot().await.expect("snapshot opens"),
+            compatibility: crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
+        };
         let opened_at = view.comparable_sequence();
 
         db.put(b"key", b"after")
@@ -529,7 +563,7 @@ mod tests {
         let view = StableRequestReadView::open(&db)
             .await
             .expect("writer request view opens");
-        assert!(matches!(view, StableRequestReadView::WriterSnapshot(_)));
+        assert!(matches!(view, StableRequestReadView::WriterSnapshot { .. }));
         assert!(view.requires_serial_stages());
         view.close();
     }

@@ -12,19 +12,37 @@ use super::{
 /// (`0x14`). It re-encodes nothing: a version-4 store is upgraded by rewriting
 /// only this marker, which fences binaries that support at most version 4 out
 /// of stores whose queued index work they would ignore.
-pub(crate) const CURRENT_INDEX_STORAGE_VERSION: u16 = 0x0005;
+///
+/// Version 6 marks stores whose hash-keyed label index rows are being copied
+/// to exact label keys while the writer serves. Readers still read the hash
+/// rows; every graph write files its label rows under both keys, so the copy
+/// only has to cover rows written before it began. Binaries that support at
+/// most version 5, which would keep only the hash rows current, refuse it.
+///
+/// Version 7 marks stores whose label index rows are keyed by the exact label
+/// rather than its 64-bit hash: the copy published, and readers switched to
+/// the exact rows at once.
+pub(crate) const CURRENT_INDEX_STORAGE_VERSION: u16 = 0x0007;
 
 /// Decoded non-zero index storage format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct IndexStorageVersion(u16);
 
 impl IndexStorageVersion {
-    pub(crate) const CURRENT: Self = Self(CURRENT_INDEX_STORAGE_VERSION);
+    pub(crate) const CURRENT: Self = Self::LABEL_IDENTITY;
     pub(crate) const MAX_SUPPORTED: Self = Self::CURRENT;
     /// First version with equality bitmaps and the V4 cleanup marker. Older
     /// stores need the equality-bitmap migration; this and later versions
-    /// share one physical layout.
+    /// share one equality layout.
     pub(crate) const EQUALITY_BITMAPS: Self = Self(0x0004);
+    /// First version that may hold asynchronous index-operation queues, and
+    /// the last whose writers file label rows under their hash keys only.
+    pub(crate) const OPERATION_QUEUES: Self = Self(0x0005);
+    /// The label identity copy is running: label rows are read under their
+    /// hash keys and written under both their hash and exact keys.
+    pub(crate) const LABEL_COPY: Self = Self(0x0006);
+    /// First version whose label index rows are read under the exact label.
+    pub(crate) const LABEL_IDENTITY: Self = Self(CURRENT_INDEX_STORAGE_VERSION);
 
     pub(crate) fn new(value: u16) -> Result<Self, crate::encoding::error::EncodingError> {
         if value == 0 {

@@ -88,6 +88,7 @@ impl MutationIndexContext {
         loaded: crate::index_lifecycle::mutation_catalog::MutationIndexCatalog,
         scope: crate::encoding::v2::keys::scope::DataScope,
         budget: Option<&crate::query_resources::Budget>,
+        label_rows: crate::index_lifecycle::repository::LabelRowWrites,
     ) -> Self {
         let (active, secondary, vector, text, routes) = loaded.into_components();
         Self {
@@ -100,7 +101,7 @@ impl MutationIndexContext {
             vector,
             text,
             routes,
-            topology_runtime: super::topology::TopologyMutationRuntime::new(budget),
+            topology_runtime: super::topology::TopologyMutationRuntime::new(budget, label_rows),
             queued: QueuedMutationCollector::new(scope),
             node_index_writes: super::NodeIndexWrites::default(),
             existence_reads: parking_lot::Mutex::new(ExistenceReads {
@@ -125,7 +126,10 @@ impl MutationIndexContext {
             vector: crate::index_lifecycle::vector::VectorMutationSet::empty(),
             text: crate::index_lifecycle::text::mutation::TextMutationSet::empty(),
             routes: crate::index_lifecycle::mutation_catalog::MutationRouteCatalog::default(),
-            topology_runtime: super::topology::TopologyMutationRuntime::default(),
+            topology_runtime: super::topology::TopologyMutationRuntime::new(
+                None,
+                crate::index_lifecycle::repository::LabelRowWrites::Exact,
+            ),
             queued: QueuedMutationCollector::new(
                 crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
             ),

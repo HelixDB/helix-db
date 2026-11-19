@@ -21,9 +21,7 @@ use super::text_fixtures::{scoped_key, seed_active_text_generation};
 use super::*;
 use crate::config::{DbConfig, TextIndexDefinition};
 use crate::encoding::indexes::label::{EdgeLabelKey, EdgeLabelNeighborKey};
-use crate::encoding::indexes::{
-    hash_property_name, hash_property_value, EdgeDirection, PropertyIndexKey,
-};
+use crate::encoding::indexes::{EdgeDirection, PropertyIndexKey};
 use crate::encoding::property::property_value::PropertyValue as DbPropertyValue;
 use crate::encoding::property::Property;
 use crate::encoding::v2::keys as index_keys;
@@ -582,7 +580,10 @@ async fn exercise_stable_restricted_metric<D: Distance>(db: &Db, name: &str) {
         transaction.commit().await.unwrap();
     }
 
-    let view = read_view::StableRequestReadView::WriterSnapshot(db.snapshot().await.unwrap());
+    let view = read_view::StableRequestReadView::WriterSnapshot {
+        snapshot: db.snapshot().await.unwrap(),
+        compatibility: crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
+    };
     let exact = RestrictedVectorCandidates::from_ids([1, 2, 3]).unwrap();
     let exact_results = index
         .search_restricted(&view, &[1.0, 0.0], &SearchParams::new(2).unwrap(), &exact)
@@ -1566,17 +1567,25 @@ async fn request_read_view_guards_fail_closed() {
     for (error, expected) in [
         (
             context
-                .lookup_out_neighbors_by_label(1, "FOLLOWS")
+                .lookup_neighbors_by_label(
+                    crate::encoding::indexes::EdgeDirection::Out,
+                    1,
+                    "FOLLOWS",
+                )
                 .await
                 .expect_err("out-neighbor reads require a request view"),
-            "out-neighbor label lookup escaped its request read view",
+            "neighbor label lookup escaped its request read view",
         ),
         (
             context
-                .lookup_in_neighbors_by_label(1, "FOLLOWS")
+                .lookup_neighbors_by_label(
+                    crate::encoding::indexes::EdgeDirection::In,
+                    1,
+                    "FOLLOWS",
+                )
                 .await
                 .expect_err("in-neighbor reads require a request view"),
-            "in-neighbor label lookup escaped its request read view",
+            "neighbor label lookup escaped its request read view",
         ),
         (
             context
@@ -1601,10 +1610,9 @@ async fn request_read_view_guards_fail_closed() {
 fn topology_node_label_key(scope: DataScope, label: &str) -> Bytes {
     DataKey::Data {
         scope,
-        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::Equality(
-            crate::encoding::indexes::equality::EqualityIndexKey::new(
-                hash_property_name("$label"),
-                hash_property_value(label),
+        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::NodeLabel(
+            crate::encoding::indexes::label::NodeLabelKey::new(
+                crate::encoding::indexes::label::LabelIdentity::new(label).unwrap(),
             ),
         )),
     }
@@ -1636,7 +1644,11 @@ fn topology_edge_label_neighbor_key(
     DataKey::Data {
         scope,
         kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
-            EdgeLabelNeighborKey::new(direction, node, hash_property_value(label)),
+            EdgeLabelNeighborKey::new(
+                direction,
+                node,
+                crate::encoding::indexes::label::LabelIdentity::new(label).unwrap(),
+            ),
         )),
     }
     .to_bytes()
@@ -1646,7 +1658,7 @@ fn topology_global_edge_label_key(scope: DataScope, label: &str) -> Bytes {
     DataKey::Data {
         scope,
         kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(
-            hash_property_value(label),
+            crate::encoding::indexes::label::LabelIdentity::new(label).unwrap(),
         ))),
     }
     .to_bytes()

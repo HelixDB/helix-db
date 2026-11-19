@@ -120,7 +120,7 @@ async fn seed(
     transaction
         .put(graph_key.clone(), graph_value.clone())
         .expect("retirement graph row stages");
-    crate::search::add_to_global_edge_label_index_scoped(
+    crate::search::add_to_legacy_global_edge_label_index_scoped(
         &transaction,
         LABEL,
         EDGE,

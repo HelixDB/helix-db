@@ -26,7 +26,7 @@ async fn rejected_first_member_leaves_no_empty_row_for_flush() {
         };
         let limit = row_bytes + member_allowance;
         let budget = query_resources::Budget::new(limit);
-        let mut runtime = TopologyMutationRuntime::new(Some(&budget));
+        let mut runtime = TopologyMutationRuntime::new(Some(&budget), LabelRowWrites::Exact);
         let result = if adjacency {
             runtime.add_adjacency(
                 DataScope::LegacyUnscoped,
@@ -265,7 +265,7 @@ async fn topology_debug_shows_pending_rows_and_staged_keys_without_admission() {
     .await
     .unwrap();
     let budget = query_resources::Budget::new(1024 * 1024);
-    let mut runtime = TopologyMutationRuntime::new(Some(&budget));
+    let mut runtime = TopologyMutationRuntime::new(Some(&budget), LabelRowWrites::Exact);
     assert_eq!(
         format!("{runtime:?}"),
         "TopologyMutationRuntime { state: Collecting, staged_keys: {}, .. }"

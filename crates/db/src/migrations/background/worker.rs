@@ -8,6 +8,7 @@ use tokio::task::JoinHandle;
 
 use crate::config::{MigrationTuning, MigrationWorkerMode};
 use crate::encoding::v2::keys::scope::DataScope;
+use crate::migrations::indexes::label_identity::{self, LabelCopySession};
 use crate::HelixWriter;
 
 const MAX_FAILURE_BACKOFF: Duration = Duration::from_secs(60);
@@ -38,6 +39,18 @@ impl FailureBackoff {
     }
 }
 
+/// The background migrations one writer runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackgroundMigrations {
+    /// Every background migration: a writer authorized to migrate storage.
+    All,
+    /// Only the label identity copy and the deletion of the hash label rows
+    /// it retires. A migrating writer started the copy, after which every
+    /// writer files label rows under both keys, so a writer that runs no
+    /// migration, such as a failover writer, still finishes both.
+    LabelIdentity,
+}
+
 /// Supervisor retained by the database handle and joined before storage closes.
 pub(crate) struct MigrationWorkerSupervisor {
     shutdown: watch::Sender<bool>,
@@ -49,12 +62,13 @@ impl MigrationWorkerSupervisor {
     pub(crate) fn start_if_enabled(
         writer: Arc<HelixWriter>,
         tuning: MigrationTuning,
+        migrations: BackgroundMigrations,
     ) -> Option<Self> {
         if tuning.worker_mode() == MigrationWorkerMode::Disabled {
             return None;
         }
         let (shutdown, shutdown_rx) = watch::channel(false);
-        let handle = tokio::spawn(run(writer, tuning, shutdown_rx));
+        let handle = tokio::spawn(run(writer, tuning, migrations, shutdown_rx));
         Some(Self { shutdown, handle })
     }
 
@@ -71,37 +85,71 @@ impl MigrationWorkerSupervisor {
     }
 }
 
+/// Advances every pending background migration `migrations` names by one
+/// bounded batch: the next runnable migration job, the label identity copy,
+/// and the deletion of the hash label rows it retires. Returns whether any
+/// has more to do. `labels` carries the copy's state between steps.
+///
+/// Each runs every step, so none waits for another to finish, and one failing
+/// does not stop another's batch from committing. The cleanup follows the
+/// copy, so the step that publishes the copy starts it. The label steps wait
+/// while the writer's flush backlog is high (see
+/// [`LabelCopySession::admit_step`]), so they never push foreground writes into
+/// storage backpressure.
+pub(crate) async fn process_background_step(
+    writer: &HelixWriter,
+    tuning: MigrationTuning,
+    migrations: BackgroundMigrations,
+    labels: &mut LabelCopySession,
+) -> crate::error::Result<bool> {
+    let job = match migrations {
+        BackgroundMigrations::All => {
+            super::super::process_migration_once(writer, DataScope::LegacyUnscoped, tuning).await
+        }
+        BackgroundMigrations::LabelIdentity => Ok(false),
+    };
+    // Label steps run only while the writer's flush backlog leaves room for
+    // foreground writes; a step held back is taken later.
+    let labels_advanced = if labels.admit_step(writer.db()).await? {
+        let copy = label_identity::copy_hash_label_rows_once(writer, labels).await;
+        let cleanup = label_identity::delete_hash_label_rows_once(writer.db(), labels).await;
+        copy?.advanced() | cleanup?.advanced()
+    } else {
+        true
+    };
+    Ok(job? | labels_advanced)
+}
+
 async fn run(
     writer: Arc<HelixWriter>,
     tuning: MigrationTuning,
+    migrations: BackgroundMigrations,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut failure_backoff =
         FailureBackoff::new(Duration::from_millis(tuning.idle_interval_millis().get()));
+    let mut labels = LabelCopySession::new();
     loop {
         if *shutdown.borrow() {
             return;
         }
 
-        let delay =
-            match super::super::process_migration_once(&writer, DataScope::LegacyUnscoped, tuning)
-                .await
-            {
-                Ok(true) => {
-                    failure_backoff.reset();
-                    Duration::from_millis(tuning.active_interval_millis().get())
-                }
-                Ok(false) => return,
-                Err(error) => {
-                    let delay = failure_backoff.next_delay();
-                    tracing::warn!(
-                        %error,
-                        retry_delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
-                        "background migration batch failed; retrying with capped backoff"
-                    );
-                    delay
-                }
-            };
+        let delay = match process_background_step(&writer, tuning, migrations, &mut labels).await {
+            Ok(true) => {
+                failure_backoff.reset();
+                Duration::from_millis(tuning.active_interval_millis().get())
+            }
+            Ok(false) => return,
+            Err(error) => {
+                let delay = failure_backoff.next_delay();
+                tracing::warn!(
+                    %error,
+                    retry_delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                    "background migration batch failed; retrying with capped backoff"
+                );
+                delay
+            }
+        };
 
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
@@ -142,7 +190,12 @@ mod tests {
         let (db, writer) = test_writer("disabled-background-migration-worker").await;
         let tuning = MigrationTuning::default().with_worker_mode(MigrationWorkerMode::Disabled);
 
-        assert!(MigrationWorkerSupervisor::start_if_enabled(writer, tuning).is_none());
+        assert!(MigrationWorkerSupervisor::start_if_enabled(
+            writer,
+            tuning,
+            BackgroundMigrations::All
+        )
+        .is_none());
 
         db.close().await.expect("test database closes");
     }
@@ -184,8 +237,9 @@ mod tests {
             .with_idle_interval(
                 MigrationIdleIntervalMillis::new(1).expect("idle interval is positive"),
             );
-        let worker = MigrationWorkerSupervisor::start_if_enabled(writer, tuning)
-            .expect("background tuning starts a worker");
+        let worker =
+            MigrationWorkerSupervisor::start_if_enabled(writer, tuning, BackgroundMigrations::All)
+                .expect("background tuning starts a worker");
 
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
@@ -231,8 +285,9 @@ mod tests {
         let tuning = MigrationTuning::default().with_active_interval(
             MigrationActiveIntervalMillis::new(60_000).expect("active interval is positive"),
         );
-        let worker = MigrationWorkerSupervisor::start_if_enabled(writer, tuning)
-            .expect("background tuning starts a worker");
+        let worker =
+            MigrationWorkerSupervisor::start_if_enabled(writer, tuning, BackgroundMigrations::All)
+                .expect("background tuning starts a worker");
 
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
@@ -280,8 +335,9 @@ mod tests {
             .with_idle_interval(
                 MigrationIdleIntervalMillis::new(100).expect("idle interval is positive"),
             );
-        let worker = MigrationWorkerSupervisor::start_if_enabled(writer, tuning)
-            .expect("background tuning starts a worker");
+        let worker =
+            MigrationWorkerSupervisor::start_if_enabled(writer, tuning, BackgroundMigrations::All)
+                .expect("background tuning starts a worker");
         let job_key =
             MigrationJobKey::new(DataScope::LegacyUnscoped, MigrationId::GraphFormatV1Cleanup);
 
