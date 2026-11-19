@@ -425,15 +425,16 @@ literals are not supported.
 
 <Warning>
 A timestamp column never compares with text: unlike PostgreSQL,
-`WHERE e.at > '2026-01-01'` does not cast the string, and fails with
-`type_error` (`datetime_text_comparison`), as does a string parameter, once it
-compares a stored datetime. An index lookup reads only values of its own type,
-so it [can match nothing instead](/database/helix-db/query-guides/cypher#datetimes).
-Write `e.at > TIMESTAMP '2026-01-01'` or `e.at > CAST(? AS TIMESTAMP)`.
-Properties written as `date_time` parameters before datetimes were stored
-natively are
+`WHERE e.at > '2026-01-01'` does not cast the string. The comparison is null,
+so it [matches no row](/database/helix-db/query-guides/cypher#datetimes)
+holding a timestamp, with or without an index, and so is a string parameter's.
+Write `e.at > TIMESTAMP '2026-01-01'` or `e.at > CAST(? AS TIMESTAMP)`. When
+both sides' types are known, such as `TIMESTAMP '2026-01-01' = '2026-01-01'`,
+the statement fails before it runs with `type_error`
+(`datetime_text_comparison`). Properties written as `date_time` parameters
+before datetimes were stored natively are
 [converted to datetimes](/database/helix-db/query-guides/parameters#supported-parameter-families),
-so filters that compared them with text fail after the conversion.
+so filters that compared them with text match nothing after the conversion.
 </Warning>
 
 `EXTRACT(field FROM x)` reads the datetime field of the same meaning in UTC
