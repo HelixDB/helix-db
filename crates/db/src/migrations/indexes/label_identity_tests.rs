@@ -2182,17 +2182,29 @@ async fn background_label_steps_leave_foreground_writes_room_under_a_slow_store(
         let writer = Arc::clone(&writer);
         async move {
             let mut session = LabelCopySession::new();
+            let mut retries = crate::migrations::background::MigrationRetries::default();
             let started = Instant::now();
-            while crate::migrations::background::process_background_step(
-                &writer,
-                &std::sync::Weak::new(),
-                MigrationTuning::default(),
-                crate::migrations::background::BackgroundMigrations::LabelIdentity,
-                &mut session,
-            )
-            .await
-            .unwrap()
-            {
+            loop {
+                match crate::migrations::background::process_background_step(
+                    &writer,
+                    &std::sync::Weak::new(),
+                    MigrationTuning::default(),
+                    crate::migrations::background::BackgroundMigrations::LabelIdentity,
+                    &mut session,
+                    &mut retries,
+                    tokio::time::Instant::now,
+                )
+                .await
+                {
+                    crate::migrations::background::BackgroundStep::Active { failure: None } => {}
+                    crate::migrations::background::BackgroundStep::Finished => break,
+                    failed @ (crate::migrations::background::BackgroundStep::Active {
+                        failure: Some(_),
+                    }
+                    | crate::migrations::background::BackgroundStep::RetryAt { .. }) => {
+                        panic!("a label step failed: {failed:?}")
+                    }
+                }
                 assert!(
                     started.elapsed() < Duration::from_secs(600),
                     "label steps stalled"

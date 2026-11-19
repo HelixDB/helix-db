@@ -4288,15 +4288,32 @@ impl HelixDB {
             return Err(HelixDbError::MigrationSteppingRequiresDisabledMode);
         }
         // No database handle: the datetime string conversion keeps its own
-        // stepping surface, so a step here takes the jobs it took before.
-        migrations::background::process_background_step(
+        // stepping surface, so a step here takes the jobs it took before. A
+        // fresh backoff takes every migration, so this step returns its first
+        // failure after all have run, as the worker logs each.
+        match migrations::background::process_background_step(
             writer,
             &std::sync::Weak::new(),
             self.config().db().migrations(),
             migrations::background::BackgroundMigrations::All,
             &mut migrations::LabelCopySession::new(),
+            &mut migrations::background::MigrationRetries::default(),
+            tokio::time::Instant::now,
         )
         .await
+        {
+            migrations::background::BackgroundStep::Active {
+                failure: Some(error),
+            }
+            | migrations::background::BackgroundStep::RetryAt {
+                failure: Some(error),
+                ..
+            } => Err(error),
+            // A fresh backoff waits on nothing, so only a failure retries.
+            migrations::background::BackgroundStep::Active { failure: None }
+            | migrations::background::BackgroundStep::RetryAt { failure: None, .. } => Ok(true),
+            migrations::background::BackgroundStep::Finished => Ok(false),
+        }
     }
 
     #[cfg(any(test, feature = "bench-internals"))]

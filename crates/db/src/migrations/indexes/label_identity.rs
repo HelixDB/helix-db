@@ -283,9 +283,11 @@ impl LabelCopySession {
         }
     }
 
-    /// Whether a label step may run now. While the writer's flush backlog is
-    /// high it waits [`YIELD_WAIT`] and declines, so the caller takes the step
-    /// later and foreground writes keep the room meanwhile.
+    /// Whether a paced background step may run now: the label steps and the
+    /// datetime string conversion, which the worker admits together, so they
+    /// share one pacing. While the writer's flush backlog is high it waits
+    /// [`YIELD_WAIT`] and declines, so the caller takes the step later and
+    /// foreground writes keep the room meanwhile.
     pub(crate) async fn admit_step(&mut self, db: &Db) -> Result<bool> {
         let unflushed = db.unflushed_bytes()?;
         if self.pacing.admits(unflushed) {
@@ -401,12 +403,13 @@ fn per_second(rows: u64, elapsed: Duration) -> u64 {
     (rows as f64 / seconds) as u64
 }
 
-/// Holds label steps back while the writer's flush backlog is high.
+/// Holds paced background steps (the label steps and the datetime string
+/// conversion) back while the writer's flush backlog is high.
 ///
 /// Every write, foreground or background, waits once the writer's unflushed
 /// bytes reach `max_unflushed_bytes` (SlateDB backpressure). The backlog that
 /// fills that room is the immutable memtables and the WAL waiting for object
-/// storage; the active memtable fills and freezes in normal operation. Label
+/// storage; the active memtable fills and freezes in normal operation. Paced
 /// steps stop once the backlog reaches 1/[`BACKLOG_HIGH_SHARE`] of the limit
 /// and start again below 1/[`BACKLOG_LOW_SHARE`], so they only use flush
 /// capacity foreground writes leave spare.
