@@ -26,13 +26,15 @@
 //! Rows are read with `multi_get`, in chunks of at most
 //! [`helix_planner::cost::RECORD_BATCH_ROWS`] ids, each read only once the
 //! previous one is consumed, and no chunk is read once the step has read its
-//! input-byte limit. Each chunk is sized to the input bytes the step has left
-//! at the mean bytes per id read so far (a step's first chunk, and every
-//! chunk before one holds a row, starts small and doubles), so a label of
-//! large rows reads about its limit and a row or two more per step, rather
-//! than a whole chunk of rows the step then leaves for the next one to read
-//! again. Like the prefix scan before it, a build's reads do not fill the
-//! block cache.
+//! input-byte limit. A chunk takes at most as many ids as the step has read
+//! so far ([`FIRST_CHUNK_IDS`] first), so a step's reads at most double a
+//! chunk at a time, and once a row is read, no more ids than reach the input
+//! bytes the step has left at the mean bytes per id read so far. A label of
+//! large rows therefore reads about its limit and a row or two more per step,
+//! rather than a whole chunk of rows the step then leaves for the next one to
+//! read again, and a step whose first rows are small reads no more large rows
+//! past its limit than it had read before them. Like the prefix scan before
+//! it, a build's reads do not fill the block cache.
 
 use bytes::Bytes;
 use slatedb::DbReadOps;
@@ -241,20 +243,25 @@ impl<'a, R: DbReadOps + Send + Sync> LabelSource<'a, R> {
         Ok(true)
     }
 
-    /// How many ids the next chunk reads: enough to reach the input-byte
-    /// limit at the mean bytes per id read so far, or, before any row was
-    /// read, as many ids as were read (starting at [`FIRST_CHUNK_IDS`]).
+    /// How many ids the next chunk reads: as many as were read so far
+    /// (starting at [`FIRST_CHUNK_IDS`]), and once a row was read, at most
+    /// enough to reach the input-byte limit at the mean bytes per id read so
+    /// far. The first bound keeps a mean taken over small rows from sizing a
+    /// whole chunk of large ones.
     fn chunk_ids(&self) -> usize {
-        let (ids, least) = if self.read_bytes == 0 {
-            (u128::from(self.ids_read), FIRST_CHUNK_IDS)
-        } else {
-            let left = u128::from(self.max_input_bytes - self.read_bytes);
-            let ids = (left * u128::from(self.ids_read)).div_ceil(u128::from(self.read_bytes));
-            (ids, 1)
+        let grown = u128::from(self.ids_read).max(FIRST_CHUNK_IDS as u128);
+        let ids = match self.read_bytes {
+            0 => grown,
+            read => {
+                let left = u128::from(self.max_input_bytes - read);
+                (left * u128::from(self.ids_read))
+                    .div_ceil(u128::from(read))
+                    .min(grown)
+            }
         };
         usize::try_from(ids)
             .unwrap_or(usize::MAX)
-            .clamp(least, CHUNK_IDS)
+            .clamp(1, CHUNK_IDS)
     }
 
     fn end(&self) -> LabelRead {

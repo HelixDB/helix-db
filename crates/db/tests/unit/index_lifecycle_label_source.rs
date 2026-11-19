@@ -363,6 +363,33 @@ async fn large_rows_read_about_one_limit_per_step() {
     }
 }
 
+/// A step whose first rows are small and the rest large reads about its
+/// limit: the mean of the small rows never sizes a chunk of large ones
+/// larger than what the step has read already.
+#[tokio::test]
+async fn small_rows_then_large_ones_read_about_one_limit() {
+    const LIMIT: u64 = 8 << 20;
+    let db = test_db("label-source-small-then-large").await;
+    let scope = DataScope::LegacyUnscoped;
+    let node = IndexElementKind::Node;
+    for id in 0..68 {
+        let filler = if id < 4 { 100 } else { 512 << 10 };
+        testing::put_source_row(&db, scope, node, id, &row("User", filler)).await;
+    }
+    let read = snapshot(&db).await;
+    let step_read = admit(&read, &progress(scope, node, None, 67), limits(1024, LIMIT)).await;
+    assert_eq!(step_read.ids, (0..19).collect::<Vec<_>>());
+    // A chunk sized by the four small rows alone read all 64 large ones:
+    // 32 MiB.
+    assert!(
+        step_read.read <= LIMIT + 4 * step_read.largest,
+        "{} read for {} admitted",
+        step_read.read,
+        step_read.bytes
+    );
+    db.close().await.expect("database closes");
+}
+
 #[tokio::test]
 async fn edge_builds_resume_after_a_retired_pair_key_cursor() {
     let db = test_db("label-source-legacy-edge-cursor").await;
