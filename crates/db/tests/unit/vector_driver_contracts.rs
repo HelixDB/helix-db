@@ -509,6 +509,7 @@ pub(super) async fn cleanup_checkpoint_rejections_and_limit_blockers_are_typed()
                 &record,
                 vector_definition,
                 &progress,
+                None,
                 false,
                 limits,
                 driver.cache_registry.as_ref(),
@@ -537,6 +538,7 @@ pub(super) async fn cleanup_checkpoint_rejections_and_limit_blockers_are_typed()
                 cursor: None,
                 counters: OperationCounters::default(),
             }),
+            None,
             false,
             tiny,
             driver.cache_registry.as_ref(),
@@ -554,6 +556,7 @@ pub(super) async fn cleanup_checkpoint_rejections_and_limit_blockers_are_typed()
             &record,
             vector_definition,
             &VectorCleanupProgress::RetireCache(NoCursorProgress::default()),
+            None,
             false,
             limits,
             driver.cache_registry.as_ref(),
@@ -573,6 +576,7 @@ pub(super) async fn cleanup_checkpoint_rejections_and_limit_blockers_are_typed()
             &record,
             vector_definition,
             &VectorCleanupProgress::Finalize(NoCursorProgress::default()),
+            None,
             false,
             limits,
             driver.cache_registry.as_ref(),
@@ -1905,6 +1909,7 @@ async fn cleanup_result(
         record,
         definition,
         &progress,
+        None,
         aborting,
         limits,
         &VectorCacheRegistry::default(),
@@ -2246,6 +2251,702 @@ pub(super) async fn cleanup_batches_resume_and_block_on_oversized_rows() {
             ))
         ));
     }
+    db.close().await.expect("vector test database closes");
+}
+
+/// Returns the keys of every physical row of one vector namespace, in the
+/// order a cleanup scan visits them.
+async fn physical_keys(
+    read: &(impl slatedb::DbReadOps + Sync),
+    scope: DataScope,
+    physical_index_id: u64,
+) -> Vec<Bytes> {
+    let mut keys = Vec::new();
+    for lane in VectorStorageLane::ALL {
+        keys.extend(
+            prefix_keys(
+                read,
+                DataKey::data_prefix(scope, lane.prefix_key(physical_index_id).to_bytes()),
+            )
+            .await,
+        );
+    }
+    keys
+}
+
+/// Builds an unpartitioned index over six entities and enqueues its drop,
+/// returning the drop, the namespace's physical ID, and the next claim
+/// sequence.
+async fn unpartitioned_drop(db: &Db, driver: &VectorIndexDriver) -> (IndexOperationId, u64, u64) {
+    let scope = DataScope::LegacyUnscoped;
+    let definition = definition(None);
+    for entity_id in 0..6_u8 {
+        put_source(
+            db,
+            scope,
+            u64::from(entity_id),
+            &properties([f32::from(entity_id), 2.0, 3.0], None),
+        )
+        .await;
+    }
+    let (build_id, _, _) = create_build(db, scope, &definition, 5).await;
+    let mut claim_sequence = 1;
+    assert_eq!(
+        drive_to_terminal(db, driver, build_id, &mut claim_sequence).await,
+        CommittedOperationStep::Completed
+    );
+    let active = read_index(db, scope, &definition).await;
+    let IndexStateV2::Active {
+        physical:
+            PhysicalGeneration::Vector {
+                layout: VectorPhysicalLayout::Unpartitioned { physical_index_id },
+                ..
+            },
+        ..
+    } = active.state()
+    else {
+        panic!("completed vector build is active and unpartitioned");
+    };
+    let drop_id = accepted_drop(
+        drop_index_operation(db, scope, &definition)
+            .await
+            .expect("unpartitioned drop enqueues"),
+    );
+    (drop_id, physical_index_id.get(), claim_sequence)
+}
+
+/// Whether `operation` is a drop still deleting physical rows.
+async fn deleting_physical(db: &Db, operation_id: IndexOperationId) -> bool {
+    matches!(
+        read_operation(db, DataScope::LegacyUnscoped, operation_id)
+            .await
+            .progress(),
+        IndexOperationProgress::VectorCleanup(VectorCleanupProgress::DeletePhysical(
+            PrefixScanProgress { cursor: None, .. }
+        ))
+    )
+}
+
+/// Proves each delete step resumes just past the last row the step before it
+/// deleted, and that the stage is left only by a scan from the start.
+///
+/// A row put back behind the position stays through every resumed step: none
+/// of them reads that part of the namespace again. The resumed step that
+/// reaches the end hands on no position and stays in the stage, and the next
+/// step, scanning from the start, deletes the row and alone leaves the stage.
+/// The persisted cursor stays unset throughout.
+pub(super) async fn unpartitioned_drop_resumes_past_deleted_rows_and_sweeps_before_leaving() {
+    let db = test_db("vector-driver-cleanup-resume").await;
+    let scope = DataScope::LegacyUnscoped;
+    let driver = driver();
+    let (drop_id, physical_index_id, mut claim_sequence) = unpartitioned_drop(&db, &driver).await;
+    let keys = physical_keys(&db, scope, physical_index_id).await;
+    assert!(keys.len() > 9, "the namespace spans several batches");
+    let three_rows = batch_limits(1024, 1024 * 1024, 3, 16 * 1024 * 1024);
+    let position = |driver: &VectorIndexDriver| driver.cleanup_resume.lock().get(&drop_id).cloned();
+
+    // Retiring the cache deletes nothing and hands on no position.
+    assert_eq!(
+        drive_one(&db, &driver, drop_id, &mut claim_sequence, three_rows).await,
+        CommittedOperationStep::Progressed
+    );
+    assert!(position(&driver).is_none());
+    assert_eq!(physical_keys(&db, scope, physical_index_id).await, keys);
+
+    // The first delete step scans from the start.
+    assert_eq!(
+        drive_one(&db, &driver, drop_id, &mut claim_sequence, three_rows).await,
+        CommittedOperationStep::Progressed
+    );
+    assert_eq!(
+        physical_keys(&db, scope, physical_index_id).await,
+        keys[3..]
+    );
+    assert!(matches!(
+        position(&driver),
+        Some(VectorCleanupResume::Physical(_))
+    ));
+
+    // A row behind the position: the first key, which sorts before every
+    // other row of the namespace.
+    db.put(&keys[0], b"left behind")
+        .await
+        .expect("fixture row is written");
+    let mut deleted = 3;
+    while position(&driver).is_some() {
+        assert_eq!(
+            drive_one(&db, &driver, drop_id, &mut claim_sequence, three_rows).await,
+            CommittedOperationStep::Progressed
+        );
+        deleted = (deleted + 3).min(keys.len());
+        let mut left = vec![keys[0].clone()];
+        left.extend_from_slice(&keys[deleted..]);
+        assert_eq!(
+            physical_keys(&db, scope, physical_index_id).await,
+            left,
+            "a resumed step deletes the next rows and none before its position"
+        );
+        assert!(
+            deleting_physical(&db, drop_id).await,
+            "a resumed step never leaves the stage"
+        );
+    }
+    assert_eq!(deleted, keys.len(), "the resumed scans reached the end");
+
+    // The scan from the start finds the row and leaves the stage.
+    assert_eq!(
+        drive_one(&db, &driver, drop_id, &mut claim_sequence, three_rows).await,
+        CommittedOperationStep::Progressed
+    );
+    assert!(physical_keys(&db, scope, physical_index_id)
+        .await
+        .is_empty());
+    assert!(matches!(
+        read_operation(&db, scope, drop_id).await.progress(),
+        IndexOperationProgress::VectorCleanup(VectorCleanupProgress::DeleteDeltas(_))
+    ));
+    assert_eq!(
+        drive_to_terminal(&db, &driver, drop_id, &mut claim_sequence).await,
+        CommittedOperationStep::Completed
+    );
+    assert!(matches!(
+        read_index(&db, scope, &definition(None)).await.state(),
+        IndexStateV2::Dropped { .. }
+    ));
+    assert!(
+        position(&driver).is_none(),
+        "a finished drop keeps no position"
+    );
+    db.close().await.expect("vector test database closes");
+}
+
+/// Proves a drop that loses its position mid-way still removes every row.
+///
+/// A new driver, as after a restart, holds no position, so its first step
+/// scans from the start: it deletes a row put back at the first key, which a
+/// resumed step would have skipped. A drop that blocks drops its position
+/// too. The drop then completes and leaves nothing.
+pub(super) async fn a_drop_that_loses_its_position_rescans_from_the_start() {
+    let db = test_db("vector-driver-cleanup-restart").await;
+    let scope = DataScope::LegacyUnscoped;
+    let driver = driver();
+    let (drop_id, physical_index_id, mut claim_sequence) = unpartitioned_drop(&db, &driver).await;
+    let keys = physical_keys(&db, scope, physical_index_id).await;
+    assert!(keys.len() > 9, "the namespace spans several batches");
+    let three_rows = batch_limits(1024, 1024 * 1024, 3, 16 * 1024 * 1024);
+    for _ in 0..3 {
+        assert_eq!(
+            drive_one(&db, &driver, drop_id, &mut claim_sequence, three_rows).await,
+            CommittedOperationStep::Progressed
+        );
+    }
+    assert!(driver.cleanup_resume.lock().contains_key(&drop_id));
+    assert_eq!(
+        physical_keys(&db, scope, physical_index_id).await,
+        keys[6..]
+    );
+    db.put(&keys[0], b"left behind")
+        .await
+        .expect("fixture row is written");
+
+    let restarted = self::driver();
+    assert_eq!(
+        drive_one(&db, &restarted, drop_id, &mut claim_sequence, three_rows).await,
+        CommittedOperationStep::Progressed
+    );
+    assert_eq!(
+        physical_keys(&db, scope, physical_index_id).await,
+        keys[8..],
+        "the first step after a restart deletes from the start"
+    );
+
+    // A step that blocks, here on a row no batch can hold, drops the
+    // position; the retried drop scans from the start again.
+    assert!(restarted.cleanup_resume.lock().contains_key(&drop_id));
+    assert_eq!(
+        drive_one(
+            &db,
+            &restarted,
+            drop_id,
+            &mut claim_sequence,
+            batch_limits(1024, 1, 3, 16 * 1024 * 1024),
+        )
+        .await,
+        CommittedOperationStep::Blocked
+    );
+    assert!(!restarted.cleanup_resume.lock().contains_key(&drop_id));
+    crate::index_lifecycle::outbox::retry_operation(&db, scope, drop_id)
+        .await
+        .expect("blocked drop is requeued");
+    assert_eq!(
+        drive_to_terminal(&db, &restarted, drop_id, &mut claim_sequence).await,
+        CommittedOperationStep::Completed
+    );
+    assert!(physical_keys(&db, scope, physical_index_id)
+        .await
+        .is_empty());
+    assert!(matches!(
+        read_index(&db, scope, &definition(None)).await.state(),
+        IndexStateV2::Dropped { .. }
+    ));
+    db.close().await.expect("vector test database closes");
+}
+
+/// Proves a partitioned drop resumes inside each namespace, never carries a
+/// position from one namespace into the next, and deletes a mapping only
+/// once a scan from the start proved its namespace empty.
+pub(super) async fn partitioned_drop_resumes_within_each_namespace() {
+    let db = test_db("vector-driver-partitioned-resume").await;
+    let scope = DataScope::LegacyUnscoped;
+    let definition = definition(Some("account_id"));
+    for entity_id in 0..8_u8 {
+        put_source(
+            &db,
+            scope,
+            u64::from(entity_id),
+            &properties(
+                [f32::from(entity_id), 5.0, 6.0],
+                Some(10 * (1 + i64::from(entity_id % 2))),
+            ),
+        )
+        .await;
+    }
+    let (build_id, index_id, generation) = create_build(&db, scope, &definition, 7).await;
+    let driver = driver();
+    let mut claim_sequence = 1;
+    assert_eq!(
+        drive_to_terminal(&db, &driver, build_id, &mut claim_sequence).await,
+        CommittedOperationStep::Completed
+    );
+    let active = read_index(&db, scope, &definition).await;
+    let active_handle = ActiveIndexHandle::try_from_record(scope, &active)
+        .expect("partitioned Active record projects a handle");
+    // Mapping key order is cleanup order.
+    let mappings = mapping_values(&db, scope, index_id, generation).await;
+    assert_eq!(mappings.len(), 2);
+    let (first, second) = (
+        mappings[0].physical_index_id.get(),
+        mappings[1].physical_index_id.get(),
+    );
+    let first_keys = physical_keys(&db, scope, first).await;
+    let second_keys = physical_keys(&db, scope, second).await;
+    assert!(first_keys.len() > 6 && second_keys.len() > 6);
+    let first_generation = ValidatedVectorGenerationHandle::try_from_active::<
+        vector::distance::Euclidean,
+    >(&active_handle, mappings[0].physical_index_id)
+    .expect("partition mapping validates against the Active handle");
+    let first_index =
+        VectorIndex::<vector::distance::Euclidean>::from_generation(&first_generation);
+    let first_position = VectorCleanupResume::Physical(
+        first_index
+            .cleanup_scan(&db, None)
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .expect("the first namespace holds rows"),
+    );
+
+    let drop_id = accepted_drop(
+        drop_index_operation(&db, scope, &definition)
+            .await
+            .expect("partitioned drop enqueues"),
+    );
+    let three_rows = batch_limits(1024, 1024 * 1024, 3, 16 * 1024 * 1024);
+    let mut steps = 0;
+    loop {
+        let step = drive_one(&db, &driver, drop_id, &mut claim_sequence, three_rows).await;
+        steps += 1;
+        assert!(steps < 64, "partitioned drop exceeded its bounded steps");
+        let first_left = physical_keys(&db, scope, first).await;
+        let second_left = physical_keys(&db, scope, second).await;
+        let mappings_left = mapping_values(&db, scope, index_id, generation).await.len();
+        // Namespaces empty in mapping order, each from its first key on, and
+        // a mapping outlives its namespace by the step that proves it empty.
+        assert_eq!(
+            first_left,
+            first_keys[first_keys.len() - first_left.len()..]
+        );
+        assert_eq!(
+            second_left,
+            second_keys[second_keys.len() - second_left.len()..]
+        );
+        assert!(first_left.is_empty() || second_left == second_keys);
+        assert!(
+            mappings_left
+                >= usize::from(!first_left.is_empty()) + usize::from(!second_left.is_empty())
+        );
+        if step == CommittedOperationStep::Completed {
+            assert_eq!(mappings_left, 0);
+            break;
+        }
+        assert_eq!(step, CommittedOperationStep::Progressed);
+
+        // A position of the first namespace is no position in the second:
+        // the step scans the second from its start.
+        let operation = read_operation(&db, scope, drop_id).await;
+        let IndexOperationProgress::VectorCleanup(
+            progress @ VectorCleanupProgress::DeletePhysical(_),
+        ) = operation.progress()
+        else {
+            continue;
+        };
+        if mappings_left != 1 || second_left.is_empty() {
+            continue;
+        }
+        let ValidatedDynamicIndexDefinition::Vector(vector_definition) = &definition else {
+            unreachable!("fixture definition is vector");
+        };
+        let record = read_index(&db, scope, &definition).await;
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        let stepped = step_cleanup::<vector::distance::Euclidean>(
+            &transaction,
+            scope,
+            &operation,
+            &record,
+            vector_definition,
+            progress,
+            Some(&first_position),
+            false,
+            three_rows,
+            driver.cache_registry.as_ref(),
+        )
+        .await
+        .expect("a foreign position is ignored");
+        assert_eq!(
+            physical_keys(&transaction, scope, second).await,
+            second_left[3.min(second_left.len())..],
+            "the step deleted the second namespace's first rows"
+        );
+        assert!(
+            match &stepped.cleanup_resume {
+                Some(VectorCleanupResume::Physical(row)) => !first_index.owns_cleanup_row(row),
+                Some(VectorCleanupResume::Work(_)) => false,
+                None => true,
+            },
+            "the position handed on is in the namespace the step deleted from"
+        );
+        drop(transaction);
+    }
+    assert!(steps > 6, "each namespace took several steps");
+    assert!(matches!(
+        read_index(&db, scope, &definition).await.state(),
+        IndexStateV2::Dropped { .. }
+    ));
+    db.close().await.expect("vector test database closes");
+}
+
+/// Proves build-delta and applied-state cleanup resumes past the last row it
+/// deleted, in that row's prefix, and reports the rows exhausted only from a
+/// scan that started at the first prefix.
+pub(super) async fn delta_cleanup_resumes_past_deleted_rows_and_sweeps_before_finalizing() {
+    let db = test_db("vector-driver-cleanup-delta-resume").await;
+    let scope = DataScope::LegacyUnscoped;
+    let driver = driver();
+    let unpartitioned = definition(None);
+    for entity_id in 0..3 {
+        put_source(&db, scope, entity_id, &properties([1.0, 2.0, 3.0], None)).await;
+    }
+    let (build_id, index_id, generation) = create_build(&db, scope, &unpartitioned, 2).await;
+    let mut claim_sequence = 1;
+    let generous = 16 * 1024 * 1024;
+    assert_eq!(
+        drive_one(
+            &db,
+            &driver,
+            build_id,
+            &mut claim_sequence,
+            batch_limits(2, 1024 * 1024, 1024, generous),
+        )
+        .await,
+        CommittedOperationStep::Progressed
+    );
+    let delta_entity = IndexEntity {
+        kind: IndexElementKind::Node,
+        id: IndexEntityId::new(2),
+    };
+    let delta_key = scoped_index_key(
+        scope,
+        ScopedKey::BuildDelta(IndexEntityStateKey {
+            index_id,
+            generation,
+            entity: delta_entity,
+        }),
+    );
+    db.put(
+        &delta_key,
+        encode_build_delta(&CoalescedBuildDeltaValue {
+            index_id,
+            generation,
+            entity_kind: delta_entity.kind,
+            entity_id: delta_entity.id,
+            state: crate::index_lifecycle::work::CoalescedBuildDeltaState::Marker,
+        }),
+    )
+    .await
+    .expect("fixture delta is written");
+    assert!(matches!(
+        drop_index_operation(&db, scope, &unpartitioned)
+            .await
+            .expect("building vector converts to abort cleanup"),
+        IndexDdlReceipt::ExistingOperation { operation_id } if operation_id == build_id
+    ));
+    let operation = read_operation(&db, scope, build_id).await;
+    let applied = prefix_keys(
+        &db,
+        generation_prefix(scope, RecordKind::AppliedState, index_id, generation),
+    )
+    .await;
+    assert_eq!(applied.len(), 2, "one scanned batch applied two entities");
+    let one_row = batch_limits(1, 1024 * 1024, 1024, generous);
+    let all_rows = batch_limits(1024, 1024 * 1024, 1024, generous);
+    let outside = generation_prefix(
+        scope,
+        RecordKind::VectorPartitionMapping,
+        index_id,
+        generation,
+    );
+    // (position, limits) => (rows left, exhausted, position handed on):
+    // deltas sort before applied state.
+    for (resume, limits, left, exhausted, next) in [
+        // From the start, one row: the delta goes, the rest waits.
+        (None, one_row, applied.clone(), false, Some(&delta_key)),
+        // From the start, everything: only this reports the rows exhausted.
+        (None, all_rows, Vec::new(), true, None),
+        // Past the delta: the scan reaches the end without rereading it.
+        (
+            Some(&delta_key),
+            all_rows,
+            vec![delta_key.clone()],
+            false,
+            None,
+        ),
+        (
+            Some(&delta_key),
+            one_row,
+            vec![delta_key.clone(), applied[1].clone()],
+            false,
+            Some(&applied[0]),
+        ),
+        // Past an applied row: the delta prefix is not scanned at all.
+        (
+            Some(&applied[0]),
+            all_rows,
+            vec![delta_key.clone(), applied[0].clone()],
+            false,
+            None,
+        ),
+        (
+            Some(&applied[1]),
+            all_rows,
+            vec![delta_key.clone(), applied[0].clone(), applied[1].clone()],
+            false,
+            None,
+        ),
+        // A key of neither prefix is no position: the scan starts over.
+        (Some(&outside), all_rows, Vec::new(), true, None),
+    ] {
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        let CleanupWorkOutcome::Progress {
+            exhausted: reported,
+            resume: handed_on,
+            ..
+        } = delete_delta_and_applied_rows(
+            &transaction,
+            scope,
+            &operation,
+            resume,
+            OperationCounters::default(),
+            limits,
+        )
+        .await
+        .expect("delta cleanup batch plans")
+        else {
+            panic!("every fixture row fits the cleanup budgets");
+        };
+        let mut rows_left = prefix_keys(
+            &transaction,
+            generation_prefix(scope, RecordKind::BuildDelta, index_id, generation),
+        )
+        .await;
+        rows_left.extend(
+            prefix_keys(
+                &transaction,
+                generation_prefix(scope, RecordKind::AppliedState, index_id, generation),
+            )
+            .await,
+        );
+        assert_eq!(rows_left, left, "rows left resuming after {resume:?}");
+        assert_eq!(reported, exhausted, "exhaustion resuming after {resume:?}");
+        assert_eq!(handed_on.as_ref(), next, "position after {resume:?}");
+    }
+
+    // Through the outbox, one row per step: each step hands its row to the
+    // next, and the abort leaves nothing.
+    let mut positions = Vec::new();
+    loop {
+        let step = drive_one(&db, &driver, build_id, &mut claim_sequence, one_row).await;
+        if step == CommittedOperationStep::Completed {
+            break;
+        }
+        assert_eq!(step, CommittedOperationStep::Progressed);
+        assert!(positions.len() < 64, "abort exceeded its bounded steps");
+        positions.push(driver.cleanup_resume.lock().get(&build_id).cloned());
+    }
+    let work = positions
+        .iter()
+        .filter_map(|position| match position {
+            Some(VectorCleanupResume::Work(key)) => Some(key.clone()),
+            Some(VectorCleanupResume::Physical(_)) | None => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(work, [delta_key, applied[0].clone(), applied[1].clone()]);
+    assert!(driver.cleanup_resume.lock().is_empty());
+    for kind in [RecordKind::BuildDelta, RecordKind::AppliedState] {
+        assert!(
+            prefix_keys(&db, generation_prefix(scope, kind, index_id, generation))
+                .await
+                .is_empty()
+        );
+    }
+    assert!(matches!(
+        read_index(&db, scope, &unpartitioned).await.state(),
+        IndexStateV2::Dropped { .. }
+    ));
+    db.close().await.expect("vector test database closes");
+}
+
+/// Proves which steps fence graph writes: every abort step and a drop's
+/// completion do, and a drop's cache retirement and delete steps do not.
+///
+/// A graph transaction holds the scope's shared mutation permit, so a fenced
+/// step is one whose permit keeps that permit from being granted.
+pub(super) async fn drop_delete_steps_hold_no_write_fence_and_aborts_keep_theirs() {
+    let scope = DataScope::LegacyUnscoped;
+    let gates = Arc::new(IndexScopeGates::default());
+    let driver = VectorIndexDriver::new(
+        Arc::clone(&gates),
+        Arc::new(VectorCacheRegistry::default()),
+        Arc::new(SimHasherRegistry::default()),
+    );
+    let fenced = async |db: &Db, operation_id: IndexOperationId| {
+        let operation = read_operation(db, scope, operation_id).await;
+        let permit = driver
+            .acquire_step_permit(db, scope, &operation)
+            .await
+            .expect("step permit is granted");
+        let write = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            gates.mutation_permit(scope),
+        )
+        .await;
+        drop(permit);
+        (operation.progress().clone(), write.is_err())
+    };
+
+    let db = test_db("vector-driver-drop-gates").await;
+    let (drop_id, _, mut claim_sequence) = unpartitioned_drop(&db, &driver).await;
+    let mut stages = Vec::new();
+    loop {
+        let (progress, write_fenced) = fenced(&db, drop_id).await;
+        let IndexOperationProgress::VectorCleanup(stage) = progress else {
+            panic!("a drop runs cleanup stages");
+        };
+        stages.push(match stage {
+            VectorCleanupProgress::RetireCache(_) => ("retire_cache", write_fenced),
+            VectorCleanupProgress::DeletePhysical(_) => ("delete_physical", write_fenced),
+            VectorCleanupProgress::DeleteDeltas(_) => ("delete_deltas", write_fenced),
+            VectorCleanupProgress::Finalize(_) => ("finalize", write_fenced),
+        });
+        let step = drive_one(
+            &db,
+            &driver,
+            drop_id,
+            &mut claim_sequence,
+            batch_limits(1024, 1024 * 1024, 8, 16 * 1024 * 1024),
+        )
+        .await;
+        if step == CommittedOperationStep::Completed {
+            break;
+        }
+        assert_eq!(step, CommittedOperationStep::Progressed);
+    }
+    stages.dedup();
+    assert_eq!(
+        stages,
+        [
+            ("retire_cache", false),
+            ("delete_physical", false),
+            ("delete_deltas", false),
+            ("finalize", true),
+        ]
+    );
+    db.close().await.expect("vector test database closes");
+
+    let db = test_db("vector-driver-abort-gates").await;
+    let unpartitioned = definition(None);
+    for entity_id in 0..3 {
+        put_source(&db, scope, entity_id, &properties([1.0, 2.0, 3.0], None)).await;
+    }
+    let (build_id, _, _) = create_build(&db, scope, &unpartitioned, 2).await;
+    let mut claim_sequence = 1;
+    assert_eq!(
+        drive_one(
+            &db,
+            &driver,
+            build_id,
+            &mut claim_sequence,
+            batch_limits(2, 1024 * 1024, 1024, 16 * 1024 * 1024),
+        )
+        .await,
+        CommittedOperationStep::Progressed
+    );
+    drop_index_operation(&db, scope, &unpartitioned)
+        .await
+        .expect("building vector converts to abort cleanup");
+    let mut stages = Vec::new();
+    loop {
+        let (progress, write_fenced) = fenced(&db, build_id).await;
+        let IndexOperationProgress::VectorBuild(VectorBuildProgress::Aborting(stage)) = progress
+        else {
+            panic!("an aborted build runs cleanup stages");
+        };
+        stages.push(match stage {
+            VectorCleanupProgress::RetireCache(_) => ("retire_cache", write_fenced),
+            VectorCleanupProgress::DeletePhysical(_) => ("delete_physical", write_fenced),
+            VectorCleanupProgress::DeleteDeltas(_) => ("delete_deltas", write_fenced),
+            VectorCleanupProgress::Finalize(_) => ("finalize", write_fenced),
+        });
+        let step = drive_one(
+            &db,
+            &driver,
+            build_id,
+            &mut claim_sequence,
+            batch_limits(1, 1024 * 1024, 8, 16 * 1024 * 1024),
+        )
+        .await;
+        if step == CommittedOperationStep::Completed {
+            break;
+        }
+        assert_eq!(step, CommittedOperationStep::Progressed);
+    }
+    stages.dedup();
+    assert_eq!(
+        stages,
+        [
+            ("retire_cache", true),
+            ("delete_physical", true),
+            ("delete_deltas", true),
+            ("finalize", true),
+        ]
+    );
     db.close().await.expect("vector test database closes");
 }
 

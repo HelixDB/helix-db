@@ -283,6 +283,9 @@ pub(crate) enum CommittedStepState {
     /// Progress of an in-memory bulk vector graph that this step's commit
     /// makes true of the stored rows.
     VectorBulkBuild(super::vector::BulkBuildCommit),
+    /// Where a vector cleanup resumes once the deletes this step staged are
+    /// committed.
+    VectorCleanup(super::vector::VectorCleanupResume),
 }
 
 impl core::fmt::Debug for CommittedStepState {
@@ -290,6 +293,7 @@ impl core::fmt::Debug for CommittedStepState {
         match self {
             Self::VectorBuild(_) => formatter.write_str("CommittedStepState::VectorBuild"),
             Self::VectorBulkBuild(_) => formatter.write_str("CommittedStepState::VectorBulkBuild"),
+            Self::VectorCleanup(_) => formatter.write_str("CommittedStepState::VectorCleanup"),
         }
     }
 }

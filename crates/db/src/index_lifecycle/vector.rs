@@ -38,7 +38,7 @@ pub(crate) mod publication;
 pub(crate) use driver::StatusGate;
 pub(crate) use driver::{
     BulkBuildCommit, OfferedVectorBuild, PublicationBacklog, VectorBuildCache, VectorBuildReports,
-    VectorIndexDriver, MAX_RETAINED_PUBLICATIONS,
+    VectorCleanupResume, VectorIndexDriver, MAX_RETAINED_PUBLICATIONS,
 };
 
 /// Validated vector and its canonical physical-partition identity.

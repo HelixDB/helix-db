@@ -32,6 +32,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use parking_lot::Mutex;
 use rand::{rngs::StdRng, SeedableRng};
 use sha2::{Digest, Sha256};
 use slatedb::{Db, DbTransaction, IsolationLevel};
@@ -106,6 +107,29 @@ pub(crate) struct VectorIndexDriver {
     build_cache: Arc<VectorBuildCache>,
     /// In-memory graphs of the source scans that build in bulk.
     bulk: bulk::BulkBuilds,
+    /// Where each cleanup or abort operation's next delete step resumes.
+    ///
+    /// An entry is set only by [`IndexOperationDriver::after_commit`], from
+    /// the step that committed, and removed once the operation leaves its
+    /// queue, so the map holds at most one key per running cleanup.
+    cleanup_resume: Mutex<HashMap<IndexOperationId, VectorCleanupResume>>,
+}
+
+/// Process-local position a cleanup operation's next delete step resumes at.
+///
+/// Every row at or before the position, in the scan order of the stage that
+/// produced it, was deleted by a committed step of the same operation. It is
+/// never persisted: a restart, a blocked step, or a position that does not
+/// name the namespace or stage the next step runs in is simply no position,
+/// and that step scans from the start. A stage is left only by a scan from
+/// the start that finds nothing more to delete, so a lost, stale, or wrong
+/// position can cost a rescan but never leave a row behind.
+#[derive(Debug, Clone)]
+pub(crate) enum VectorCleanupResume {
+    /// The last physical row deleted in one vector namespace.
+    Physical(VectorCleanupRow),
+    /// The key of the last build-delta or applied-state row deleted.
+    Work(Bytes),
 }
 
 /// Exact durable checkpoint a retained build planning cache mirrors.
@@ -1023,6 +1047,7 @@ impl VectorIndexDriver {
                 0,
                 crate::index_lifecycle::worker::IndexWorkerWakeHandle::default(),
             ),
+            cleanup_resume: Mutex::default(),
         }
     }
 
@@ -1126,9 +1151,43 @@ impl IndexOperationDriver for VectorIndexDriver {
                     VectorBuildStage::Activate(_) => StepGate::Lifecycle,
                 }
             }
-            // Abort and cleanup delete rows of a generation that is not Active.
-            IndexOperationProgress::VectorBuild(VectorBuildProgress::Aborting(_))
-            | IndexOperationProgress::VectorCleanup(_) => StepGate::WriteFence,
+            // Abort deletes rows of a generation that is not Active.
+            IndexOperationProgress::VectorBuild(VectorBuildProgress::Aborting(_)) => {
+                StepGate::WriteFence
+            }
+            // A drop deletes the rows of a Dropping generation, which nothing
+            // else writes, so its delete steps hold no scope gate and graph
+            // writes run through them:
+            //
+            // - A graph transaction scans the scope's index records inside
+            //   its own serializable transaction and routes only to Building
+            //   and Active generations (`MutationIndexCatalog::load`). One
+            //   that read the generation as Active conflicts with the commit
+            //   that made it Dropping; a later one stages nothing for it.
+            // - Queue publication writes physical rows only after reading
+            //   the record as Active in its own serializable transaction
+            //   (`publish_vector`), and it holds the generation's publication
+            //   permit, which every step here also holds. For a retired
+            //   generation it only acknowledges queue rows, which cleanup
+            //   never reads.
+            // - Dropping is left only by this operation's own completion,
+            //   and the index is recreated, as a new generation with new
+            //   physical ids, only once it is Dropped.
+            //
+            // Each delete step still scans in a serializable transaction, so
+            // a row written into its range by anything else would fail its
+            // commit rather than be left behind.
+            IndexOperationProgress::VectorCleanup(
+                VectorCleanupProgress::RetireCache(_)
+                | VectorCleanupProgress::DeletePhysical(_)
+                | VectorCleanupProgress::DeleteDeltas(_),
+            ) => StepGate::None,
+            // Completion rewrites the index record every graph transaction
+            // reads: fencing waits out the ones in flight instead of failing
+            // them with a conflict.
+            IndexOperationProgress::VectorCleanup(VectorCleanupProgress::Finalize(_)) => {
+                StepGate::WriteFence
+            }
             IndexOperationProgress::SecondaryBuild(_)
             | IndexOperationProgress::TextBuild(_)
             | IndexOperationProgress::SecondaryCleanup(_)
@@ -1250,6 +1309,11 @@ impl IndexOperationDriver for VectorIndexDriver {
                         ));
                     }
                 };
+                let resume = self
+                    .cleanup_resume
+                    .lock()
+                    .get(&operation.operation_id())
+                    .cloned();
                 match definition.metric() {
                     VectorDistanceMetric::Cosine => {
                         step_cleanup::<vector::distance::Cosine>(
@@ -1259,6 +1323,7 @@ impl IndexOperationDriver for VectorIndexDriver {
                             &record,
                             definition,
                             progress,
+                            resume.as_ref(),
                             aborting,
                             limits,
                             &self.cache_registry,
@@ -1273,6 +1338,7 @@ impl IndexOperationDriver for VectorIndexDriver {
                             &record,
                             definition,
                             progress,
+                            resume.as_ref(),
                             aborting,
                             limits,
                             &self.cache_registry,
@@ -1287,6 +1353,7 @@ impl IndexOperationDriver for VectorIndexDriver {
                             &record,
                             definition,
                             progress,
+                            resume.as_ref(),
                             aborting,
                             limits,
                             &self.cache_registry,
@@ -1328,12 +1395,14 @@ impl IndexOperationDriver for VectorIndexDriver {
         committed: CommittedOperationStep,
         state: Option<CommittedStepState>,
     ) {
-        let state = match state {
+        let (state, resume) = match state {
             Some(CommittedStepState::VectorBulkBuild(commit)) => {
                 self.bulk.confirm(operation.operation_id(), commit).await;
-                None
+                (None, None)
             }
-            state @ (Some(CommittedStepState::VectorBuild(_)) | None) => state,
+            Some(CommittedStepState::VectorCleanup(resume)) => (None, Some(resume)),
+            Some(state @ CommittedStepState::VectorBuild(_)) => (Some(state), None),
+            None => (None, None),
         };
         // A retry starts from the stored rows, which a blocked bulk build
         // must delete before it can link them again.
@@ -1343,6 +1412,24 @@ impl IndexOperationDriver for VectorIndexDriver {
         self.build_cache
             .after_commit(operation.operation_id(), committed, state)
             .await;
+        {
+            let mut positions = self.cleanup_resume.lock();
+            match (committed, resume) {
+                (CommittedOperationStep::Progressed, Some(resume)) => {
+                    positions.insert(operation.operation_id(), resume);
+                }
+                // The step left no position, or the operation left its queue.
+                (CommittedOperationStep::Progressed, None)
+                | (
+                    CommittedOperationStep::TransientFailure
+                    | CommittedOperationStep::Blocked
+                    | CommittedOperationStep::Completed,
+                    _,
+                ) => {
+                    positions.remove(&operation.operation_id());
+                }
+            }
+        }
         // Cleanup runs only on a retired generation, which publication never
         // writes again.
         if matches!(
@@ -1416,6 +1503,7 @@ async fn step_cleanup<D: Distance>(
     record: &IndexRecordV2,
     definition: &ValidatedVectorIndexDefinition,
     progress: &VectorCleanupProgress,
+    resume: Option<&VectorCleanupResume>,
     aborting: bool,
     limits: SearchIndexBatchLimits,
     cache_registry: &vector::VectorCacheRegistry,
@@ -1434,16 +1522,25 @@ async fn step_cleanup<D: Distance>(
     ) {
         cache_registry.retire_cleanup_generation(&authority).await;
     }
-    let next = match progress {
+    // The persisted progress and the position each step hands to the next
+    // once it commits.
+    let (next, resume) = match progress {
         VectorCleanupProgress::RetireCache(progress) => {
             cache_registry.retire_cleanup_generation(&authority).await;
-            VectorCleanupProgress::DeletePhysical(PrefixScanProgress {
-                cursor: None,
-                counters: progress.counters,
-            })
+            (
+                VectorCleanupProgress::DeletePhysical(PrefixScanProgress {
+                    cursor: None,
+                    counters: progress.counters,
+                }),
+                None,
+            )
         }
         VectorCleanupProgress::DeletePhysical(progress) => match authority.layout() {
             VectorPhysicalLayout::Unpartitioned { physical_index_id } => {
+                let physical_resume = match resume {
+                    Some(VectorCleanupResume::Physical(row)) => Some(row),
+                    Some(VectorCleanupResume::Work(_)) | None => None,
+                };
                 if progress.cursor.is_some() {
                     return Err(corruption(
                         "unpartitioned vector cleanup retained a mapping cursor",
@@ -1553,7 +1650,7 @@ async fn step_cleanup<D: Distance>(
                     transaction,
                     &handle,
                     None,
-                    None,
+                    physical_resume,
                     definition.element_kind(),
                     progress.counters,
                     limits,
@@ -1570,19 +1667,27 @@ async fn step_cleanup<D: Distance>(
                         namespace_empty: true,
                         mapping_deleted: false,
                         ..
-                    } => VectorCleanupProgress::DeleteDeltas(PrefixScanProgress {
-                        cursor: None,
-                        counters,
-                    }),
+                    } => (
+                        VectorCleanupProgress::DeleteDeltas(PrefixScanProgress {
+                            cursor: None,
+                            counters,
+                        }),
+                        None,
+                    ),
+                    // The persisted cursor stays unset: this layout has no
+                    // mapping, and the row position is process-local.
                     PhysicalCleanupOutcome::Progress {
                         counters,
                         namespace_empty: false,
                         mapping_deleted: false,
-                        ..
-                    } => VectorCleanupProgress::DeletePhysical(PrefixScanProgress {
-                        cursor: None,
-                        counters,
-                    }),
+                        resume,
+                    } => (
+                        VectorCleanupProgress::DeletePhysical(PrefixScanProgress {
+                            cursor: None,
+                            counters,
+                        }),
+                        resume.map(VectorCleanupResume::Physical),
+                    ),
                     PhysicalCleanupOutcome::Progress {
                         mapping_deleted: true,
                         ..
@@ -1594,6 +1699,10 @@ async fn step_cleanup<D: Distance>(
                 }
             }
             VectorPhysicalLayout::Partitioned => {
+                let physical_resume = match resume {
+                    Some(VectorCleanupResume::Physical(row)) => Some(row),
+                    Some(VectorCleanupResume::Work(_)) | None => None,
+                };
                 let mapping = current_or_next_mapping(
                     transaction,
                     scope,
@@ -1617,7 +1726,7 @@ async fn step_cleanup<D: Distance>(
                     transaction,
                     &handle,
                     Some(&mapping),
-                    None,
+                    physical_resume,
                     definition.element_kind(),
                     progress.counters,
                     limits,
@@ -1629,12 +1738,15 @@ async fn step_cleanup<D: Distance>(
                             IndexOperationStepResult::Blocked(blocker),
                         ));
                     }
-                    PhysicalCleanupOutcome::Progress { counters, .. } => {
+                    PhysicalCleanupOutcome::Progress {
+                        counters, resume, ..
+                    } => (
                         VectorCleanupProgress::DeletePhysical(PrefixScanProgress {
                             cursor: Some(mapping.cursor),
                             counters,
-                        })
-                    }
+                        }),
+                        resume.map(VectorCleanupResume::Physical),
+                    ),
                 }
             }
         },
@@ -1649,7 +1761,10 @@ async fn step_cleanup<D: Distance>(
                 scope,
                 operation,
                 &[RecordKind::BuildDelta, RecordKind::AppliedState],
-                None,
+                match resume {
+                    Some(VectorCleanupResume::Work(key)) => Some(key),
+                    Some(VectorCleanupResume::Physical(_)) | None => None,
+                },
                 progress.counters,
                 limits,
             )
@@ -1663,16 +1778,22 @@ async fn step_cleanup<D: Distance>(
                 CleanupWorkOutcome::Progress {
                     counters,
                     exhausted: false,
-                    resume: _,
-                } => VectorCleanupProgress::DeleteDeltas(PrefixScanProgress {
-                    cursor: None,
-                    counters,
-                }),
+                    resume,
+                } => (
+                    VectorCleanupProgress::DeleteDeltas(PrefixScanProgress {
+                        cursor: None,
+                        counters,
+                    }),
+                    resume.map(VectorCleanupResume::Work),
+                ),
                 CleanupWorkOutcome::Progress {
                     counters,
                     exhausted: true,
                     resume: _,
-                } => VectorCleanupProgress::Finalize(NoCursorProgress { counters }),
+                } => (
+                    VectorCleanupProgress::Finalize(NoCursorProgress { counters }),
+                    None,
+                ),
             }
         }
         VectorCleanupProgress::Finalize(_) => {
@@ -1707,9 +1828,9 @@ async fn step_cleanup<D: Distance>(
             ));
         }
     };
-    Ok(VectorStepResult::ordinary(progressed_cleanup(
-        aborting, next,
-    )))
+    let mut step = VectorStepResult::ordinary(progressed_cleanup(aborting, next));
+    step.committed = resume.map(CommittedStepState::VectorCleanup);
+    Ok(step)
 }
 
 /// One partition mapping retained until its physical namespace is empty.
@@ -4811,6 +4932,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unpartitioned_drop_resumes_past_deleted_rows_and_sweeps_before_leaving() {
+        super::driver_contracts::unpartitioned_drop_resumes_past_deleted_rows_and_sweeps_before_leaving()
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_drop_that_loses_its_position_rescans_from_the_start() {
+        super::driver_contracts::a_drop_that_loses_its_position_rescans_from_the_start().await;
+    }
+
+    #[tokio::test]
+    async fn partitioned_drop_resumes_within_each_namespace() {
+        super::driver_contracts::partitioned_drop_resumes_within_each_namespace().await;
+    }
+
+    #[tokio::test]
+    async fn delta_cleanup_resumes_past_deleted_rows_and_sweeps_before_finalizing() {
+        super::driver_contracts::delta_cleanup_resumes_past_deleted_rows_and_sweeps_before_finalizing()
+            .await;
+    }
+
+    #[tokio::test]
+    async fn drop_delete_steps_hold_no_write_fence_and_aborts_keep_theirs() {
+        super::driver_contracts::drop_delete_steps_hold_no_write_fence_and_aborts_keep_theirs()
+            .await;
+    }
+
+    #[tokio::test]
     async fn source_scan_rejects_every_preplanning_boundary() {
         super::driver_contracts::source_scan_rejects_every_preplanning_boundary().await;
     }
@@ -5280,6 +5429,10 @@ mod tests {
         assert_eq!(counters.output_operations, 1);
         assert!(!namespace_empty);
         assert!(!mapping_deleted);
+        assert!(
+            index.owns_cleanup_row(&first_row),
+            "a batch that stops early hands on the row it deleted last"
+        );
         drop(limited_cleanup_transaction);
 
         // A scan resumed behind that row deletes every row after it and has
@@ -5317,7 +5470,7 @@ mod tests {
             counters,
             namespace_empty,
             mapping_deleted,
-            resume: _,
+            resume,
         } = delete_physical_namespace::<vector::distance::Euclidean>(
             &cleanup_transaction,
             &generation,
@@ -5334,6 +5487,10 @@ mod tests {
         };
         assert!(namespace_empty);
         assert!(!mapping_deleted);
+        assert!(
+            resume.is_none(),
+            "an emptied namespace hands on no position"
+        );
         assert!(
             counters.entities
                 > u64::try_from(one_entity.max_entities().get())
