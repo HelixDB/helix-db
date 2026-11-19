@@ -1093,6 +1093,7 @@ pub(super) async fn pre_queue_build_deltas_block_catch_up_validation_and_activat
                 record,
                 vector_definition,
                 &stage,
+                AppliedStateCheck::InTransaction,
                 SearchIndexBackfillLimits::default().batch(),
                 IndexLifecycleScanTuning::default(),
                 registry,
@@ -1967,6 +1968,7 @@ async fn activation_result(
         record,
         definition,
         &VectorBuildStage::Activate(NoCursorProgress::default()),
+        AppliedStateCheck::InTransaction,
         SearchIndexBackfillLimits::default().batch(),
         IndexLifecycleScanTuning::default(),
         Arc::clone(&driver.simhasher_registry),
@@ -2957,6 +2959,137 @@ pub(super) async fn drop_delete_steps_hold_no_write_fence_and_aborts_keep_theirs
             ("finalize", true),
         ]
     );
+    db.close().await.expect("vector test database closes");
+}
+
+/// Proves activation looks for applied state before it takes its permit, not
+/// again under it, and still goes back to validation when some is left.
+///
+/// The activation permit stops planning and every writer, and a scan of the
+/// applied-state prefix steps over every row validation deleted, so the step
+/// must not read the prefix while it holds the permit.
+pub(super) async fn activation_looks_for_applied_state_before_its_permit() {
+    let db = test_db("vector-driver-activation-applied-state").await;
+    let scope = DataScope::LegacyUnscoped;
+    let definition = definition(None);
+    for entity_id in 0..3 {
+        put_source(&db, scope, entity_id, &properties([1.0, 2.0, 3.0], None)).await;
+    }
+    let (build_id, index_id, generation) = create_build(&db, scope, &definition, 2).await;
+    let driver = driver();
+    let limits = SearchIndexBackfillLimits::default().batch();
+    let mut claim_sequence = 1;
+    let applied_prefix = generation_prefix(scope, RecordKind::AppliedState, index_id, generation);
+    let activating = async |db: &Db| {
+        matches!(
+            read_operation(db, scope, build_id).await.progress(),
+            IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+                VectorBuildStage::Activate(_)
+            ))
+        )
+    };
+    // One applied-state row of the build, kept to put back at activation.
+    let mut applied = None;
+    for _ in 0..64 {
+        if activating(&db).await {
+            break;
+        }
+        assert_eq!(
+            drive_one(&db, &driver, build_id, &mut claim_sequence, limits).await,
+            CommittedOperationStep::Progressed
+        );
+        let mut rows = db.scan_prefix(&applied_prefix, ..).await.unwrap();
+        if let Some(row) = rows.next().await.unwrap() {
+            applied = Some((row.key, row.value));
+        }
+    }
+    assert!(activating(&db).await, "the build reached activation");
+    let (applied_key, applied_value) = applied.expect("the scan applied its entities");
+    assert!(prefix_keys(&db, applied_prefix.clone()).await.is_empty());
+
+    // Applied state left at activation: its preparation finds it, and the
+    // step sends the build back to validation, which releases the row.
+    db.put(&applied_key, &applied_value).await.unwrap();
+    assert_eq!(
+        drive_one(&db, &driver, build_id, &mut claim_sequence, limits).await,
+        CommittedOperationStep::Progressed
+    );
+    assert!(matches!(
+        read_operation(&db, scope, build_id).await.progress(),
+        IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+            VectorBuildStage::ValidateDescriptor(_)
+        ))
+    ));
+    assert!(driver.activations_without_applied_state.lock().is_empty());
+    for _ in 0..64 {
+        if activating(&db).await {
+            break;
+        }
+        assert_eq!(
+            drive_one(&db, &driver, build_id, &mut claim_sequence, limits).await,
+            CommittedOperationStep::Progressed
+        );
+    }
+    assert!(prefix_keys(&db, applied_prefix.clone()).await.is_empty());
+
+    // None left: the preparation records that before taking the permit. A
+    // row put back afterwards, which no writer can do while the build owns
+    // its generation, goes unseen: the step does not read the prefix again.
+    let operation = read_operation(&db, scope, build_id).await;
+    let prepared = driver
+        .prepare_step(&db, scope, &operation, limits)
+        .await
+        .expect("activation prepares");
+    assert!(driver
+        .activations_without_applied_state
+        .lock()
+        .contains(&build_id));
+    db.put(&applied_key, &applied_value).await.unwrap();
+    let transaction = db
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+    assert!(matches!(
+        driver
+            .step(&db, &transaction, scope, &operation, limits)
+            .await
+            .expect("prepared activation stages")
+            .result(),
+        IndexOperationStepResult::Completed(IndexOperationOutcome::Build(
+            BuildOperationOutcome::Succeeded
+        ))
+    ));
+    drop(transaction);
+    // The observation belonged to that step alone: one that was not prepared
+    // with it scans in its transaction and finds the row.
+    assert!(driver.activations_without_applied_state.lock().is_empty());
+    let transaction = db
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+    assert!(matches!(
+        driver
+            .step(&db, &transaction, scope, &operation, limits)
+            .await
+            .expect("unprepared activation stages")
+            .result(),
+        IndexOperationStepResult::Progressed(IndexOperationProgress::VectorBuild(
+            VectorBuildProgress::Constructing(VectorBuildStage::ValidateDescriptor(_))
+        ))
+    ));
+    drop(transaction);
+    drop(prepared);
+
+    db.delete(&applied_key).await.unwrap();
+    assert_eq!(
+        drive_to_terminal(&db, &driver, build_id, &mut claim_sequence).await,
+        CommittedOperationStep::Completed
+    );
+    assert!(matches!(
+        read_index(&db, scope, &definition).await.state(),
+        IndexStateV2::Active { .. }
+    ));
+    assert!(driver.activations_without_applied_state.lock().is_empty());
     db.close().await.expect("vector test database closes");
 }
 

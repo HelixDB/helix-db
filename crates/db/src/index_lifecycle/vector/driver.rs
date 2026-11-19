@@ -24,7 +24,7 @@
 //! [`crate::search::vector::VectorIndex`] and the typed `encoding/v2` boundary.
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU64;
 use std::ops::Bound;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -114,6 +114,21 @@ pub(crate) struct VectorIndexDriver {
     /// hands on none, blocks, or completes the operation. The map therefore
     /// holds at most one key per cleanup this writer has not finished.
     cleanup_resume: Mutex<HashMap<IndexOperationId, VectorCleanupResume>>,
+    /// Builds whose activation step was prepared with no applied state left.
+    ///
+    /// [`IndexOperationDriver::prepare_step`] sets or clears an operation's
+    /// entry before every activation step, and the operation's next step
+    /// takes it, so an entry never outlives the step it was prepared for.
+    activations_without_applied_state: Mutex<HashSet<IndexOperationId>>,
+}
+
+/// What an activation step knows about its generation's applied state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppliedStateCheck {
+    /// The step's preparation found none before it took its permit.
+    EmptyAtPreparation,
+    /// Nothing was observed for this step: it scans in its transaction.
+    InTransaction,
 }
 
 /// Process-local position a cleanup operation's next delete step resumes at.
@@ -1049,6 +1064,7 @@ impl VectorIndexDriver {
                 crate::index_lifecycle::worker::IndexWorkerWakeHandle::default(),
             ),
             cleanup_resume: Mutex::default(),
+            activations_without_applied_state: Mutex::default(),
         }
     }
 
@@ -1206,6 +1222,35 @@ impl IndexOperationDriver for VectorIndexDriver {
         operation: &IndexOperationRecord,
         _limits: SearchIndexBatchLimits,
     ) -> Result<PreparedIndexOperationStep> {
+        // Activation goes back to validation if the generation still holds
+        // applied state. A scan of that prefix steps over every row
+        // validation deleted, one per indexed entity, so it runs here,
+        // before the permit stops planning and every writer for that long.
+        // Only this build's own steps write the prefix (publication stages
+        // none, see `AppliedStateTransition`), and they hold the generation's
+        // ownership one at a time, so a prefix empty now is still empty when
+        // the step commits.
+        if matches!(
+            operation.progress(),
+            IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+                VectorBuildStage::Activate(_)
+            ))
+        ) {
+            let empty = !generation_has_rows(
+                db,
+                scope,
+                RecordKind::AppliedState,
+                operation.index_id(),
+                operation.generation(),
+            )
+            .await?;
+            let mut prepared = self.activations_without_applied_state.lock();
+            if empty {
+                prepared.insert(operation.operation_id());
+            } else {
+                prepared.remove(&operation.operation_id());
+            }
+        }
         let permit = self.acquire_step_permit(db, scope, operation).await?;
         Ok(PreparedIndexOperationStep::driver_owned(
             self.family(),
@@ -1221,6 +1266,17 @@ impl IndexOperationDriver for VectorIndexDriver {
         operation: &IndexOperationRecord,
         limits: SearchIndexBatchLimits,
     ) -> Result<IndexOperationStepExecution> {
+        // Taken by whichever step runs next, so only the step prepared with
+        // the observation can use it.
+        let applied_state = if self
+            .activations_without_applied_state
+            .lock()
+            .remove(&operation.operation_id())
+        {
+            AppliedStateCheck::EmptyAtPreparation
+        } else {
+            AppliedStateCheck::InTransaction
+        };
         let record = load_operation_index(transaction, scope, operation).await?;
         let ValidatedDynamicIndexDefinition::Vector(definition) = record.definition() else {
             return Err(corruption("vector operation loaded another family"));
@@ -1246,6 +1302,7 @@ impl IndexOperationDriver for VectorIndexDriver {
                             &record,
                             definition,
                             stage,
+                            applied_state,
                             limits,
                             self.scan_tuning,
                             Arc::clone(&self.simhasher_registry),
@@ -1264,6 +1321,7 @@ impl IndexOperationDriver for VectorIndexDriver {
                             &record,
                             definition,
                             stage,
+                            applied_state,
                             limits,
                             self.scan_tuning,
                             Arc::clone(&self.simhasher_registry),
@@ -1282,6 +1340,7 @@ impl IndexOperationDriver for VectorIndexDriver {
                             &record,
                             definition,
                             stage,
+                            applied_state,
                             limits,
                             self.scan_tuning,
                             Arc::clone(&self.simhasher_registry),
@@ -2432,6 +2491,7 @@ async fn step_build<D: Distance>(
     record: &IndexRecordV2,
     definition: &ValidatedVectorIndexDefinition,
     stage: &VectorBuildStage,
+    applied_state: AppliedStateCheck,
     limits: SearchIndexBatchLimits,
     scan_tuning: IndexLifecycleScanTuning,
     simhasher_registry: Arc<vector::SimHasherRegistry>,
@@ -2666,14 +2726,15 @@ where
                     IndexOperationStepResult::Blocked(IndexOperationBlocker::InvariantViolation),
                 ));
             }
-            if generation_has_rows(
-                transaction,
-                scope,
-                RecordKind::AppliedState,
-                operation.index_id(),
-                operation.generation(),
-            )
-            .await?
+            if applied_state == AppliedStateCheck::InTransaction
+                && generation_has_rows(
+                    transaction,
+                    scope,
+                    RecordKind::AppliedState,
+                    operation.index_id(),
+                    operation.generation(),
+                )
+                .await?
             {
                 return Ok(VectorStepResult::ordinary(progressed_build(
                     VectorBuildStage::ValidateDescriptor(PrefixScanProgress {
@@ -4611,14 +4672,14 @@ async fn load_operation_index(
 }
 
 async fn generation_has_rows(
-    transaction: &DbTransaction,
+    read: &(impl slatedb::DbReadOps + Sync),
     scope: DataScope,
     kind: RecordKind,
     index_id: IndexId,
     generation: IndexGenerationId,
 ) -> Result<bool> {
     let prefix = generation_prefix(scope, kind, index_id, generation);
-    let mut rows = transaction.scan_prefix(prefix, ..).await?;
+    let mut rows = read.scan_prefix(prefix, ..).await?;
     Ok(rows.next().await?.is_some())
 }
 
@@ -4953,6 +5014,11 @@ mod tests {
     async fn drop_delete_steps_hold_no_write_fence_and_aborts_keep_theirs() {
         super::driver_contracts::drop_delete_steps_hold_no_write_fence_and_aborts_keep_theirs()
             .await;
+    }
+
+    #[tokio::test]
+    async fn activation_looks_for_applied_state_before_its_permit() {
+        super::driver_contracts::activation_looks_for_applied_state_before_its_permit().await;
     }
 
     #[tokio::test]
