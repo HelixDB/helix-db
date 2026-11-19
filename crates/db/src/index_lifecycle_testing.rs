@@ -904,8 +904,10 @@ impl LifecycleTestController {
     ///
     /// This test-only setup boundary reserves IDs through the production
     /// allocator and serializes rows through the canonical typed codecs. It
-    /// deliberately does not maintain indexes, so callers must invoke it only
-    /// before accepting the index build whose source snapshot they are testing.
+    /// keeps each row's label bitmap, as a graph write does, since builds read
+    /// their label's rows through it, but deliberately maintains no index, so
+    /// callers must invoke it only before accepting the index build whose
+    /// source snapshot they are testing.
     pub async fn seed_node_property_rows<F>(
         &self,
         db: &HelixDB,
@@ -931,14 +933,24 @@ impl LifecycleTestController {
             let batch_end = ids.end.min(batch_start.saturating_add(batch_rows));
             let transaction = writer.db().begin(slatedb::IsolationLevel::Snapshot).await?;
             for entity_id in batch_start..batch_end {
+                let properties = properties(entity_id);
                 transaction.put(
                     DataKey::Data {
                         scope,
                         kind: DataKeyKind::NodeProperty(NodePropertyKey::new(entity_id)),
                     }
                     .to_bytes(),
-                    encode_properties(&properties(entity_id)),
+                    encode_properties(&properties),
                 )?;
+                crate::index_lifecycle::label_source::testing::stage_labels(
+                    &transaction,
+                    scope,
+                    crate::index_lifecycle::IndexElementKind::Node,
+                    entity_id,
+                    &[],
+                    &properties,
+                )
+                .await;
             }
             transaction.commit().await?;
             batch_start = batch_end;
@@ -1011,6 +1023,15 @@ impl LifecycleTestController {
                     .to_bytes(),
                     encode_properties(&properties),
                 )?;
+                crate::index_lifecycle::label_source::testing::stage_labels(
+                    &transaction,
+                    scope,
+                    crate::index_lifecycle::IndexElementKind::Node,
+                    entity_id,
+                    &[],
+                    &properties,
+                )
+                .await;
             }
             let committed = transaction.commit().await;
             db.inner.index_scope_gates.delta_ledgers().record(staged);

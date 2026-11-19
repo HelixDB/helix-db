@@ -725,12 +725,19 @@ async fn seed_scope(
         for offset in batch_start..batch_end {
             let entity_id =
                 u64::try_from(start_id.saturating_add(offset)).expect("scale entity id fits u64");
+            let properties = properties(entity_id);
             transaction
-                .put(
-                    source_key(scope, entity_id),
-                    encode_properties(&properties(entity_id)),
-                )
+                .put(source_key(scope, entity_id), encode_properties(&properties))
                 .expect("scale source row stages");
+            crate::index_lifecycle::label_source::testing::stage_labels(
+                &transaction,
+                scope,
+                crate::index_lifecycle::IndexElementKind::Node,
+                entity_id,
+                &[],
+                &properties,
+            )
+            .await;
         }
         transaction
             .commit()
@@ -1610,12 +1617,22 @@ pub(super) async fn run_traversal_vector_prefilter() {
             .expect("traversal seed transaction opens");
         for entity_id in batch_start..batch_end {
             let entity_id = u64::try_from(entity_id).expect("traversal entity ID fits u64");
+            let properties = traversal_properties(entity_id, vectors.get(entity_id));
             transaction
                 .put(
                     source_key(DataScope::LegacyUnscoped, entity_id),
-                    encode_properties(&traversal_properties(entity_id, vectors.get(entity_id))),
+                    encode_properties(&properties),
                 )
                 .expect("traversal source row stages");
+            crate::index_lifecycle::label_source::testing::stage_labels(
+                &transaction,
+                DataScope::LegacyUnscoped,
+                crate::index_lifecycle::IndexElementKind::Node,
+                entity_id,
+                &[],
+                &properties,
+            )
+            .await;
             let mut edges = Edges::new();
             edges.add_out(
                 (entity_id
@@ -1847,12 +1864,22 @@ pub(super) async fn run_traversal_vector_prefilter_1m() {
         for entity_id in batch_start..batch_end {
             let entity_id =
                 u64::try_from(entity_id).expect("million-row traversal entity ID fits u64");
+            let properties = traversal_1m_properties(entity_id, vectors.get(entity_id));
             transaction
                 .put(
                     source_key(DataScope::LegacyUnscoped, entity_id),
-                    encode_properties(&traversal_1m_properties(entity_id, vectors.get(entity_id))),
+                    encode_properties(&properties),
                 )
                 .expect("million-row traversal source row stages");
+            crate::index_lifecycle::label_source::testing::stage_labels(
+                &transaction,
+                DataScope::LegacyUnscoped,
+                crate::index_lifecycle::IndexElementKind::Node,
+                entity_id,
+                &[],
+                &properties,
+            )
+            .await;
             let mut edges = Edges::new();
             edges.add_out(
                 (entity_id
