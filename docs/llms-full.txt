@@ -6964,7 +6964,9 @@ Before this, `date_time` parameters were stored as their raw strings. A writer t
 converts it once in the background: each property whose every value is a datetime or an RFC3339
 string with at most millisecond precision becomes datetimes, and any other property is left as
 stored and named in the server log. That conversion runs once: rows imported later through a bare
-`object` keep their strings, so declare their `date_time` fields.
+`object` keep their strings, so declare their `date_time` fields. While it runs, a property holds
+both forms: a datetime filter skips the rows not converted yet, and a text filter skips the rows
+already converted.
 
 After the conversion, a Cypher or SQL filter that compares such a property with text matches
 nothing, because text is never read as a datetime: the comparison is null, with or without an
@@ -8114,10 +8116,18 @@ as text. The same holds at any depth inside lists and maps, for pattern
 properties such as `{at: '…'}`, and for joins and lookups that compare two
 stored values. Indexes never change the result: a scan, an equality or range
 index on the property, and an index on another property in the same `WHERE`
-all return the same rows. When both sides' types are known, such as
-`datetime() > '2026-01-01'` or a datetime parameter against a string literal,
-the query fails before anything runs with `type_error`
-(`datetime_text_comparison`).
+all return the same rows.
+
+When both types are known before the query runs, it fails instead, with
+`type_error` (`datetime_text_comparison`). This applies to a comparison or
+text match (`datetime() > '2026-01-01'`), an `IN` member
+(`datetime() IN ['2026-01-01']`), and a simple `CASE` value against its
+subject (`CASE datetime() WHEN '2026-01-01' THEN …`). A parameter's type is
+known from its bound value when the parameter is compared directly
+(`$at = '…'`), through a property of a map parameter (`$obj.at`), or through a
+variable set from either (`WITH $at AS a`). Any other operand built from a
+parameter, such as `UNWIND $dates AS d` or `coalesce($at, …)`, runs and
+compares as null.
 
 The store has no schema, so a `SET` of text, such as
 `SET e.at = '2026-06-01T00:00:00Z'`, stores text even where the property
@@ -8690,12 +8700,15 @@ A timestamp column never compares with text: unlike PostgreSQL,
 so it [matches no row](/database/helix-db/query-guides/cypher#datetimes)
 holding a timestamp, with or without an index, and so is a string parameter's.
 Write `e.at > TIMESTAMP '2026-01-01'` or `e.at > CAST(? AS TIMESTAMP)`. When
-both sides' types are known, such as `TIMESTAMP '2026-01-01' = '2026-01-01'`,
-the statement fails before it runs with `type_error`
-(`datetime_text_comparison`). Properties written as `date_time` parameters
-before datetimes were stored natively are
+both types are known before the statement runs, it fails instead with
+`type_error` (`datetime_text_comparison`), under the
+[same rules as Cypher](/database/helix-db/query-guides/cypher#datetimes):
+`TIMESTAMP '2026-01-01' = '2026-01-01'`, `CURRENT_TIMESTAMP IN ('2026-01-01')`,
+`CASE CURRENT_TIMESTAMP WHEN '2026-01-01' THEN …`, and a `?` bound to a
+`date_time` value compared directly with a string literal. Properties written
+as `date_time` parameters before datetimes were stored natively are
 [converted to datetimes](/database/helix-db/query-guides/parameters#supported-parameter-families),
-so filters that compared them with text match nothing after the conversion.
+so filters that compared them with text skip each row once it is converted.
 
 `EXTRACT(field FROM x)` reads the datetime field of the same meaning in UTC
 from a datetime only, through `requireDatetime(x)`: any other value, such as

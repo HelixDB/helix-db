@@ -429,12 +429,15 @@ A timestamp column never compares with text: unlike PostgreSQL,
 so it [matches no row](/database/helix-db/query-guides/cypher#datetimes)
 holding a timestamp, with or without an index, and so is a string parameter's.
 Write `e.at > TIMESTAMP '2026-01-01'` or `e.at > CAST(? AS TIMESTAMP)`. When
-both sides' types are known, such as `TIMESTAMP '2026-01-01' = '2026-01-01'`,
-the statement fails before it runs with `type_error`
-(`datetime_text_comparison`). Properties written as `date_time` parameters
-before datetimes were stored natively are
+both types are known before the statement runs, it fails instead with
+`type_error` (`datetime_text_comparison`), under the
+[same rules as Cypher](/database/helix-db/query-guides/cypher#datetimes):
+`TIMESTAMP '2026-01-01' = '2026-01-01'`, `CURRENT_TIMESTAMP IN ('2026-01-01')`,
+`CASE CURRENT_TIMESTAMP WHEN '2026-01-01' THEN …`, and a `?` bound to a
+`date_time` value compared directly with a string literal. Properties written
+as `date_time` parameters before datetimes were stored natively are
 [converted to datetimes](/database/helix-db/query-guides/parameters#supported-parameter-families),
-so filters that compared them with text match nothing after the conversion.
+so filters that compared them with text skip each row once it is converted.
 </Warning>
 
 `EXTRACT(field FROM x)` reads the datetime field of the same meaning in UTC

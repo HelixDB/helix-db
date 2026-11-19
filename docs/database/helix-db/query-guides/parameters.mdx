@@ -224,7 +224,9 @@ Before this, `date_time` parameters were stored as their raw strings. A writer t
 converts it once in the background: each property whose every value is a datetime or an RFC3339
 string with at most millisecond precision becomes datetimes, and any other property is left as
 stored and named in the server log. That conversion runs once: rows imported later through a bare
-`object` keep their strings, so declare their `date_time` fields.
+`object` keep their strings, so declare their `date_time` fields. While it runs, a property holds
+both forms: a datetime filter skips the rows not converted yet, and a text filter skips the rows
+already converted.
 
 <Warning>
 After the conversion, a Cypher or SQL filter that compares such a property with text matches

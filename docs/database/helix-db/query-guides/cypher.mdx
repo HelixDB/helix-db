@@ -484,10 +484,18 @@ as text. The same holds at any depth inside lists and maps, for pattern
 properties such as `{at: '…'}`, and for joins and lookups that compare two
 stored values. Indexes never change the result: a scan, an equality or range
 index on the property, and an index on another property in the same `WHERE`
-all return the same rows. When both sides' types are known, such as
-`datetime() > '2026-01-01'` or a datetime parameter against a string literal,
-the query fails before anything runs with `type_error`
-(`datetime_text_comparison`).
+all return the same rows.
+
+When both types are known before the query runs, it fails instead, with
+`type_error` (`datetime_text_comparison`). This applies to a comparison or
+text match (`datetime() > '2026-01-01'`), an `IN` member
+(`datetime() IN ['2026-01-01']`), and a simple `CASE` value against its
+subject (`CASE datetime() WHEN '2026-01-01' THEN …`). A parameter's type is
+known from its bound value when the parameter is compared directly
+(`$at = '…'`), through a property of a map parameter (`$obj.at`), or through a
+variable set from either (`WITH $at AS a`). Any other operand built from a
+parameter, such as `UNWIND $dates AS d` or `coalesce($at, …)`, runs and
+compares as null.
 
 The store has no schema, so a `SET` of text, such as
 `SET e.at = '2026-06-01T00:00:00Z'`, stores text even where the property
