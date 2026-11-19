@@ -672,7 +672,7 @@ impl ExecutionContext<'_> {
                     }
                     for (key, value) in &node.properties {
                         let stored = graph.property(entity, key)?;
-                        if stored.equals(&evaluation.eval(value)?)? != Some(true) {
+                        if stored.equals(&evaluation.eval(value)?) != Some(true) {
                             valid = false;
                             break;
                         }
@@ -690,7 +690,7 @@ impl ExecutionContext<'_> {
                     };
                     for (key, value) in &rel.properties {
                         let stored = graph.property(entity, key)?;
-                        if stored.equals(&evaluation.eval(value)?)? != Some(true) {
+                        if stored.equals(&evaluation.eval(value)?) != Some(true) {
                             valid = false;
                             break;
                         }
