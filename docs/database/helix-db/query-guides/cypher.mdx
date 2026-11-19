@@ -493,7 +493,10 @@ text match (`datetime() > '2026-01-01'`), an `IN` member
 subject (`CASE datetime() WHEN '2026-01-01' THEN …`). A parameter's type is
 known from its bound value when the parameter is compared directly
 (`$at = '…'`), through a property of a map parameter (`$obj.at`), or through a
-variable set from either (`WITH $at AS a`). Any other operand built from a
+variable set from either (`WITH $at AS a`). Each member of a list parameter is
+checked the same way, so `datetime() IN $texts` fails too. A written-out list or
+`CASE` that mixes datetimes and text fails even when an earlier member matches.
+Any other operand built from a
 parameter, such as `UNWIND $dates AS d` or `coalesce($at, …)`, runs and
 compares as null.
 

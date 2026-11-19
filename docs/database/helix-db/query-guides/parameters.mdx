@@ -231,8 +231,9 @@ already converted.
 <Warning>
 After the conversion, a Cypher or SQL filter that compares such a property with text matches
 nothing, because text is never read as a datetime: the comparison is null, with or without an
-index. This covers string literals (`WHERE e.at > '2026-01-01'`) and string parameters, including
-every JSON parameter, which has no datetime form. Read the text as a datetime instead: `datetime('…')` or
+index. This covers string literals (`WHERE e.at > '2026-01-01'`) and every untyped, `string` or
+`value` parameter holding text; a declared `date_time` parameter is a datetime and compares as
+one. Read the text as a datetime instead: `datetime('…')` or
 `datetime($since)` in [Cypher](/database/helix-db/query-guides/cypher#datetimes), and
 `TIMESTAMP '…'` or `CAST(? AS TIMESTAMP)` in [SQL](/database/helix-db/query-guides/sql).
 </Warning>

@@ -433,8 +433,9 @@ both types are known before the statement runs, it fails instead with
 `type_error` (`datetime_text_comparison`), under the
 [same rules as Cypher](/database/helix-db/query-guides/cypher#datetimes):
 `TIMESTAMP '2026-01-01' = '2026-01-01'`, `CURRENT_TIMESTAMP IN ('2026-01-01')`,
-`CASE CURRENT_TIMESTAMP WHEN '2026-01-01' THEN …`, and a `?` bound to a
-`date_time` value compared directly with a string literal. Properties written
+`CASE CURRENT_TIMESTAMP WHEN '2026-01-01' THEN …`, a `?` bound to a
+`date_time` value compared with a string literal, and a datetime compared with
+a `?` bound to text, including `CURRENT_TIMESTAMP > ?` and `IN (?)`. Properties written
 as `date_time` parameters before datetimes were stored natively are
 [converted to datetimes](/database/helix-db/query-guides/parameters#supported-parameter-families),
 so filters that compared them with text skip each row once it is converted.

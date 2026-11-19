@@ -6970,8 +6970,9 @@ already converted.
 
 After the conversion, a Cypher or SQL filter that compares such a property with text matches
 nothing, because text is never read as a datetime: the comparison is null, with or without an
-index. This covers string literals (`WHERE e.at > '2026-01-01'`) and string parameters, including
-every JSON parameter, which has no datetime form. Read the text as a datetime instead: `datetime('…')` or
+index. This covers string literals (`WHERE e.at > '2026-01-01'`) and every untyped, `string` or
+`value` parameter holding text; a declared `date_time` parameter is a datetime and compares as
+one. Read the text as a datetime instead: `datetime('…')` or
 `datetime($since)` in [Cypher](/database/helix-db/query-guides/cypher#datetimes), and
 `TIMESTAMP '…'` or `CAST(? AS TIMESTAMP)` in [SQL](/database/helix-db/query-guides/sql).
 
@@ -8125,7 +8126,10 @@ text match (`datetime() > '2026-01-01'`), an `IN` member
 subject (`CASE datetime() WHEN '2026-01-01' THEN …`). A parameter's type is
 known from its bound value when the parameter is compared directly
 (`$at = '…'`), through a property of a map parameter (`$obj.at`), or through a
-variable set from either (`WITH $at AS a`). Any other operand built from a
+variable set from either (`WITH $at AS a`). Each member of a list parameter is
+checked the same way, so `datetime() IN $texts` fails too. A written-out list or
+`CASE` that mixes datetimes and text fails even when an earlier member matches.
+Any other operand built from a
 parameter, such as `UNWIND $dates AS d` or `coalesce($at, …)`, runs and
 compares as null.
 
@@ -8704,8 +8708,9 @@ both types are known before the statement runs, it fails instead with
 `type_error` (`datetime_text_comparison`), under the
 [same rules as Cypher](/database/helix-db/query-guides/cypher#datetimes):
 `TIMESTAMP '2026-01-01' = '2026-01-01'`, `CURRENT_TIMESTAMP IN ('2026-01-01')`,
-`CASE CURRENT_TIMESTAMP WHEN '2026-01-01' THEN …`, and a `?` bound to a
-`date_time` value compared directly with a string literal. Properties written
+`CASE CURRENT_TIMESTAMP WHEN '2026-01-01' THEN …`, a `?` bound to a
+`date_time` value compared with a string literal, and a datetime compared with
+a `?` bound to text, including `CURRENT_TIMESTAMP > ?` and `IN (?)`. Properties written
 as `date_time` parameters before datetimes were stored natively are
 [converted to datetimes](/database/helix-db/query-guides/parameters#supported-parameter-families),
 so filters that compared them with text skip each row once it is converted.
