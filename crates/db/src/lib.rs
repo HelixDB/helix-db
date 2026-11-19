@@ -2989,7 +2989,7 @@ impl HelixDB {
     }
 
     /// Execute a prepared plan, keeping only its requested returns moved out
-    /// of the interpreter without copies.
+    /// of the interpreter without copies, and the time it spent committing.
     /// The query service encodes nothing else.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn execute_prepared_returns_scoped_controlled(
@@ -3001,7 +3001,10 @@ impl HelixDB {
         proof: CatalogRefreshProof,
         search_consistency: helix_ast::query::SearchConsistency,
         commit_durability: transaction::CommitDurability,
-    ) -> Result<execution::interpreter::ReturnedValues> {
+    ) -> Result<(
+        execution::interpreter::ReturnedValues,
+        query_resources::CommitTimings,
+    )> {
         Interpreter::new_scoped_controlled_prepared(
             self,
             params,

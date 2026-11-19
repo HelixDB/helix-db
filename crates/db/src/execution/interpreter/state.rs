@@ -465,7 +465,7 @@ mod tests {
                     .execute_returns(&plan)
                     .await
                     .unwrap(),
-                returns
+                (returns, crate::query_resources::CommitTimings::default())
             );
         }
         db.close().await.unwrap();
