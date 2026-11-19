@@ -611,7 +611,8 @@ async fn seed_legacy_edge_without_vector(raw: &Db, edge_id: u64, from: u64, to: 
         crate::index_lifecycle::IndexElementKind::Edge,
         label,
         edge_id,
-    );
+    )
+    .await;
     transaction.commit().await.expect("legacy edge rows commit");
 }
 
@@ -1659,6 +1660,17 @@ pub(crate) async fn run_vector_ineligible_contracts() {
     )
     .await;
     let raw = raw(&database_name, Arc::clone(&store)).await;
+    // The store claims the current version, so its rows, label rows
+    // included, are filed as a current store files them.
+    seed_bootstrap_tuple(
+        &raw,
+        encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
+            IndexStorageVersion::CURRENT,
+        )),
+        true,
+        true,
+    )
+    .await;
     seed_legacy_node_without_vector(&raw, 77, "Document").await;
     populate_legacy_vector::<crate::search::vector::distance::Cosine>(
         &raw,
@@ -1680,15 +1692,6 @@ pub(crate) async fn run_vector_ineligible_contracts() {
             .expect("fixture hash leaves room for a later physical ID"),
     )
     .expect("later fixture physical ID is nonzero");
-    seed_bootstrap_tuple(
-        &raw,
-        encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
-            IndexStorageVersion::CURRENT,
-        )),
-        true,
-        true,
-    )
-    .await;
     let transaction = raw
         .begin(IsolationLevel::SerializableSnapshot)
         .await

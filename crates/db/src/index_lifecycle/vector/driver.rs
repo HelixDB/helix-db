@@ -4704,7 +4704,8 @@ mod tests {
                 IndexElementKind::Node,
                 label_of(id),
                 id,
-            );
+            )
+            .await;
         }
         transaction.commit().await.expect("sources commit");
         let sixteen = SearchIndexBatchLimits::try_new(
@@ -4778,6 +4779,107 @@ mod tests {
             }
         }
         db.close().await.expect("database closes");
+    }
+
+    /// At every stage of the label identity migration a build indexes its
+    /// label's rows, written before the stage and after it, and no other:
+    /// its steps read the label rows in the layout their snapshot names, so
+    /// a build while the copy runs reads the complete hash rows rather than
+    /// the incomplete exact ones.
+    #[tokio::test]
+    async fn builds_index_their_label_at_every_label_identity_stage() {
+        let scope = DataScope::LegacyUnscoped;
+        let node = IndexElementKind::Node;
+        let label_of = |id: u64| {
+            if id.is_multiple_of(2) {
+                "Document"
+            } else {
+                "Other"
+            }
+        };
+        let row = |id: u64, label: &str| {
+            let mut row = properties([id as f32, 1.0, 0.0], None);
+            row[0] = Property::new("$label", PropertyValue::String(label.into()));
+            row
+        };
+        for stage in crate::migrations::LabelStage::ALL {
+            let db = test_db(&format!("vector-label-stage-{stage:?}")).await;
+            crate::migrations::LabelStage::rewind(&db).await;
+            for id in 0..40_u64 {
+                put_source(&db, scope, id, &row(id, label_of(id))).await;
+            }
+            stage.reach(&db).await;
+            for id in 40..80_u64 {
+                put_source(&db, scope, id, &row(id, label_of(id))).await;
+            }
+            // After the stage, Document 2 becomes Other and Document 4 is
+            // deleted.
+            let transaction = db
+                .begin(IsolationLevel::Snapshot)
+                .await
+                .expect("write begins");
+            crate::index_lifecycle::label_source::testing::stage_labels(
+                &transaction,
+                scope,
+                node,
+                2,
+                &row(2, "Document"),
+                &row(2, "Other"),
+            )
+            .await;
+            transaction
+                .put(source_key(scope, 2), encode_properties(&row(2, "Other")))
+                .expect("relabel stages");
+            crate::index_lifecycle::label_source::testing::stage_labels(
+                &transaction,
+                scope,
+                node,
+                4,
+                &row(4, "Document"),
+                &[],
+            )
+            .await;
+            transaction
+                .delete(source_key(scope, 4))
+                .expect("delete stages");
+            transaction.commit().await.expect("writes commit");
+
+            let definition = definition(None);
+            let (build_id, _, _) = create_build(&db, scope, &definition, 79).await;
+            let mut claim_sequence = 1;
+            assert_eq!(
+                drive_to_terminal(&db, &driver(), build_id, &mut claim_sequence).await,
+                CommittedOperationStep::Completed,
+                "{stage:?}"
+            );
+            let active = read_index(&db, scope, &definition).await;
+            let IndexStateV2::Active {
+                physical:
+                    PhysicalGeneration::Vector {
+                        layout: VectorPhysicalLayout::Unpartitioned { physical_index_id },
+                        ..
+                    },
+                ..
+            } = active.state()
+            else {
+                panic!("completed vector build is active and unpartitioned");
+            };
+            let active_handle = ActiveIndexHandle::try_from_record(scope, &active)
+                .expect("active vector record projects a handle");
+            let generation = ValidatedVectorGenerationHandle::try_from_active::<
+                vector::distance::Euclidean,
+            >(&active_handle, *physical_index_id)
+            .expect("active physical generation validates");
+            let index = VectorIndex::<vector::distance::Euclidean>::from_generation(&generation);
+            for id in 0..80_u64 {
+                assert_eq!(
+                    index.get_item(&db, id).await.unwrap().is_some(),
+                    label_of(id) == "Document" && id != 2 && id != 4,
+                    "{stage:?} row {id}"
+                );
+            }
+            db.close().await.expect("database closes");
+        }
     }
 
     #[tokio::test]

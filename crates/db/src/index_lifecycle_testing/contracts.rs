@@ -3336,7 +3336,8 @@ async fn mutate_source(
         entity_id,
         before,
         after,
-    );
+    )
+    .await;
     if after.is_empty() {
         transaction.delete(source_key(scope, entity_id))?;
     } else {
@@ -3379,7 +3380,8 @@ async fn mutate_edge_source(
         entity_id,
         before,
         after,
-    );
+    )
+    .await;
     if after.is_empty() {
         transaction.delete(edge_source_key(scope, entity_id))?;
     } else {

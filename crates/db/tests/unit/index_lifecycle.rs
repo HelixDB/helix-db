@@ -695,7 +695,8 @@ async fn mutate_secondary_entity(
         entity_id,
         &before,
         &after,
-    );
+    )
+    .await;
     if after.is_empty() {
         transaction
             .delete(secondary_source_key(entity_id))

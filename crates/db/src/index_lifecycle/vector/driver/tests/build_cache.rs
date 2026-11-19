@@ -92,7 +92,8 @@ async fn seed_sources(db: &Db, scope: DataScope, count: u64, vector: impl Fn(u64
                 IndexElementKind::Node,
                 "Document",
                 entity_id,
-            );
+            )
+            .await;
         }
         transaction
             .commit()
@@ -2967,7 +2968,8 @@ async fn mutated_build_digests(
             IndexElementKind::Node,
             "Document",
             entity_id,
-        );
+        )
+        .await;
     }
     transaction.commit().await.expect("fixture sources commit");
     let (operation_id, index_id, generation) =
@@ -3050,7 +3052,8 @@ async fn mutated_build_digests(
                 IndexElementKind::Node,
                 "Document",
                 entity_id,
-            );
+            )
+            .await;
         }
         transaction.commit().await.expect("fixture changes commit");
     }

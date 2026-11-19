@@ -163,7 +163,8 @@ async fn each_of_many_labels_scans_only_its_own_rows() {
 /// is gone (in long runs too), a member whose row carries another label (as
 /// a label-hash collision leaves), rows above the build's bound, id gaps,
 /// and rows of other labels too large for any batch, which no longer block
-/// the build.
+/// the build. Each seed writes half its graph before one stage of the label
+/// identity migration and half after it (see [`build_random_graph`]).
 #[tokio::test]
 async fn builds_match_a_scan_of_every_row_on_random_graphs() {
     for seed_value in 1..=3_u64 {
@@ -196,6 +197,11 @@ async fn edge_builds_match_a_scan_of_every_row_on_random_graphs() {
 
 /// Builds `definition`, on `labels[0]`, over a random graph of `kind` rows
 /// of `labels` and checks the generation against every row up to the bound.
+///
+/// The store starts before the label identity copy, and half the graph is
+/// written there; the seed then picks the stage the store moves to (before
+/// the copy, copying, or published and cleaned up) and the other half, and
+/// every bitmap member without a row of its label, is written at that stage.
 async fn build_random_graph(
     kind: IndexElementKind,
     labels: [&str; 3],
@@ -206,10 +212,15 @@ async fn build_random_graph(
     let [label, other, third] = labels;
     let mut random = Seeded(0x9E37_79B9_7F4A_7C15 ^ seed_value);
     let db = test_db(&format!("label-source-differential-{kind:?}-{seed_value}")).await;
+    let stage = crate::migrations::LabelStage::ALL[usize::try_from(seed_value % 3).expect("fits")];
+    crate::migrations::LabelStage::rewind(&db).await;
     let mut sources = BTreeMap::new();
     let mut id = 0_u64;
     let mut absent = Vec::new();
-    for _ in 0..600 {
+    for written in 0..600 {
+        if written == 300 {
+            stage.reach(&db).await;
+        }
         id += 1 + random.next(3);
         if random.next(40) == 0 {
             // A long run of members whose rows are gone.
@@ -245,15 +256,15 @@ async fn build_random_graph(
         .begin(IsolationLevel::Snapshot)
         .await
         .expect("bitmap write begins");
-    absent
-        .iter()
-        .for_each(|&missing| testing::stage_member(&transaction, scope, kind, label, missing));
+    for &missing in &absent {
+        testing::stage_member(&transaction, scope, kind, label, missing).await;
+    }
     let collided = *sources
         .iter()
         .find(|(_, properties)| properties[0].value.as_str() == Some(other))
         .expect("the graph has another label")
         .0;
-    testing::stage_member(&transaction, scope, kind, label, collided);
+    testing::stage_member(&transaction, scope, kind, label, collided).await;
     transaction.commit().await.expect("bitmap members commit");
 
     let limits = match seed_value % 3 {
@@ -270,7 +281,7 @@ async fn build_random_graph(
     assert_eq!(
         end,
         CommittedOperationStep::Completed,
-        "{kind:?} seed {seed_value}"
+        "{kind:?} seed {seed_value} at {stage:?}"
     );
     assert!(scan_steps >= 1);
     sources.retain(|&id, _| id <= upper);

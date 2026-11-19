@@ -1,18 +1,27 @@
 //! Source rows of one build's label, read through the label's bitmap.
 //!
 //! Every index definition names one label, and every node and edge write
-//! keeps its label's bitmap in the same transaction as its row (the `$label`
-//! equality bitmap for nodes, the global edge-label bitmap for edges), as
-//! label scans already rely on. A build's source scan therefore reads only
-//! the rows of its label's members, rather than every row of its kind.
+//! keeps its label's bitmap in the same transaction as its row (the node
+//! label row for nodes, the global edge-label row for edges), as label scans
+//! already rely on. A build's source scan therefore reads only the rows of
+//! its label's members, rather than every row of its kind.
+//!
+//! The bitmap is read in the layout of the snapshot it is read from, which
+//! the storage marker in that same snapshot names ([`label_layout`]): hash
+//! rows until the label identity copy publishes, while the copy runs
+//! included, since its exact rows are incomplete until then; exact rows from
+//! the publication on. Each step reads its own snapshot, so a build that
+//! spans the publication reads hash rows in its steps before it and exact
+//! rows after, each complete in its own snapshot.
 //!
 //! The scan keeps the progress it always had: the cursor is the complete
 //! property-by-ID key of the last member taken, whether or not its row still
 //! exists, so ascending ids keep the key order the stored cursor and
 //! inclusive upper bound are compared in, and a build resumes across binaries
 //! either way. A member whose row is gone is skipped. A member that carries
-//! another label (a label-hash collision) is read and left to each driver's
-//! own label check, which writes nothing for it.
+//! another label (a label-hash collision, which only a hash row can hold) is
+//! read and left to each driver's own label check, which writes nothing for
+//! it.
 //!
 //! Rows are read with `multi_get`, in chunks of at most
 //! [`helix_planner::cost::RECORD_BATCH_ROWS`] ids, each read only once the
@@ -32,6 +41,7 @@ use crate::config::SearchIndexBatchLimits;
 use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::{DataKey, DataKeyKind, EdgePropertyByIdKey, NodePropertyKey};
 use crate::error::{HelixDbError, Result};
+use crate::index_lifecycle::repository::{LabelRowLayout, LabelRowWrites};
 use crate::index_lifecycle::{IndexCursor, IndexElementKind, IndexEntityId, SourceScanProgress};
 
 /// The most ids one `multi_get` reads.
@@ -89,10 +99,11 @@ pub(crate) struct LabelSource<'a, R> {
 impl<'a, R: DbReadOps + Send + Sync> LabelSource<'a, R> {
     /// Takes the members of `label` after `progress`'s cursor, up to its
     /// inclusive upper bound, at most `limits.max_entities()` of them, from
-    /// the bitmap `reader` holds. `None` when no member is left: the scan is
-    /// complete. A step therefore returns at most `limits.max_entities()`
-    /// rows, and a driver ends its step on [`LabelRead::Exhausted`] or
-    /// [`LabelRead::Paused`] rather than counting entities itself.
+    /// the bitmap `reader` holds in its own layout ([`label_layout`]).
+    /// `None` when no member is left: the scan is complete. A step therefore
+    /// returns at most `limits.max_entities()` rows, and a driver ends its
+    /// step on [`LabelRead::Exhausted`] or [`LabelRead::Paused`] rather than
+    /// counting entities itself.
     ///
     /// A cursor is the complete property-by-ID key of its kind. An edge
     /// cursor may also be a retired 16-byte `[from][to]` property key an older
@@ -133,14 +144,8 @@ impl<'a, R: DbReadOps + Send + Sync> LabelSource<'a, R> {
             Some(after) => after + 1,
             None => 0,
         };
-        let members = match kind {
-            IndexElementKind::Node => {
-                crate::search::lookup_node_label_index_scoped(reader, label, scope).await?
-            }
-            IndexElementKind::Edge => {
-                crate::search::lookup_global_edge_label_index_scoped(reader, label, scope).await?
-            }
-        };
+        let layout = label_layout(reader).await?;
+        let members = label_members(reader, layout, kind, label, scope).await?;
         let mut members = members.iter();
         members.advance_to(first);
         let mut in_bound = members.take_while(|id| *id <= upper);
@@ -266,6 +271,40 @@ impl<'a, R: DbReadOps + Send + Sync> LabelSource<'a, R> {
     }
 }
 
+/// Where `reader`'s snapshot files label rows, by the storage marker that
+/// snapshot holds: hash rows until the label identity copy publishes (a
+/// store no V2 writer has opened included), exact rows from then on. The
+/// marker and the bitmap come from one snapshot, so the layout is the one
+/// whose rows are complete there, however far the copy or its cleanup has
+/// gone since.
+pub(crate) async fn label_layout(reader: &(impl DbReadOps + Sync)) -> Result<LabelRowLayout> {
+    Ok(LabelRowWrites::of_stored_version(
+        crate::migrations::startup::stored_storage_version(reader).await?,
+    )
+    .reads()
+    .label_rows())
+}
+
+/// Every member of `label`'s bitmap of `kind`, read in `layout`, the
+/// [`label_layout`] of `reader`.
+pub(crate) async fn label_members(
+    reader: &(impl DbReadOps + Send + Sync),
+    layout: LabelRowLayout,
+    kind: IndexElementKind,
+    label: &str,
+    scope: DataScope,
+) -> Result<roaring::RoaringTreemap> {
+    let members = match kind {
+        IndexElementKind::Node => {
+            crate::search::read_node_label(reader, layout, label, scope, None).await?
+        }
+        IndexElementKind::Edge => {
+            crate::search::read_global_edge_label(reader, layout, label, scope, None).await?
+        }
+    };
+    Ok(members.into_unbudgeted())
+}
+
 /// A build source key, decoded to where its scan stands.
 enum SourceKey {
     /// The property-by-ID key of this id.
@@ -319,7 +358,9 @@ fn corruption(message: &str) -> HelixDbError {
 }
 
 /// Graph-row writes for tests that write source rows directly: each keeps
-/// the row's label bitmap as a graph write does, in the same transaction.
+/// the row's label bitmap as a graph write does, in the same transaction and
+/// under the keys the store's marker in its snapshot names (hash keys before
+/// the label identity copy, both while it runs, exact keys once published).
 #[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) mod testing {
     use slatedb::{Db, DbTransaction, IsolationLevel};
@@ -327,6 +368,7 @@ pub(crate) mod testing {
     use crate::encoding::property::Property;
     use crate::encoding::v2::keys::scope::DataScope;
     use crate::encoding::v2::values::property::encode_properties;
+    use crate::index_lifecycle::repository::LabelRowWrites;
     use crate::index_lifecycle::IndexElementKind;
 
     fn label_of(properties: &[Property]) -> Option<&str> {
@@ -336,54 +378,83 @@ pub(crate) mod testing {
             .and_then(|property| property.value.as_str())
     }
 
-    /// Stages `id` joining `label`'s bitmap.
-    pub(crate) fn stage_member(
+    /// Stages `id` joining (`present`) or leaving `label`'s bitmap.
+    async fn stage_membership(
         transaction: &DbTransaction,
         scope: DataScope,
         kind: IndexElementKind,
         label: &str,
         id: u64,
+        present: bool,
     ) {
-        match kind {
-            IndexElementKind::Node => {
+        let writes = LabelRowWrites::of_stored_version(
+            crate::migrations::startup::stored_storage_version(transaction)
+                .await
+                .expect("the storage marker reads"),
+        );
+        if writes.hash() {
+            let row = match kind {
+                IndexElementKind::Node => crate::search::HashLabelRow::Node(label),
+                IndexElementKind::Edge => crate::search::HashLabelRow::Edge(label),
+            };
+            crate::search::stage_hash_label_membership(transaction, row, id, present, scope)
+                .expect("hash label membership stages");
+        }
+        if !writes.exact() {
+            return;
+        }
+        match (kind, present) {
+            (IndexElementKind::Node, true) => {
                 crate::search::add_to_equality_index_scoped(transaction, "$label", label, id, scope)
             }
-            IndexElementKind::Edge => {
-                crate::search::add_to_global_edge_label_index_scoped(transaction, label, id, scope)
-            }
-        }
-        .expect("label membership stages");
-    }
-
-    /// Stages `id` leaving `label`'s bitmap.
-    pub(crate) fn stage_departure(
-        transaction: &DbTransaction,
-        scope: DataScope,
-        kind: IndexElementKind,
-        label: &str,
-        id: u64,
-    ) {
-        match kind {
-            IndexElementKind::Node => crate::search::remove_from_equality_index_scoped(
+            (IndexElementKind::Node, false) => crate::search::remove_from_equality_index_scoped(
                 transaction,
                 "$label",
                 label,
                 id,
                 scope,
             ),
-            IndexElementKind::Edge => crate::search::remove_from_global_edge_label_index_scoped(
-                transaction,
-                label,
-                id,
-                scope,
-            ),
+            (IndexElementKind::Edge, true) => {
+                crate::search::add_to_global_edge_label_index_scoped(transaction, label, id, scope)
+            }
+            (IndexElementKind::Edge, false) => {
+                crate::search::remove_from_global_edge_label_index_scoped(
+                    transaction,
+                    label,
+                    id,
+                    scope,
+                )
+            }
         }
-        .expect("label departure stages");
+        .expect("exact label membership stages");
+    }
+
+    /// Stages `id` joining `label`'s bitmap.
+    pub(crate) async fn stage_member(
+        transaction: &DbTransaction,
+        scope: DataScope,
+        kind: IndexElementKind,
+        label: &str,
+        id: u64,
+    ) {
+        stage_membership(transaction, scope, kind, label, id, true).await;
+    }
+
+    /// Stages `id` leaving `label`'s bitmap.
+    #[cfg(test)]
+    pub(crate) async fn stage_departure(
+        transaction: &DbTransaction,
+        scope: DataScope,
+        kind: IndexElementKind,
+        label: &str,
+        id: u64,
+    ) {
+        stage_membership(transaction, scope, kind, label, id, false).await;
     }
 
     /// Stages the label-bitmap change of `id`'s row going from `before` to
     /// `after` (an empty side is no row), as a graph write does.
-    pub(crate) fn stage_labels(
+    pub(crate) async fn stage_labels(
         transaction: &DbTransaction,
         scope: DataScope,
         kind: IndexElementKind,
@@ -395,12 +466,13 @@ pub(crate) mod testing {
         if before == after {
             return;
         }
-        before
+        let changes = before
+            .map(|label| (label, false))
             .into_iter()
-            .for_each(|label| stage_departure(transaction, scope, kind, label, id));
-        after
-            .into_iter()
-            .for_each(|label| stage_member(transaction, scope, kind, label, id));
+            .chain(after.map(|label| (label, true)));
+        for (label, present) in changes {
+            stage_membership(transaction, scope, kind, label, id, present).await;
+        }
     }
 
     /// Writes `properties` as `id`'s source row and adds `id` to its label's
@@ -416,9 +488,9 @@ pub(crate) mod testing {
             .begin(IsolationLevel::Snapshot)
             .await
             .expect("source write begins");
-        label_of(properties)
-            .into_iter()
-            .for_each(|label| stage_member(&transaction, scope, kind, label, id));
+        for label in label_of(properties).into_iter() {
+            stage_member(&transaction, scope, kind, label, id).await;
+        }
         transaction
             .put(
                 super::source_key(scope, kind, id),
@@ -443,7 +515,7 @@ pub(crate) mod testing {
             .begin(IsolationLevel::Snapshot)
             .await
             .expect("source write begins");
-        stage_member(&transaction, scope, kind, label, id);
+        stage_member(&transaction, scope, kind, label, id).await;
         transaction
             .put(super::source_key(scope, kind, id), value)
             .expect("source row stages");

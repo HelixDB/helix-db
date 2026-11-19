@@ -10,6 +10,8 @@ use super::*;
 use crate::encoding::property::Property;
 use crate::encoding::v2::legacy::edge_property_pair::LegacyEdgePropertyPairKey;
 use crate::index_lifecycle::OperationCounters;
+use crate::migrations::LabelStage;
+use roaring::RoaringTreemap;
 
 async fn test_db(name: &str) -> Db {
     Db::builder(name, Arc::new(InMemory::new()))
@@ -157,8 +159,10 @@ async fn members_are_read_in_id_order_skipping_absent_rows_and_ids_above_the_bou
         .await
         .expect("write begins");
     // A long run of members without rows, and one row of another label.
-    (10..1500).for_each(|id| testing::stage_member(&transaction, scope, node, "User", id));
-    testing::stage_member(&transaction, scope, node, "User", 4);
+    for id in 10..1500 {
+        testing::stage_member(&transaction, scope, node, "User", id).await;
+    }
+    testing::stage_member(&transaction, scope, node, "User", 4).await;
     transaction.commit().await.expect("members commit");
     let read = snapshot(&db).await;
 
@@ -417,38 +421,146 @@ async fn edge_builds_resume_after_a_retired_pair_key_cursor() {
     .is_err());
 }
 
-#[tokio::test]
-async fn a_corrupt_label_bitmap_fails_the_step() {
-    let db = test_db("label-source-corrupt-bitmap").await;
-    let scope = DataScope::LegacyUnscoped;
-    let node = IndexElementKind::Node;
-    testing::put_source_row(&db, scope, node, 1, &row("User", 0)).await;
-    db.put(
-        DataKey::Data {
+/// The key of `label`'s node label row in `layout`.
+fn node_label_row(scope: DataScope, layout: LabelRowLayout, label: &str) -> Bytes {
+    match layout {
+        LabelRowLayout::Hash => {
+            crate::search::hash_label_key(scope, crate::search::HashLabelRow::Node(label))
+        }
+        LabelRowLayout::Exact => DataKey::Data {
             scope,
             kind: DataKeyKind::PropertyIndex(
-                crate::encoding::v2::keys::indexes::PropertyIndexKey::Equality(
-                    crate::encoding::indexes::equality::EqualityIndexKey::new(
-                        crate::encoding::indexes::hash_property_name("$label"),
-                        crate::encoding::indexes::hash_property_value("User"),
+                crate::encoding::v2::keys::indexes::PropertyIndexKey::NodeLabel(
+                    crate::encoding::indexes::label::NodeLabelKey::new(
+                        crate::encoding::indexes::label::LabelIdentity::new(label)
+                            .expect("the label fits a key"),
                     ),
                 ),
             ),
         }
         .to_bytes(),
-        b"not a bitmap".as_slice(),
-    )
-    .await
-    .expect("corrupt bitmap writes");
-    let read = snapshot(&db).await;
-    assert!(LabelSource::open(
-        &read,
-        scope,
-        node,
-        "User",
-        &progress(scope, node, None, 1),
-        limits(1024, 1 << 20)
-    )
-    .await
-    .is_err());
+    }
+}
+
+/// The layout a snapshot of a store at `stage` reads label rows in.
+fn layout_at(stage: LabelStage) -> LabelRowLayout {
+    match stage {
+        LabelStage::BeforeCopy | LabelStage::Copying => LabelRowLayout::Hash,
+        LabelStage::Published => LabelRowLayout::Exact,
+    }
+}
+
+/// At every stage of the label identity migration, a step reads its label's
+/// members in the layout its own snapshot's marker names: the hash rows
+/// before the copy and while it runs, when the exact rows are incomplete,
+/// and the exact rows once it has published and cleaned up. Rows written
+/// before the stage and after it, a member relabelled after it and one
+/// deleted after it all read as their rows say.
+#[tokio::test]
+async fn every_label_identity_stage_reads_the_layout_its_snapshot_names() {
+    let scope = DataScope::LegacyUnscoped;
+    let label_of = |id: u64| {
+        if id.is_multiple_of(2) {
+            "User"
+        } else {
+            "Other"
+        }
+    };
+    for kind in [IndexElementKind::Node, IndexElementKind::Edge] {
+        for stage in LabelStage::ALL {
+            let db = test_db(&format!("label-source-stage-{kind:?}-{stage:?}")).await;
+            LabelStage::rewind(&db).await;
+            for id in 1..=6 {
+                testing::put_source_row(&db, scope, kind, id, &row(label_of(id), 0)).await;
+            }
+            stage.reach(&db).await;
+            for id in 7..=10 {
+                testing::put_source_row(&db, scope, kind, id, &row(label_of(id), 0)).await;
+            }
+            let transaction = db
+                .begin(IsolationLevel::Snapshot)
+                .await
+                .expect("write begins");
+            testing::stage_labels(
+                &transaction,
+                scope,
+                kind,
+                2,
+                &row("User", 0),
+                &row("Other", 0),
+            )
+            .await;
+            transaction
+                .put(
+                    source_key(scope, kind, 2),
+                    crate::encoding::v2::values::property::encode_properties(&row("Other", 0)),
+                )
+                .expect("relabel stages");
+            testing::stage_labels(&transaction, scope, kind, 8, &row("User", 0), &[]).await;
+            transaction
+                .delete(source_key(scope, kind, 8))
+                .expect("delete stages");
+            transaction.commit().await.expect("writes commit");
+
+            let read = snapshot(&db).await;
+            let layout = label_layout(&read).await.expect("the marker reads");
+            assert_eq!(layout, layout_at(stage), "{kind:?} {stage:?}");
+            assert_eq!(
+                step(
+                    &read,
+                    kind,
+                    "User",
+                    &progress(scope, kind, None, 10),
+                    limits(4096, 1 << 20)
+                )
+                .await,
+                Some((vec![4, 6, 10], None)),
+                "{kind:?} {stage:?}"
+            );
+            // While the copy runs its exact rows lack members: the copy took
+            // one of the three Users written before it.
+            let exact = label_members(&read, LabelRowLayout::Exact, kind, "User", scope)
+                .await
+                .expect("exact rows read");
+            assert_eq!(
+                exact == RoaringTreemap::from_iter([4, 6, 10]),
+                stage == LabelStage::Published,
+                "{kind:?} {stage:?}: {exact:?}"
+            );
+        }
+    }
+}
+
+/// A corrupt bitmap of the layout a step reads fails the step, at every
+/// stage of the label identity migration.
+#[tokio::test]
+async fn a_corrupt_label_bitmap_fails_the_step() {
+    let scope = DataScope::LegacyUnscoped;
+    let node = IndexElementKind::Node;
+    for stage in LabelStage::ALL {
+        let db = test_db(&format!("label-source-corrupt-bitmap-{stage:?}")).await;
+        LabelStage::rewind(&db).await;
+        testing::put_source_row(&db, scope, node, 1, &row("User", 0)).await;
+        stage.reach(&db).await;
+        db.put(
+            node_label_row(scope, layout_at(stage), "User"),
+            b"not a bitmap".as_slice(),
+        )
+        .await
+        .expect("corrupt bitmap writes");
+        let read = snapshot(&db).await;
+        assert!(
+            LabelSource::open(
+                &read,
+                scope,
+                node,
+                "User",
+                &progress(scope, node, None, 1),
+                limits(1024, 1 << 20)
+            )
+            .await
+            .is_err(),
+            "{stage:?}"
+        );
+    }
 }
