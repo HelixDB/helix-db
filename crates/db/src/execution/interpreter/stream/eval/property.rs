@@ -137,6 +137,33 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
         }
     }
 
+    /// Project flat stored names with one name scan. The caller excludes
+    /// system fields, paths and rows with virtual properties.
+    pub(in crate::execution::interpreter::stream) async fn flat_row_values(
+        &mut self,
+        row: &ExecutionRow,
+        names: &ir::PropertyNames,
+        selection: &mut view::Selection<'_>,
+    ) -> Result<BTreeMap<String, DbPropertyValue>> {
+        let mut object = BTreeMap::new();
+        let context = self.context;
+        let stored = match row.current.as_ref() {
+            Some(element) => self.element_row(element).await?,
+            None => None,
+        };
+        let mut values = stored.map(|stored| stored.selected_values(selection));
+        for name in names.as_ref() {
+            context.check_execution_deadline()?;
+            let Some(values) = values.as_mut() else {
+                continue;
+            };
+            if let Some(value) = values.next().expect("one slot per selected name")? {
+                object.insert(name.as_ref().to_string(), value);
+            }
+        }
+        Ok(object)
+    }
+
     /// All stored properties of the row element, read through the cache.
     ///
     /// The `last_use` of an element releases its record from the cache; a
