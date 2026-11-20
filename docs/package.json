@@ -8,6 +8,6 @@
     "check": "npm run check-docs && npm run check-llms && npm run check-openapi"
   },
   "dependencies": {
-    "mintlify": "^4.2.788"
+    "mintlify": "^4.3.16"
   }
 }
