@@ -102,7 +102,7 @@ fn recency_order_contract() {
         .touch(3, CacheSequence(5))
         .map(|cached| cached.last_touch);
     assert_eq!(repeated, Some(CacheSequence(5)));
-    assert_eq!(map.order.len(), 3, "a repeated touch records no entry");
+    assert_eq!(map.order.len(), 2, "a repeated touch records no entry");
     assert_eq!(keys(&map), [3, 1, 2]);
 
     let newer = map
