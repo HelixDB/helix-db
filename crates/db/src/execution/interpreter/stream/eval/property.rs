@@ -15,8 +15,9 @@ use crate::encoding::v2::values::property::view;
 /// Resolved values are deliberately not cached because virtual properties belong to
 /// the row or binding that requested them.
 ///
-/// A batch owner that prefetches decodes every prefetched record first, so a read or
-/// decode error anywhere in the batch is returned before an earlier row's own error.
+/// A batch owner's read errors, and decode errors in prefetched current-element
+/// records, precede row evaluation. Endpoint node records are validated at their
+/// first lookup, preserving their decode-error order relative to expressions.
 ///
 /// A batch operator prefetches with [`Self::prefetch_rows`], so rows sharing an element
 /// read it once.
@@ -159,6 +160,9 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
             Some(CachedPropertyBlob::Scanned(record)) => {
                 decode_scanned(self.context, &mut self.buffers, &record)?
             }
+            Some(CachedPropertyBlob::Prefetched(value)) => {
+                decode_blob(self.context, &mut self.buffers, Some(value))?
+            }
             Some(blob) => blob,
             None => self.load_blob(element).await?,
         };
@@ -183,12 +187,17 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
             .property_blobs
             .get_mut(element)
             .expect("visited element has a cached property blob");
-        let CachedPropertyBlob::Scanned(record) = blob else {
-            return Ok(blob.row());
-        };
         // A rejected record stays cached unvalidated, so every read of it
         // fails as a repeated storage read would.
-        *blob = decode_scanned(self.context, &mut self.buffers, record)?;
+        *blob = match blob {
+            CachedPropertyBlob::Scanned(record) => {
+                decode_scanned(self.context, &mut self.buffers, record)?
+            }
+            CachedPropertyBlob::Prefetched(value) => {
+                decode_blob(self.context, &mut self.buffers, Some(value.clone()))?
+            }
+            CachedPropertyBlob::Missing | CachedPropertyBlob::Row(_) => return Ok(blob.row()),
+        };
         Ok(blob.row())
     }
 
@@ -229,7 +238,9 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
 
     /// Prefetch what reading any of `properties` from each row always loads:
     /// the row element's record and its edge endpoints, each with one
-    /// multi-get. Records the per-row lookup would skip are never read.
+    /// multi-get, followed by the endpoint nodes needed by property paths.
+    /// Records the per-row lookup would skip are never read. Under a row-memory
+    /// budget, endpoint node records remain lazy to keep single-record admission.
     pub(in crate::execution::interpreter::stream) async fn prefetch_rows(
         &mut self,
         rows: &[ExecutionRow],
@@ -237,6 +248,7 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
     ) -> Result<()> {
         let mut edges = Vec::new();
         let mut records = Vec::new();
+        let mut endpoints = Vec::new();
         for row in rows {
             for property in properties {
                 match PropertySource::of(
@@ -244,14 +256,55 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
                     Some(&row.virtual_properties),
                     property,
                 ) {
-                    PropertySource::EdgeEndpoint { edge_id, .. } => edges.push(edge_id),
+                    PropertySource::EdgeEndpoint {
+                        edge_id,
+                        endpoint,
+                        path,
+                    } => {
+                        edges.push(edge_id);
+                        if path.is_some() && self.context.row_memory.is_none() {
+                            endpoints.push((edge_id, endpoint));
+                        }
+                    }
                     PropertySource::Record(element) => records.push(element),
                     PropertySource::Known(_) => {}
                 }
             }
         }
         self.prefetch_edge_endpoints(&edges).await?;
-        self.prefetch(records).await
+        self.prefetch(records).await?;
+        // Deduplicate in place to avoid set-building and sort scratch allocations
+        // when many rows select the same endpoint nodes.
+        let mut nodes = Vec::with_capacity(endpoints.len());
+        nodes.extend(endpoints.into_iter().filter_map(|(edge_id, endpoint)| {
+            self.edge_endpoints
+                .get(&edge_id)
+                .copied()
+                .flatten()
+                .map(|(from, to)| endpoint.node_id(from, to))
+        }));
+        nodes.sort_unstable();
+        nodes.dedup();
+        nodes.retain(|id| !self.property_blobs.contains_key(&ElementRef::Node(*id)));
+        if nodes.is_empty() {
+            return Ok(());
+        }
+        let keys = nodes
+            .iter()
+            .map(|id| self.context.property_blob_key(&ElementRef::Node(*id)))
+            .collect::<Vec<_>>();
+        let values = self.context.multi_get_raw(&keys).await?;
+        for (node_id, value) in nodes.into_iter().zip(values) {
+            #[cfg(test)]
+            self.context.record_property_get();
+            // Unlike current-element records, these were decoded on demand.
+            // Keep that order relative to earlier expressions and node errors.
+            self.property_blobs.insert(
+                ElementRef::Node(node_id),
+                value.map_or(CachedPropertyBlob::Missing, CachedPropertyBlob::Prefetched),
+            );
+        }
+        Ok(())
     }
 
     /// Load the endpoints of `edges` not yet visited with one multi-get.
@@ -438,17 +491,21 @@ enum CachedPropertyBlob {
     /// A record the caller already read, accounted for and validated when
     /// first read.
     Scanned(storage::ScannedRecord),
+    /// An endpoint node fetched in a batch, validated at its first lookup.
+    Prefetched(bytes::Bytes),
     Row(view::Row),
 }
 
 impl CachedPropertyBlob {
-    /// The validated record. Callers validate a [`Self::Scanned`] record,
-    /// replacing it, before reading it.
+    /// The validated record. Callers validate scanned or prefetched records,
+    /// replacing them, before reading them.
     fn row(&self) -> Option<&view::Row> {
         match self {
             Self::Missing => None,
             Self::Row(row) => Some(row),
-            Self::Scanned(_) => unreachable!("a scanned record is validated before it is read"),
+            Self::Scanned(_) | Self::Prefetched(_) => {
+                unreachable!("a cached record is validated before it is read")
+            }
         }
     }
 }
