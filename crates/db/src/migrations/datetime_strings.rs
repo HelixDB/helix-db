@@ -21,7 +21,7 @@
 //!
 //! Progress is one JSON row in the unscoped metadata namespace, committed after
 //! every batch, so the job resumes after a restart. Older binaries never read
-//! that row. A row whose conversion would collide in a unique index keeps its
+//! that row. A value whose conversion would collide in a unique index keeps its
 //! string and is counted, as is every skipped property.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -161,7 +161,7 @@ pub(crate) struct SkippedProperty {
 pub(crate) struct Report {
     /// String values rewritten as datetimes.
     pub(crate) converted_values: u64,
-    /// Rows left as strings because the datetime collides in a unique index.
+    /// Values left as strings because the datetime collides in a unique index.
     pub(crate) unique_conflicts: u64,
     /// Properties with RFC3339 strings left as stored, first ones listed.
     pub(crate) skipped_properties: Vec<SkippedProperty>,
@@ -508,52 +508,45 @@ struct RowConversion {
     values: Vec<(String, String, i64)>,
 }
 
+/// The response name of each converted value, row by row: `r{row}v{value}`.
+fn value_names(rows: &[RowConversion]) -> impl Iterator<Item = String> + '_ {
+    rows.iter().enumerate().flat_map(|(row, conversion)| {
+        (0..conversion.values.len()).map(move |value| format!("r{row}v{value}"))
+    })
+}
+
+/// One write converting every value of `rows`, each guarded on its own
+/// stored string: a concurrent write to one property of a row leaves that
+/// property as written and still converts the row's others.
 fn conversion_request(element: Element, rows: &[RowConversion]) -> QueryRequest {
-    let names = (0..rows.len())
-        .map(|index| format!("r{index}"))
-        .collect::<Vec<_>>();
+    let names = value_names(rows).collect::<Vec<_>>();
     let batch = rows
         .iter()
+        .flat_map(|row| row.values.iter().map(move |value| (row.id, value)))
         .zip(&names)
-        .fold(write_batch(), |batch, (row, name)| {
-            let guard = Predicate::and(
-                row.values
-                    .iter()
-                    .map(|(property, stored, _)| Predicate::eq(property.as_str(), stored.as_str()))
-                    .collect(),
-            );
-            let mut sets = row.values.iter().map(|(property, _, millis)| {
-                (
-                    property.clone(),
-                    PropertyInput::from(DateTime::from_millis(*millis)),
-                )
-            });
-            let (property, value) = sets
-                .next()
-                .expect("a conversion row has at least one value");
-            match element {
-                Element::Node => batch.var_as(
-                    name.as_str(),
-                    sets.fold(
-                        g().n(NodeRef::id(row.id))
+        .fold(
+            write_batch(),
+            |batch, ((id, (property, stored, millis)), name)| {
+                let guard = Predicate::eq(property.as_str(), stored.as_str());
+                let value = PropertyInput::from(DateTime::from_millis(*millis));
+                match element {
+                    Element::Node => batch.var_as(
+                        name.as_str(),
+                        g().n(NodeRef::id(id))
                             .where_(guard)
-                            .set_property(property, value),
-                        |traversal, (property, value)| traversal.set_property(property, value),
-                    )
-                    .count(),
-                ),
-                Element::Edge => batch.var_as(
-                    name.as_str(),
-                    sets.fold(
-                        g().e(EdgeRef::id(row.id))
+                            .set_property(property.clone(), value)
+                            .count(),
+                    ),
+                    Element::Edge => batch.var_as(
+                        name.as_str(),
+                        g().e(EdgeRef::id(id))
                             .where_(guard)
-                            .set_property(property, value),
-                        |traversal, (property, value)| traversal.set_property(property, value),
-                    )
-                    .count(),
-                ),
-            }
-        });
+                            .set_property(property.clone(), value)
+                            .count(),
+                    ),
+                }
+            },
+        );
     QueryRequest::write(batch.returning(names))
 }
 
@@ -579,18 +572,12 @@ async fn execute(
     .map_err(HelixDbError::from)
 }
 
-/// Values rewritten by a conversion response: each row's string count when
-/// its guarded traversal matched (counted 1, not 0).
+/// Values rewritten by a conversion response: those whose guarded traversal
+/// matched (counted 1, not 0).
 fn converted_values(response: &serde_json::Value, rows: &[RowConversion]) -> u64 {
-    rows.iter()
-        .enumerate()
-        .filter(|(index, _)| {
-            response[format!("r{index}")]
-                .as_u64()
-                .is_some_and(|matched| matched > 0)
-        })
-        .map(|(_, row)| row.values.len() as u64)
-        .sum()
+    value_names(rows)
+        .filter(|name| response[name].as_u64().is_some_and(|matched| matched > 0))
+        .count() as u64
 }
 
 #[allow(
@@ -658,6 +645,9 @@ async fn convert(
             conversions.push(RowConversion { id, values });
         }
     }
+    // A test writes here, between the batch's reads and its write.
+    #[cfg(test)]
+    tests::pause_before_conversion().await;
     if !conversions.is_empty() {
         match execute(db, data_scope, conversion_request(element, &conversions)).await {
             Ok(response) => {
@@ -665,11 +655,17 @@ async fn convert(
                     .converted_values
                     .saturating_add(converted_values(&response, &conversions));
             }
-            // One collision fails the whole batch: retry row by row so only the
-            // colliding rows keep their strings.
+            // One collision fails the whole batch: retry value by value so only
+            // the colliding values keep their strings, not the rest of their rows.
             Err(HelixDbError::UniqueConstraintViolation { .. }) => {
-                for row in conversions {
-                    let single = std::slice::from_ref(&row);
+                let singles = conversions.into_iter().flat_map(|row| {
+                    row.values.into_iter().map(move |value| RowConversion {
+                        id: row.id,
+                        values: vec![value],
+                    })
+                });
+                for single in singles {
+                    let single = std::slice::from_ref(&single);
                     match execute(db, data_scope, conversion_request(element, single)).await {
                         Ok(response) => {
                             report.converted_values = report
@@ -697,7 +693,8 @@ async fn convert(
     })
 }
 
-fn job_key() -> Bytes {
+/// The unscoped metadata key of the job's progress row.
+pub(super) fn job_key() -> Bytes {
     scoped_metadata_key(DataScope::LegacyUnscoped, JOB_KEY)
 }
 
@@ -712,7 +709,10 @@ pub(crate) async fn load(store: &slatedb::Db) -> Result<Option<Job>> {
 
 /// Advances the job by one batch and commits its progress.
 ///
-/// Returns `false` once the job has completed, or on a reader handle.
+/// Returns `false` once the job has completed, or on a reader handle. It does
+/// not pace itself: the background worker takes a batch only while the
+/// writer's flush backlog is low (see
+/// [`crate::migrations::LabelCopySession::admit_step`]).
 pub(crate) async fn process_once(db: &HelixDB, tuning: MigrationTuning) -> Result<bool> {
     let HelixStorage::Writer(writer) = db.storage() else {
         return Ok(false);
