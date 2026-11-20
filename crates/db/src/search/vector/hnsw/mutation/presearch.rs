@@ -761,7 +761,8 @@ impl<D: Distance + 'static> VectorIndex<D> {
     }
 }
 
-/// Runs `work` on `count` threads of its own, sending each result back.
+/// Runs `work` on `count` threads of its own, sending each result back once
+/// its thread let go of `work`.
 ///
 /// Not on the blocking pool: a worker holds its thread while it waits for the
 /// planner, and the planner may need the pool (to shrink its session, say), so
@@ -781,8 +782,15 @@ where
             let (work, runtime) = (work.clone(), runtime.clone());
             std::thread::Builder::new()
                 .name(format!("helix-vector-presearch-{index}"))
-                // A send fails only once the run is gone, and its result with it.
-                .spawn(move || drop(sender.send(runtime.block_on(work()))))
+                .spawn(move || {
+                    let result = runtime.block_on(work());
+                    // Whoever holds every result may count on what `work`
+                    // shares being released: settling an attempt keeps its
+                    // graph only once no worker holds it.
+                    drop(work);
+                    // A send fails only once the run is gone, and its result with it.
+                    drop(sender.send(result));
+                })
                 .inspect_err(|error| {
                     tracing::warn!(%error, "vector pre-search worker could not start");
                 })
