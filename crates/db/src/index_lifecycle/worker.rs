@@ -57,7 +57,6 @@ const SUPERVISOR_RESTART_DELAY: Duration = Duration::from_millis(10);
 const IDLE_DELAY: Duration = Duration::from_secs(24 * 60 * 60);
 /// Operation-family lanes plus the queued-publication lane.
 const DISPATCH_LANES: usize = OPERATION_FAMILIES.len() + 1;
-const IDLE_DISPATCH_ATTEMPTS: usize = DISPATCH_LANES;
 
 /// Installed runtime service for one physical index family.
 #[derive(Clone)]
@@ -312,7 +311,7 @@ impl InFlightTask {
 
     async fn execute(self, db: Arc<slatedb::Db>) -> Result<InFlightCompletion> {
         let target = self.target();
-        let (delay_millis, did_work) = match self {
+        let did_work = match self {
             Self::Operation {
                 claim,
                 driver,
@@ -354,7 +353,7 @@ impl InFlightTask {
                         );
                         #[cfg(feature = "index-lifecycle-testing")]
                         lifecycle_metrics.observe_worker_claim_conflict();
-                        break 'operation (None, true);
+                        break 'operation true;
                     }
                 };
                 #[cfg(feature = "index-lifecycle-testing")]
@@ -419,11 +418,10 @@ impl InFlightTask {
                     };
                     claimed = retained;
                 }
-                (None, true)
+                true
             }
             Self::TextCompaction { driver, _permits } => {
-                let did_work = driver.compact_active_text_once(db.as_ref()).await?;
-                (None, did_work)
+                driver.compact_active_text_once(db.as_ref()).await?
             }
             Self::Publication {
                 target,
@@ -431,30 +429,30 @@ impl InFlightTask {
                 _permits,
             } => {
                 let outcome = publisher.publish_once(target).await?;
-                (
-                    None,
-                    matches!(
-                        outcome,
-                        PublicationOutcome::Published { .. }
-                            | PublicationOutcome::Discarded { .. }
-                            | PublicationOutcome::Trimmed
-                            | PublicationOutcome::Blocked
-                    ),
+                matches!(
+                    outcome,
+                    PublicationOutcome::Published { .. }
+                        | PublicationOutcome::Discarded { .. }
+                        | PublicationOutcome::Trimmed
+                        | PublicationOutcome::Blocked
                 )
             }
         };
-        Ok(InFlightCompletion {
-            target,
-            delay_millis,
-            did_work,
-        })
+        Ok(InFlightCompletion { target, did_work })
     }
 }
 
 struct InFlightCompletion {
     target: InFlightTarget,
-    delay_millis: Option<u64>,
     did_work: bool,
+}
+
+/// A bounded scan keeps its position for fairness. Work or a wake invalidates
+/// its idle proof, so a partial suffix must wrap before it can report idle.
+#[derive(Clone, Copy, Default)]
+struct OperationScan {
+    cursor: Option<IndexOperationId>,
+    wrap_before_idle: bool,
 }
 
 enum DispatchAttempt {
@@ -749,24 +747,24 @@ async fn dispatch_worker_cycle(
     } = context;
     let page_size = OperationQueuePageSize::new(DEFAULT_OPERATION_PAGE_SIZE)?;
     let permits = WorkerPermits::new(concurrency);
-    let mut operation_cursors = [None; OPERATION_FAMILIES.len()];
+    let mut operation_scans = [OperationScan::default(); OPERATION_FAMILIES.len()];
     let mut operation_family_index = 0_usize;
-    let mut lanes_without_work = 0_usize;
-    let mut earliest_delay = None::<u64>;
+    let mut lanes_without_work = [false; DISPATCH_LANES];
+    let mut earliest_deadline = None::<tokio::time::Instant>;
 
     loop {
         while let Some(joined) = tasks.try_join_next() {
             if finish_joined_task(
                 joined,
                 targets,
-                &mut earliest_delay,
                 #[cfg(feature = "index-lifecycle-testing")]
                 lifecycle_metrics,
             )? {
-                lanes_without_work = 0;
-                earliest_delay = None;
-            } else {
-                lanes_without_work = lanes_without_work.saturating_add(1);
+                lanes_without_work.fill(false);
+                for scan in &mut operation_scans {
+                    scan.wrap_before_idle = scan.cursor.is_some();
+                }
+                earliest_deadline = None;
             }
         }
         if *shutdown.borrow() {
@@ -774,75 +772,44 @@ async fn dispatch_worker_cycle(
         }
         let lane = operation_family_index;
         operation_family_index = (operation_family_index + 1) % DISPATCH_LANES;
-        let Some(&family) = OPERATION_FAMILIES.get(lane) else {
-            let attempt =
-                schedule_publication_task(publisher, &permits, targets, &mut earliest_delay);
-            match attempt {
-                DispatchAttempt::Scheduled(task) => {
-                    lanes_without_work = 0;
-                    let target = task.target();
-                    assert!(
-                        targets.insert(target),
-                        "one durable index target cannot execute twice"
-                    );
-                    let task_db = Arc::clone(db);
-                    tasks.spawn(async move {
-                        JoinedInFlightTask {
-                            target,
-                            result: (*task).execute(task_db).await,
-                        }
-                    });
-                }
-                DispatchAttempt::Continue => lanes_without_work = 0,
-                DispatchAttempt::Idle => {
-                    lanes_without_work = lanes_without_work.saturating_add(1);
-                }
-            }
-            if lanes_without_work >= IDLE_DISPATCH_ATTEMPTS {
-                lanes_without_work = 0;
-                if wait_for_work(
-                    shutdown,
-                    tasks,
+        // A completed sweep does not exclude new work arriving while another
+        // lane continues scanning.
+        let attempt = 'dispatch: {
+            let Some(&family) = OPERATION_FAMILIES.get(lane) else {
+                break 'dispatch schedule_publication_task(
+                    publisher,
+                    &permits,
                     targets,
-                    wake,
-                    &mut earliest_delay,
-                    publisher.is_some_and(|publisher| publisher.has_outstanding_work()),
-                    sweep_interval,
-                    #[cfg(feature = "index-lifecycle-testing")]
-                    lifecycle_metrics,
-                )
-                .await?
-                {
-                    return Ok(WorkerCycleExit::Shutdown);
-                }
+                    &mut earliest_deadline,
+                );
+            };
+            let attempt = schedule_operation_task(
+                db,
+                capabilities,
+                &permits,
+                targets,
+                family,
+                &mut operation_scans[lane],
+                page_size,
+                writer_epoch,
+                same_epoch_proof,
+                claim_sequences,
+                shutdown,
+                &mut earliest_deadline,
+                #[cfg(feature = "index-lifecycle-testing")]
+                lifecycle_metrics,
+            )
+            .await?;
+            if family == IndexOperationFamily::Text && matches!(attempt, DispatchAttempt::Idle) {
+                schedule_text_compaction_task(db, capabilities, &permits, targets).await?
+            } else {
+                attempt
             }
-            continue;
         };
-        let cursor = &mut operation_cursors[lane];
-        let mut attempt = schedule_operation_task(
-            db,
-            capabilities,
-            &permits,
-            targets,
-            family,
-            cursor,
-            page_size,
-            writer_epoch,
-            same_epoch_proof,
-            claim_sequences,
-            shutdown,
-            &mut earliest_delay,
-            #[cfg(feature = "index-lifecycle-testing")]
-            lifecycle_metrics,
-        )
-        .await?;
-        if family == IndexOperationFamily::Text && matches!(attempt, DispatchAttempt::Idle) {
-            attempt = schedule_text_compaction_task(db, capabilities, &permits, targets).await?;
-        }
 
         match attempt {
             DispatchAttempt::Scheduled(task) => {
-                lanes_without_work = 0;
+                lanes_without_work.fill(false);
                 let target = task.target();
                 assert!(
                     targets.insert(target),
@@ -857,25 +824,25 @@ async fn dispatch_worker_cycle(
                 });
                 continue;
             }
-            DispatchAttempt::Continue => {
-                lanes_without_work = 0;
-                continue;
-            }
+            DispatchAttempt::Continue => continue,
             DispatchAttempt::Idle => {
-                lanes_without_work = lanes_without_work.saturating_add(1);
+                lanes_without_work[lane] = true;
             }
         }
 
-        if lanes_without_work < IDLE_DISPATCH_ATTEMPTS {
+        if !lanes_without_work.iter().all(|idle| *idle) {
             continue;
         }
-        lanes_without_work = 0;
+        lanes_without_work.fill(false);
+        for scan in &mut operation_scans {
+            scan.wrap_before_idle = scan.cursor.is_some();
+        }
         if wait_for_work(
             shutdown,
             tasks,
             targets,
             wake,
-            &mut earliest_delay,
+            &mut earliest_deadline,
             publisher.is_some_and(|publisher| publisher.has_outstanding_work()),
             sweep_interval,
             #[cfg(feature = "index-lifecycle-testing")]
@@ -903,16 +870,17 @@ async fn wait_for_work(
     tasks: &mut JoinSet<JoinedInFlightTask>,
     targets: &mut HashSet<InFlightTarget>,
     wake: &Notify,
-    earliest_delay: &mut Option<u64>,
+    earliest_deadline: &mut Option<tokio::time::Instant>,
     queued_work: bool,
     sweep_interval: Duration,
     #[cfg(feature = "index-lifecycle-testing")] lifecycle_metrics: &Arc<
         crate::index_lifecycle_testing::AutomaticLifecycleMetrics,
     >,
 ) -> Result<bool> {
-    let mut delay = earliest_delay
+    let now = tokio::time::Instant::now();
+    let mut delay = earliest_deadline
         .take()
-        .map(Duration::from_millis)
+        .map(|deadline| deadline.saturating_duration_since(now))
         .unwrap_or(IDLE_DELAY);
     if queued_work {
         delay = delay.min(sweep_interval);
@@ -933,15 +901,14 @@ async fn wait_for_work(
                 if finish_joined_task(
                     joined,
                     targets,
-                    earliest_delay,
                     #[cfg(feature = "index-lifecycle-testing")]
                     lifecycle_metrics,
                 )? {
-                    *earliest_delay = None;
+                    *earliest_deadline = None;
                 }
             }
             () = wake.notified() => {}
-            () = tokio::time::sleep(delay) => {}
+            () = tokio::time::sleep_until(now + delay) => {}
         }
         return Ok(false);
     }
@@ -952,7 +919,7 @@ async fn wait_for_work(
             }
         }
         () = wake.notified() => {}
-        () = tokio::time::sleep(delay) => {}
+        () = tokio::time::sleep_until(now + delay) => {}
     }
     Ok(false)
 }
@@ -961,7 +928,7 @@ fn schedule_publication_task(
     publisher: Option<&Arc<QueuePublisher>>,
     permits: &WorkerPermits,
     targets: &HashSet<InFlightTarget>,
-    earliest_delay: &mut Option<u64>,
+    earliest_deadline: &mut Option<tokio::time::Instant>,
 ) -> DispatchAttempt {
     let Some(publisher) = publisher else {
         return DispatchAttempt::Idle;
@@ -977,11 +944,9 @@ fn schedule_publication_task(
     let target = match publisher.next_target(&in_flight, now) {
         NextTarget::Ready(target) => target,
         NextTarget::Delayed(not_before) => {
-            let delay_millis = u64::try_from(not_before.saturating_duration_since(now).as_millis())
-                .unwrap_or(u64::MAX)
-                .max(1);
-            *earliest_delay =
-                Some(earliest_delay.map_or(delay_millis, |current| current.min(delay_millis)));
+            let deadline = tokio::time::Instant::from_std(not_before);
+            *earliest_deadline =
+                Some(earliest_deadline.map_or(deadline, |current| current.min(deadline)));
             return DispatchAttempt::Idle;
         }
         NextTarget::Idle => return DispatchAttempt::Idle,
@@ -1034,7 +999,6 @@ struct JoinedInFlightTask {
 fn finish_joined_task(
     joined: std::result::Result<JoinedInFlightTask, JoinError>,
     targets: &mut HashSet<InFlightTarget>,
-    earliest_delay: &mut Option<u64>,
     #[cfg(feature = "index-lifecycle-testing")] lifecycle_metrics: &Arc<
         crate::index_lifecycle_testing::AutomaticLifecycleMetrics,
     >,
@@ -1052,10 +1016,6 @@ fn finish_joined_task(
     );
     let completion = joined.result?;
     assert_eq!(completion.target, joined.target);
-    if let Some(delay_millis) = completion.delay_millis {
-        *earliest_delay =
-            Some(earliest_delay.map_or(delay_millis, |current| current.min(delay_millis)));
-    }
     Ok(completion.did_work)
 }
 
@@ -1091,32 +1051,32 @@ async fn schedule_operation_task(
     permits: &WorkerPermits,
     targets: &HashSet<InFlightTarget>,
     family: IndexOperationFamily,
-    cursor: &mut Option<IndexOperationId>,
+    scan: &mut OperationScan,
     page_size: OperationQueuePageSize,
     writer_epoch: WriterEpoch,
     same_epoch_proof: Option<SameEpochRecoveryProof>,
     claim_sequences: &ClaimSequenceAllocator,
     shutdown: &watch::Receiver<bool>,
-    earliest_delay: &mut Option<u64>,
+    earliest_deadline: &mut Option<tokio::time::Instant>,
     #[cfg(feature = "index-lifecycle-testing")] lifecycle_metrics: &Arc<
         crate::index_lifecycle_testing::AutomaticLifecycleMetrics,
     >,
 ) -> Result<DispatchAttempt> {
-    let wrapping = cursor.is_some();
     let Some((driver, limits)) = capabilities.driver(family) else {
-        *cursor = None;
+        *scan = OperationScan::default();
         return Ok(DispatchAttempt::Idle);
     };
     let Some(task_permits) = permits.try_operation(family) else {
         return Ok(DispatchAttempt::Idle);
     };
     let driver = Arc::clone(driver);
-    let page = outbox::scan_operation_queue_page(db, *cursor, page_size).await?;
+    let page = outbox::scan_operation_queue_page(db, scan.cursor, page_size).await?;
     for operation_id in page.operation_ids {
-        *cursor = Some(operation_id);
+        scan.cursor = Some(operation_id);
         if targets.contains(&InFlightTarget::Operation(operation_id)) {
             continue;
         }
+        let observed_at = tokio::time::Instant::now();
         let observation =
             outbox::observe_operation_pointer(db, operation_id, writer_epoch, now_unix_millis())
                 .await?;
@@ -1129,8 +1089,9 @@ async fn schedule_operation_task(
                 (eligible, ClaimPermission::SameEpochRecovery(proof))
             }
             OperationPointerObservation::Delayed { delay_millis } => {
-                *earliest_delay =
-                    Some(earliest_delay.map_or(delay_millis, |current| current.min(delay_millis)));
+                let deadline = observed_at + Duration::from_millis(delay_millis);
+                *earliest_deadline =
+                    Some(earliest_deadline.map_or(deadline, |current| current.min(deadline)));
                 continue;
             }
             OperationPointerObservation::StalePointerRemoved => continue,
@@ -1138,6 +1099,7 @@ async fn schedule_operation_task(
         if eligible.record.family() != family {
             continue;
         }
+        scan.wrap_before_idle = true;
         return Ok(DispatchAttempt::Scheduled(Box::new(
             InFlightTask::Operation {
                 target: operation_id,
@@ -1157,14 +1119,14 @@ async fn schedule_operation_task(
         )));
     }
     if page.prefix_exhausted {
-        *cursor = None;
-        Ok(if wrapping {
+        scan.cursor = None;
+        Ok(if std::mem::take(&mut scan.wrap_before_idle) {
             DispatchAttempt::Continue
         } else {
             DispatchAttempt::Idle
         })
     } else {
-        *cursor = page.resume_after;
+        scan.cursor = page.resume_after;
         Ok(DispatchAttempt::Continue)
     }
 }
@@ -1214,24 +1176,14 @@ mod tests {
         }
     }
 
-    /// A task whose claim finds the operation already moved commits nothing
-    /// and still reports work, so the dispatcher scans the queue again
-    /// instead of counting it as an idle lane and sleeping for `IDLE_DELAY`.
-    #[tokio::test]
-    async fn a_lost_claim_counts_as_work() {
-        let db = Arc::new(
-            Db::builder("worker-lost-claim", Arc::new(InMemory::new()))
-                .build()
-                .await
-                .unwrap(),
-        );
+    fn fixture(ordinal: u8) -> (IndexRecordV2, IndexOperationRecord) {
         let definition = ValidatedDynamicIndexDefinition::try_from(
-            SecondaryIndexDefinition::node_equality("User", "email").unwrap(),
+            SecondaryIndexDefinition::node_equality(format!("User{ordinal}"), "email").unwrap(),
         )
         .unwrap();
-        let operation_id = IndexOperationId::from_bytes([7; 16]).unwrap();
+        let operation_id = IndexOperationId::from_bytes([ordinal; 16]).unwrap();
         let index = IndexRecordV2::building(
-            IndexId::initial(),
+            IndexId::new(u64::from(ordinal)).unwrap(),
             definition,
             IndexRevision::initial(),
             PhysicalGeneration::Secondary {
@@ -1260,6 +1212,22 @@ mod tests {
             },
         )
         .unwrap();
+        (index, operation)
+    }
+
+    /// A task whose claim finds the operation already moved commits nothing
+    /// and still reports work, so the dispatcher scans the queue again
+    /// instead of counting it as an idle lane and sleeping for `IDLE_DELAY`.
+    #[tokio::test]
+    async fn a_lost_claim_counts_as_work() {
+        let db = Arc::new(
+            Db::builder("worker-lost-claim", Arc::new(InMemory::new()))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let (index, operation) = fixture(7);
+        let operation_id = operation.operation_id();
         outbox::enqueue_operation(
             &db,
             DataScope::LegacyUnscoped,
@@ -1311,7 +1279,230 @@ mod tests {
         };
         let completion = task.execute(db).await.unwrap();
         assert!(completion.did_work);
-        assert_eq!(completion.delay_millis, None);
+    }
+
+    #[tokio::test]
+    async fn delayed_pages_finish_a_sweep() {
+        for count in [64, 65] {
+            let db = Db::builder("worker-delayed-pages", Arc::new(InMemory::new()))
+                .with_settings(slatedb::Settings {
+                    flush_interval: Some(Duration::from_millis(1)),
+                    ..Default::default()
+                })
+                .build()
+                .await
+                .unwrap();
+            let epoch = WriterEpoch::new_v4();
+            for ordinal in 1..=count {
+                let (index, operation) = fixture(ordinal);
+                let delayed = operation
+                    .claim(super::super::OperationClaim {
+                        writer_epoch: epoch,
+                        sequence: ClaimSequence::new(u64::from(ordinal)).unwrap(),
+                    })
+                    .unwrap()
+                    .transient_failure(now_unix_millis() + 30_000)
+                    .unwrap();
+                let transaction = db
+                    .begin(slatedb::IsolationLevel::SerializableSnapshot)
+                    .await
+                    .unwrap();
+                use crate::encoding::v2::values;
+                let scope = DataScope::LegacyUnscoped;
+                transaction
+                    .put(
+                        outbox::scoped_index_key_for_identity(scope, index.identity()),
+                        values::encode_index_record(&index),
+                    )
+                    .unwrap();
+                transaction
+                    .put(
+                        outbox::scoped_operation_key(scope, delayed.operation_id()),
+                        values::encode_operation_record(&delayed),
+                    )
+                    .unwrap();
+                transaction
+                    .put(
+                        outbox::global_operation_key(delayed.operation_id()),
+                        values::encode_metadata_value(
+                            &super::super::IndexV2MetadataValue::OperationQueuePointer(
+                                outbox::pointer_for(scope, &delayed),
+                            ),
+                        ),
+                    )
+                    .unwrap();
+                transaction.commit().await.unwrap();
+            }
+            let capabilities = test_capabilities();
+            let permits = WorkerPermits::new(IndexLifecycleConcurrency::default());
+            let mut cursor = Default::default();
+            let mut delay = None;
+            for attempt in 0..2 {
+                let result = schedule_operation_task(
+                    &db,
+                    &capabilities,
+                    &permits,
+                    &HashSet::new(),
+                    IndexOperationFamily::Secondary,
+                    &mut cursor,
+                    OperationQueuePageSize::new(64).unwrap(),
+                    epoch,
+                    None,
+                    &ClaimSequenceAllocator::new(),
+                    &watch::channel(false).1,
+                    &mut delay,
+                    #[cfg(feature = "index-lifecycle-testing")]
+                    &Arc::new(crate::index_lifecycle_testing::AutomaticLifecycleMetrics::new()),
+                )
+                .await
+                .unwrap();
+                assert!(
+                    if attempt == 0 {
+                        matches!(result, DispatchAttempt::Continue)
+                    } else {
+                        matches!(result, DispatchAttempt::Idle)
+                    },
+                    "a delayed full page continues, but its exhausted suffix is idle"
+                );
+            }
+            assert!(delay.is_some_and(|deadline| {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                !remaining.is_zero() && remaining <= Duration::from_secs(30)
+            }));
+            db.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_partial_sweep_wraps_to_ready_work_before_idling() {
+        let db = Db::open("worker-wrap", Arc::new(InMemory::new()))
+            .await
+            .unwrap();
+        let epoch = WriterEpoch::new_v4();
+        let capabilities = test_capabilities();
+        let permits = WorkerPermits::new(IndexLifecycleConcurrency::default());
+        let sequences = ClaimSequenceAllocator::new();
+        let mut cursor = Default::default();
+        let mut delay = None;
+        let mut targets = HashSet::new();
+        // Scheduling the later key leaves a partial scan. A new key can then
+        // arrive behind it, and must be found before this lane reports idle.
+        for ordinal in [100, 1] {
+            let (index, operation) = fixture(ordinal);
+            outbox::enqueue_operation(
+                &db,
+                DataScope::LegacyUnscoped,
+                outbox::ExpectedCanonicalRevision::Absent,
+                &index,
+                &operation,
+            )
+            .await
+            .unwrap();
+            if ordinal == 1 {
+                let result = schedule_operation_task(
+                    &db,
+                    &capabilities,
+                    &permits,
+                    &targets,
+                    IndexOperationFamily::Secondary,
+                    &mut cursor,
+                    OperationQueuePageSize::new(64).unwrap(),
+                    epoch,
+                    None,
+                    &sequences,
+                    &watch::channel(false).1,
+                    &mut delay,
+                    #[cfg(feature = "index-lifecycle-testing")]
+                    &Arc::new(crate::index_lifecycle_testing::AutomaticLifecycleMetrics::new()),
+                )
+                .await
+                .unwrap();
+                assert!(matches!(result, DispatchAttempt::Continue));
+            }
+            let result = schedule_operation_task(
+                &db,
+                &capabilities,
+                &permits,
+                &targets,
+                IndexOperationFamily::Secondary,
+                &mut cursor,
+                OperationQueuePageSize::new(64).unwrap(),
+                epoch,
+                None,
+                &sequences,
+                &watch::channel(false).1,
+                &mut delay,
+                #[cfg(feature = "index-lifecycle-testing")]
+                &Arc::new(crate::index_lifecycle_testing::AutomaticLifecycleMetrics::new()),
+            )
+            .await
+            .unwrap();
+            let DispatchAttempt::Scheduled(task) = result else {
+                panic!("ready work behind the cursor must be scheduled before idling");
+            };
+            assert_eq!(
+                task.target(),
+                InFlightTarget::Operation(operation.operation_id())
+            );
+            targets.insert(task.target());
+        }
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn scan_time_does_not_restart_a_retry_delay() {
+        for elapsed in [1, 4] {
+            for in_flight in [false, true] {
+                let (_shutdown, mut shutdown) = watch::channel(false);
+                let mut tasks = JoinSet::new();
+                if in_flight {
+                    tasks.spawn(std::future::pending());
+                }
+                let mut targets = HashSet::new();
+                let wake = Notify::new();
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                let mut delay = Some(deadline);
+                tokio::time::advance(Duration::from_secs(elapsed)).await;
+                let before_wait = tokio::time::Instant::now();
+                assert!(!wait_for_work(
+                    &mut shutdown,
+                    &mut tasks,
+                    &mut targets,
+                    &wake,
+                    &mut delay,
+                    false,
+                    Duration::from_secs(1),
+                    #[cfg(feature = "index-lifecycle-testing")]
+                    &Arc::new(crate::index_lifecycle_testing::AutomaticLifecycleMetrics::new()),
+                )
+                .await
+                .unwrap());
+                assert_eq!(tokio::time::Instant::now(), deadline.max(before_wait));
+                assert!(delay.is_none());
+                tasks.shutdown().await;
+            }
+        }
+    }
+
+    fn test_capabilities() -> IndexFamilyCapabilities {
+        let capability = IndexFamilyCapability::new(
+            Arc::new(NeverSteps),
+            SearchIndexBackfillLimits::default().batch(),
+            IndexDriverScheduling::Automatic,
+        );
+        struct NoCompaction;
+        #[async_trait]
+        impl ActiveTextCompactionDriver for NoCompaction {
+            async fn compact_active_text_once(&self, _db: &Db) -> Result<bool> {
+                Ok(false)
+            }
+        }
+        IndexFamilyCapabilities::new(
+            capability.clone(),
+            capability.clone(),
+            capability,
+            Arc::new(NoCompaction),
+        )
     }
 
     /// Progresses one entity per step, sleeping `delay` first, and completes
