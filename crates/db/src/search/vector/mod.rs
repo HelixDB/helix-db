@@ -130,7 +130,6 @@ pub mod spaces;
 mod storage;
 pub mod unaligned_vector;
 
-use std::collections::HashSet;
 use std::num::NonZeroUsize;
 
 use bytes::Bytes;
@@ -753,27 +752,25 @@ fn select_layer_from_uniform(ml: f32, uniform: f32) -> u16 {
 
 /// HNSW Algorithm 4: select up to `m` diverse neighbors.
 ///
-/// `candidates` must be sorted by distance to `ref_item` (closest first).
-/// `get_item` resolves a NodeId to its Item for inter-candidate distance checks.
-/// Falls back to the closest remaining resolvable items if diversity filtering
-/// yields fewer than `m` results. Missing item rows are never persisted as new
-/// graph neighbors.
+/// `candidates` must be sorted by distance to `ref_item` (closest first), each
+/// with its Item for inter-candidate distance checks, or none when it has no
+/// item. Falls back to the closest remaining candidates with an item if
+/// diversity filtering yields fewer than `m` results. Missing item rows are
+/// never persisted as new graph neighbors.
 pub(crate) fn select_diverse<'a, D: Distance>(
     ref_item: &Item<'_, D>,
-    candidates: &[Candidate],
-    get_item: &dyn Fn(NodeId) -> Option<&'a Item<'static, D>>,
+    candidates: impl Iterator<Item = (Candidate, Option<&'a Item<'static, D>>)> + Clone,
     m: usize,
 ) -> Result<Vec<NodeId>, HelixDbError> {
     let _ = ref_item; // ref_item context is captured in candidate distances
     let mut selected: Vec<NodeId> = Vec::with_capacity(m);
-    let mut selected_ids: HashSet<NodeId> = HashSet::with_capacity(m);
     let mut selected_items: Vec<&'a Item<'static, D>> = Vec::with_capacity(m);
 
-    for c in candidates {
+    for (c, c_item) in candidates.clone() {
         if selected.len() >= m {
             break;
         }
-        let Some(c_item) = get_item(c.node_id) else {
+        let Some(c_item) = c_item else {
             continue;
         };
 
@@ -788,18 +785,18 @@ pub(crate) fn select_diverse<'a, D: Distance>(
         }
         if is_diverse {
             selected.push(c.node_id);
-            selected_ids.insert(c.node_id);
             selected_items.push(c_item);
         }
     }
 
-    // Backfill with closest remaining if diversity was too aggressive
+    // Backfill with closest remaining if diversity was too aggressive. The
+    // at most `m` selected nodes are scanned rather than kept in a hashed set.
     if selected.len() < m {
-        for c in candidates {
+        for (c, c_item) in candidates {
             if selected.len() >= m {
                 break;
             }
-            if get_item(c.node_id).is_some() && selected_ids.insert(c.node_id) {
+            if c_item.is_some() && !selected.contains(&c.node_id) {
                 selected.push(c.node_id);
             }
         }
@@ -1413,7 +1410,14 @@ mod tests {
         ];
         candidates.sort();
 
-        let selected = select_diverse(&query, &candidates, &|id| item_map.get(&id), 2).unwrap();
+        let selected = select_diverse(
+            &query,
+            candidates
+                .iter()
+                .map(|&candidate| (candidate, item_map.get(&candidate.node_id))),
+            2,
+        )
+        .unwrap();
         assert_eq!(selected, vec![1, 3]);
     }
 
@@ -1429,7 +1433,14 @@ mod tests {
             Candidate::try_new(2, 1.1).unwrap(),
         ];
 
-        let selected = select_diverse(&query, &candidates, &|id| item_map.get(&id), 2).unwrap();
+        let selected = select_diverse(
+            &query,
+            candidates
+                .iter()
+                .map(|&candidate| (candidate, item_map.get(&candidate.node_id))),
+            2,
+        )
+        .unwrap();
         assert_eq!(selected, vec![1, 2]);
     }
 

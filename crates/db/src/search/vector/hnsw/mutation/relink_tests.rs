@@ -163,8 +163,9 @@ async fn reference_relink_neighbor<D: Distance>(
         distances.sort();
         current_neighbors = select_diverse(
             neighbor_item.as_ref(),
-            &distances,
-            &|node_id| items.get(&node_id).map(|item| item.as_ref()),
+            distances
+                .iter()
+                .map(|&candidate| (candidate, items.get(&candidate.node_id).map(Arc::as_ref))),
             maximum_neighbors,
         )?;
     }
@@ -218,8 +219,9 @@ async fn reference_relink_neighbor<D: Distance>(
             reverse_distances.sort();
             reverse_neighbors = select_diverse(
                 reverse_item.as_ref(),
-                &reverse_distances,
-                &|node_id| items.get(&node_id).map(|item| item.as_ref()),
+                reverse_distances
+                    .iter()
+                    .map(|&candidate| (candidate, items.get(&candidate.node_id).map(Arc::as_ref))),
                 maximum_neighbors,
             )?;
         }

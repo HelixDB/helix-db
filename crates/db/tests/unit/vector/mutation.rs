@@ -1766,7 +1766,8 @@ fn build_session_scratch_contract() {
     cache.scratch.frontier.extend([1, 2, 3]);
     cache.scratch.frontier.reserve(64);
     let lent = cache.scratch.frontier.capacity();
-    cache.scratch.items.found.insert(1, Arc::clone(&found));
+    cache.scratch.items.found.push(Some(Arc::clone(&found)));
+    cache.scratch.items.loaded.insert(1, Arc::clone(&found));
     cache.scratch.items.missing.push(2);
     cache.scratch.items.seen_missing.insert(2);
     cache.scratch.scored.insert(3, Arc::clone(&scored));
@@ -1775,7 +1776,8 @@ fn build_session_scratch_contract() {
     assert_eq!(session.caches[&first].scratch.frontier.capacity(), 0);
     assert_eq!(session.scratch.frontier.capacity(), lent);
     assert!(session.scratch.frontier.is_empty());
-    assert!(session.scratch.items.is_empty());
+    assert!(session.scratch.items.found.is_empty());
+    assert!(session.scratch.items.loaded.is_empty());
     assert!(session.scratch.items.missing.is_empty());
     assert!(session.scratch.items.seen_missing.is_empty());
     assert!(session.scratch.scored.is_empty());

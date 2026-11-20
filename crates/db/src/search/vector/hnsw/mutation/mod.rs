@@ -1085,12 +1085,17 @@ impl<D: Distance> VectorIndex<D> {
                 neighbor_items,
             )
             .await?;
+            // The batch holds the unscored neighbors in frontier order.
+            let mut unscored_items = neighbor_items.found.iter();
             newly_admitted_neighbors.clear();
             for &neighbor_id in frontier.iter() {
                 let score = match beam_distances.memoized(layer, neighbor_id) {
                     Some(score) => score,
                     None => {
-                        let Some(neighbor_item) = neighbor_items.get(neighbor_id) else {
+                        let Some(neighbor_item) = unscored_items
+                            .next()
+                            .expect("one batched lookup per unscored neighbor")
+                        else {
                             continue;
                         };
                         let score = D::distance(query, neighbor_item);
@@ -1193,8 +1198,8 @@ impl<D: Distance> VectorIndex<D> {
             self.get_items_for_layer_cached_batch(txn, layer, frontier, mutation_cache, items)
                 .await?;
             let mut changed = false;
-            for &neighbor_id in frontier.iter() {
-                let Some(item) = items.get(neighbor_id) else {
+            for (&neighbor_id, item) in frontier.iter().zip(&items.found) {
+                let Some(item) = item else {
                     continue;
                 };
                 let distance = Candidate::try_new(neighbor_id, D::distance(query, item))?.score();
@@ -1241,10 +1246,13 @@ impl<D: Distance> VectorIndex<D> {
         );
         self.get_items_for_layer_cached_batch(txn, layer, candidate_ids, mutation_cache, items)
             .await?;
+        // Zipping stops at the last hydrated candidate.
         select_diverse(
             query,
-            candidates,
-            &|node_id| items.get(node_id),
+            candidates
+                .iter()
+                .copied()
+                .zip(items.found.iter().map(Option::as_deref)),
             maximum_neighbors,
         )
     }
@@ -1652,7 +1660,7 @@ impl<D: Distance> VectorIndex<D> {
             node_ids: candidate_neighbors,
             frontier: hydrate,
             items,
-            ranked: distances,
+            link_ranked: distances,
             rejected,
             ..
         } = scratch;
@@ -1676,36 +1684,42 @@ impl<D: Distance> VectorIndex<D> {
             hydrate.extend_from_slice(to_neighbors);
             self.get_items_for_layer_cached_batch(txn, layer, hydrate, mutation_cache, items)
                 .await?;
-            match items.get(to_node) {
-                Some(to_item) => {
+            // The batch holds the destination, then its neighbors in row
+            // order, so each candidate keeps its position to find its item
+            // once ranked.
+            match items.found.split_first() {
+                Some((Some(to_item), neighbor_items)) => {
                     distances.clear();
-                    for &neighbor_id in to_neighbors.iter() {
+                    for (position, (&neighbor_id, neighbor_item)) in
+                        to_neighbors.iter().zip(neighbor_items).enumerate()
+                    {
                         if neighbor_id == from_node {
-                            distances.push(Candidate::try_new(
-                                neighbor_id,
-                                D::distance(to_item, from_item),
-                            )?);
+                            distances.push((
+                                Candidate::try_new(neighbor_id, D::distance(to_item, from_item))?,
+                                position,
+                            ));
                             continue;
                         }
-                        let Some(neighbor_item) = items.get(neighbor_id) else {
+                        let Some(neighbor_item) = neighbor_item else {
                             continue;
                         };
-                        distances.push(Candidate::try_new(
-                            neighbor_id,
-                            D::distance(to_item, neighbor_item),
-                        )?);
+                        distances.push((
+                            Candidate::try_new(neighbor_id, D::distance(to_item, neighbor_item))?,
+                            position,
+                        ));
                     }
                     // Neighbors are unique, so an unstable sort orders them
-                    // exactly as a stable one would.
+                    // exactly as a stable one would, and never by position.
                     distances.sort_unstable();
                     selected = Some(select_diverse(
                         to_item,
-                        distances,
-                        &|node_id| items.get(node_id),
+                        distances.iter().map(|&(candidate, position)| {
+                            (candidate, neighbor_items[position].as_deref())
+                        }),
                         maximum_neighbors,
                     )?);
                 }
-                None => to_neighbors.truncate(maximum_neighbors),
+                Some((None, _)) | None => to_neighbors.truncate(maximum_neighbors),
             }
         }
 
@@ -2097,10 +2111,7 @@ impl<D: Distance> VectorIndex<D> {
             .await?;
         Ok(RelinkCandidates {
             layer,
-            items: node_ids
-                .into_iter()
-                .map(|node_id| (node_id, loaded.remove(node_id)))
-                .collect(),
+            items: node_ids.into_iter().zip(loaded.found).collect(),
         })
     }
 
@@ -2234,8 +2245,9 @@ impl<D: Distance> VectorIndex<D> {
             distances.sort_unstable();
             selected = Some(select_diverse(
                 neighbor_item.as_ref(),
-                distances,
-                &|node_id| items.get(&node_id).map(|item| item.as_ref()),
+                distances
+                    .iter()
+                    .map(|&candidate| (candidate, items.get(&candidate.node_id).map(Arc::as_ref))),
                 maximum_neighbors,
             )?);
         }
@@ -2288,8 +2300,9 @@ impl<D: Distance> VectorIndex<D> {
                 distances.sort_unstable();
                 reverse_selected = Some(select_diverse(
                     reverse_item.as_ref(),
-                    distances,
-                    &|node_id| items.get(&node_id).map(|item| item.as_ref()),
+                    distances.iter().map(|&candidate| {
+                        (candidate, items.get(&candidate.node_id).map(Arc::as_ref))
+                    }),
                     maximum_neighbors,
                 )?);
             }
@@ -2317,25 +2330,30 @@ pub(in crate::search::vector) struct RelinkCandidates<D: Distance> {
     items: HashMap<NodeId, Option<Arc<Item<'static, D>>>>,
 }
 
-/// Items of the nodes one batched lookup found, reused across lookups.
+/// Items one batched lookup found, reused across lookups.
 ///
 /// [`VectorIndex::get_items_for_layer_cached_batch`] clears and refills it,
-/// so it holds exactly the requested nodes that have an item at the layer.
-/// Absent nodes are omitted, and a node requested twice is held once.
+/// so `found` holds one entry per requested node, in request order: its item,
+/// or none when it has no item at the layer. A caller pairs a node with its
+/// item by position. That is deliberate: the lookup runs per scored node, and
+/// a map keyed by node would be filled, probed, and cleared for every one.
 #[derive(Debug)]
 pub(in crate::search::vector) struct ItemBatch<D: Distance> {
-    pub(super) found: foldhash::HashMap<NodeId, Arc<Item<'static, D>>>,
+    pub(super) found: Vec<Option<Arc<Item<'static, D>>>>,
     /// Unique cache misses of the current lookup, in request order.
     pub(super) missing: Vec<NodeId>,
     pub(super) seen_missing: foldhash::HashSet<NodeId>,
+    /// Items the current lookup read for its cache misses.
+    pub(super) loaded: foldhash::HashMap<NodeId, Arc<Item<'static, D>>>,
 }
 
 impl<D: Distance> Default for ItemBatch<D> {
     fn default() -> Self {
         Self {
-            found: foldhash::HashMap::default(),
+            found: Vec::new(),
             missing: Vec::new(),
             seen_missing: foldhash::HashSet::default(),
+            loaded: foldhash::HashMap::default(),
         }
     }
 }
@@ -2346,36 +2364,12 @@ impl<D: Distance> ItemBatch<D> {
         self.found.clear();
         self.missing.clear();
         self.seen_missing.clear();
-    }
-
-    /// Returns the item found for `node_id`.
-    pub(in crate::search::vector) fn get(&self, node_id: NodeId) -> Option<&Item<'static, D>> {
-        self.found.get(&node_id).map(Arc::as_ref)
-    }
-
-    /// Takes the item found for `node_id` out of the batch.
-    pub(in crate::search::vector) fn remove(
-        &mut self,
-        node_id: NodeId,
-    ) -> Option<Arc<Item<'static, D>>> {
-        self.found.remove(&node_id)
-    }
-
-    /// Returns whether an item was found for `node_id`.
-    #[cfg(test)]
-    pub(in crate::search::vector) fn contains(&self, node_id: NodeId) -> bool {
-        self.found.contains_key(&node_id)
-    }
-
-    /// Returns how many requested nodes have an item.
-    #[cfg(test)]
-    pub(in crate::search::vector) fn len(&self) -> usize {
-        self.found.len()
+        self.loaded.clear();
     }
 
     /// Returns whether no requested node has an item.
     pub(in crate::search::vector) fn is_empty(&self) -> bool {
-        self.found.is_empty()
+        self.found.iter().all(Option::is_none)
     }
 }
 
@@ -2414,6 +2408,9 @@ pub(in crate::search::vector) struct MutationScratch<D: Distance> {
     node_ids: Vec<NodeId>,
     /// Distance-ranked candidates of one selection.
     ranked: Vec<Candidate>,
+    /// Distance-ranked candidates of one link's pruning, each with its
+    /// position among the row's neighbors.
+    link_ranked: Vec<(Candidate, usize)>,
     /// Neighbors one link's pruning dropped.
     rejected: Vec<NodeId>,
     /// Items one relink selection scores.
@@ -2438,6 +2435,7 @@ impl<D: Distance> Default for MutationScratch<D> {
             neighbors: Vec::new(),
             node_ids: Vec::new(),
             ranked: Vec::new(),
+            link_ranked: Vec::new(),
             rejected: Vec::new(),
             scored: foldhash::HashMap::default(),
             unscored: Vec::new(),
@@ -2477,10 +2475,12 @@ impl<D: Distance> MutationScratch<D> {
                     found,
                     missing,
                     seen_missing,
+                    loaded,
                 },
             neighbors,
             node_ids,
             ranked,
+            link_ranked,
             rejected,
             scored,
             unscored,
@@ -2498,9 +2498,11 @@ impl<D: Distance> MutationScratch<D> {
             found,
             missing,
             seen_missing,
+            loaded,
             neighbors,
             node_ids,
             ranked,
+            link_ranked,
             rejected,
             scored,
             unscored,

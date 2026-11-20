@@ -113,22 +113,16 @@ fn distance_neighbors_exercise_metric_and_graph_invariants() {
     assert_eq!(distance::Manhattan::norm(&manhattan_left), 14.0_f32.sqrt());
 
     let missing_candidate = model::Candidate::try_new(99, 0.5).unwrap();
-    assert!(select_diverse(
-        &euclidean_left,
-        &[missing_candidate],
-        &|_| None::<&item::Item<'static, distance::Euclidean>>,
-        1,
-    )
-    .unwrap()
-    .is_empty());
-    assert!(select_diverse(
-        &manhattan_left,
-        &[missing_candidate],
-        &|_| None::<&item::Item<'static, distance::Manhattan>>,
-        1,
-    )
-    .unwrap()
-    .is_empty());
+    assert!(
+        select_diverse(&euclidean_left, [(missing_candidate, None)].into_iter(), 1,)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        select_diverse(&manhattan_left, [(missing_candidate, None)].into_iter(), 1,)
+            .unwrap()
+            .is_empty()
+    );
     let zero_left = item::Item::<distance::Cosine>::new(vec![0.0, 0.0]);
     let zero_right = item::Item::<distance::Cosine>::new(vec![0.0, 0.0]);
     let candidates = [
@@ -137,12 +131,9 @@ fn distance_neighbors_exercise_metric_and_graph_invariants() {
     ];
     assert!(select_diverse(
         &zero_left,
-        &candidates,
-        &|node_id| match node_id {
-            1 => Some(&zero_left),
-            2 => Some(&zero_right),
-            _ => None,
-        },
+        candidates
+            .into_iter()
+            .zip([Some(&zero_left), Some(&zero_right)]),
         2,
     )
     .is_err());
