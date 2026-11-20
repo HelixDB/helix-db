@@ -23,6 +23,7 @@ use crate::execution::interpreter::{
     ElementRef, ExecutionResult, ExecutionScalar, ExecutionValue, ReturnedValue, ReturnedValues,
 };
 use crate::execution_control::ExecutionControl;
+pub use crate::query_resources::CommitTimings;
 use crate::HelixDB;
 
 pub mod insight_tally;
@@ -457,7 +458,7 @@ async fn execute_validated<B: ResponseBody>(
     execution_control.check()?;
     // Planning and execution share the request's one parameter copy.
     let (params, proof) = prepared.into_execution_inputs();
-    let returns = db
+    let (returns, commit_timings) = db
         .execute_prepared_returns_scoped_controlled(
             planning.plan(),
             params,
@@ -469,7 +470,9 @@ async fn execute_validated<B: ResponseBody>(
         )
         .await?;
     let (_, diagnostics) = planning.into_parts();
-    QueryResponse::encode(&returns, diagnostics)
+    let mut response = QueryResponse::encode(&returns, diagnostics)?;
+    response.commit_timings = commit_timings;
+    Ok(response)
 }
 
 enum ValidatedQuery {
@@ -595,6 +598,7 @@ fn query_param_bindings(
 pub struct QueryResponse<B = Vec<u8>> {
     body: B,
     diagnostics: PlannerDiagnostics,
+    commit_timings: CommitTimings,
 }
 
 impl QueryResponse {
@@ -645,7 +649,14 @@ impl<B> QueryResponse<B> {
         Ok(Self {
             body: B::encode(&ReturnsJson(returns))?,
             diagnostics,
+            commit_timings: CommitTimings::default(),
         })
+    }
+
+    /// Time the request spent committing; empty for a read and for a response
+    /// encoded outside request execution.
+    pub const fn commit_timings(&self) -> CommitTimings {
+        self.commit_timings
     }
 
     /// Borrow the telemetry-safe diagnostics for the exact executed plan.
@@ -2490,6 +2501,71 @@ mod tests {
         for response in [execute, warm, scoped, scoped_warm] {
             assert_eq!(response.json().get("count"), Some(&JsonValue::from(0)));
         }
+    }
+
+    /// The response says how long its request spent committing: nothing for a
+    /// read, and no durable wait for a write that returns once applied.
+    #[tokio::test]
+    async fn query_response_carries_the_commit_timings_of_its_mode() {
+        let db = Arc::new(
+            HelixDB::open(HelixDbSource::InMemory {
+                database: "query-service-commit-timings".to_string(),
+            })
+            .await
+            .expect("writer should open"),
+        );
+        let service = HelixQueryService::new(db);
+        let write = || {
+            QueryRequest::write(helix_ast::batch::write_batch().var_as(
+                "created",
+                g().add_n(
+                    "Timed",
+                    vec![("rank", helix_ast::value::PropertyInput::from(1_i64))],
+                ),
+            ))
+        };
+
+        let durable = service
+            .execute_query(write())
+            .await
+            .expect("durable write should commit")
+            .commit_timings();
+        assert!(durable.commit.is_some() && durable.durable.is_some());
+
+        let applied = service
+            .execute_query_with_mode(write(), QueryMode::ExecuteWithoutDurableWait)
+            .await
+            .expect("applied write should commit")
+            .commit_timings();
+        assert!(applied.commit.is_some());
+        assert_eq!(applied.durable, None);
+
+        let read = service
+            .execute_query(QueryRequest::read(
+                read_batch()
+                    .var_as("count", g().n_with_label("Timed").count())
+                    .returning(["count"]),
+            ))
+            .await
+            .expect("read should execute");
+        assert_eq!(read.json().get("count"), Some(&JsonValue::from(2)));
+        assert_eq!(read.commit_timings(), CommitTimings::default());
+
+        let ddl = service
+            .execute_query_with_mode(
+                QueryRequest::write(helix_ast::batch::write_batch().var_as(
+                    "operation",
+                    g().create_index_if_not_exists(helix_ast::index::IndexSpec::node_equality(
+                        "Timed", "rank",
+                    )),
+                )),
+                QueryMode::ExecuteWithoutDurableWait,
+            )
+            .await
+            .expect("index DDL should execute")
+            .commit_timings();
+        assert_eq!(ddl.commit, None);
+        assert!(ddl.durable.is_some());
     }
 
     #[tokio::test]

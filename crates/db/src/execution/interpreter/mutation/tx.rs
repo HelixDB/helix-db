@@ -77,7 +77,9 @@ impl<'db> ExecutionContext<'db> {
             RequestWriteScopeState::Active(active) => *active,
             RequestWriteScopeState::Disabled => return Ok(()),
         };
-        self.commit_write_tx(active).await
+        let timings = self.commit_write_tx(active).await?;
+        self.commit_timings.add(timings);
+        Ok(())
     }
 
     /// Opens the one snapshot transaction owned by the request scope.
@@ -186,11 +188,14 @@ impl<'db> ExecutionContext<'db> {
 
         self.prepared_memberships.clear();
         self.pending_sets = Arc::default();
-        self.commit_write_tx(ActiveWriteTx {
-            txn: scope.txn,
-            index_context: scope.index_context,
-        })
-        .await
+        let timings = self
+            .commit_write_tx(ActiveWriteTx {
+                txn: scope.txn,
+                index_context: scope.index_context,
+            })
+            .await?;
+        self.commit_timings.add(timings);
+        Ok(())
     }
 
     /// Which of `node_ids` exist in the request transaction, for a step that
@@ -272,7 +277,14 @@ impl<'db> ExecutionContext<'db> {
     /// the limit fails with a timeout while its applied commit may still
     /// become durable. With nothing to write, it waits instead for the
     /// snapshot its response may rest on, within its deadline as well.
-    pub(super) async fn commit_write_tx(&self, mut active: ActiveWriteTx) -> Result<()> {
+    ///
+    /// Returns how long the commit took to become visible and, for a durable
+    /// request, how long it then waited.
+    pub(super) async fn commit_write_tx(
+        &self,
+        mut active: ActiveWriteTx,
+    ) -> Result<crate::query_resources::CommitTimings> {
+        let commit_started = std::time::Instant::now();
         active.index_context.prepare_topology(&active.txn)?;
         let uncovered = super::observations::RowKeys::new(
             active
@@ -359,8 +371,12 @@ impl<'db> ExecutionContext<'db> {
             None => futures::future::Either::Right(complete),
         };
         let committed = self.db.inner.commit_completions.run(complete)?.await?;
+        let commit = Some(commit_started.elapsed());
         if durability == CommitDurability::Applied {
-            return Ok(());
+            return Ok(crate::query_resources::CommitTimings {
+                commit,
+                durable: None,
+            });
         }
         let crate::HelixStorage::Writer(writer) = self.db.storage() else {
             unreachable!("a prepared write retains its original writer runtime");
@@ -370,6 +386,7 @@ impl<'db> ExecutionContext<'db> {
                 .await
                 .map_err(HelixDbError::from_storage_commit)
         };
+        let durable_started = std::time::Instant::now();
         match committed {
             Some(sequence) => {
                 crate::execution_control::ExecutionControl::from_timeout(self.durable_wait_limit)
@@ -381,7 +398,11 @@ impl<'db> ExecutionContext<'db> {
                     .run_within(self.durable_wait_limit, durable_through(snapshot_sequence))
                     .await
             }
-        }
+        }?;
+        Ok(crate::query_resources::CommitTimings {
+            commit,
+            durable: Some(durable_started.elapsed()),
+        })
     }
 }
 

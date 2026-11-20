@@ -204,6 +204,33 @@ error codes and retry guidance, and
 [Helix Cloud gateway errors](/database/helix-cloud/operate/error-handling) for
 gateway codes.
 
+### Response timing
+
+A local server reports where its time went on every response to a
+`POST /v2/query`, `POST /v2/cypher` or `POST /v2/sql` request, and to their
+`explain` routes, as a standard
+[`Server-Timing`](https://www.w3.org/TR/server-timing/) header in milliseconds:
+
+```text
+Server-Timing: exec;dur=1.204, commit;dur=0.310, durable;dur=41.870
+```
+
+| Metric | Present on | Measures |
+| --- | --- | --- |
+| `exec` | Every request | Parsing, planning and execution: everything not counted below. |
+| `commit` | Graph writes | Applying the commit on the writer, including its turn behind other commits. |
+| `durable` | Graph writes that wait, and index creation or removal | Waiting for the WAL upload to object storage. A graph write sent with `X-Helix-Await-Durable: false` omits it. |
+
+The metrics never overlap, and the clock starts once the request body has fully
+arrived, so their sum is the server's share of the latency a client measured.
+The rest is network and upload time. A failed or explained request reports
+`exec` alone, and a request rejected before its body is read reports nothing. Over
+gRPC, the same value is the `server-timing` response metadata, timed from the
+moment the handler receives the message and present on every response.
+
+One durable wait is not separated: when an insert extends the writer's ID lease
+(its first insert, then rarely), that upload counts in `exec`.
+
 ## Cypher
 
 Send a single statement with optional parameters and a query name. The server
