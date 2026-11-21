@@ -449,6 +449,8 @@ mod tests {
                 BuildOperationOutcome::Aborted
             ))
         ));
+        // A store that does not admit dropped-generation entries gets none.
+        assert_eq!(entries(&transaction).await, vec![]);
 
         let artifact = test_support::artifact_row(
             scope,

@@ -14423,6 +14423,8 @@ mod tests {
         )
         .await
         .is_empty());
+        // A store that does not admit dropped-generation entries gets none.
+        assert_eq!(dropped::load_entries(&db).await.unwrap(), vec![]);
 
         let (build_id, _, next_generation) = create_build(&db, scope, &definition, 0).await;
         assert!(next_generation.get() > generation.get());
@@ -14461,6 +14463,7 @@ mod tests {
                 .await
                 .is_empty());
         }
+        assert_eq!(dropped::load_entries(&db).await.unwrap(), vec![]);
         db.close().await.expect("secondary test database closes");
     }
 
