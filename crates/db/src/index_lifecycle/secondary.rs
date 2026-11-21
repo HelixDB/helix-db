@@ -14573,6 +14573,44 @@ mod tests {
                     Vec::<Bytes>::new()
                 );
             } else {
+                // A step that ended between the two entry lanes holds no
+                // cursor but counts its deletes: it keeps deleting.
+                let ValidatedDynamicIndexDefinition::Secondary(secondary) = &definition else {
+                    panic!("the test definition is secondary");
+                };
+                let operation = read_operation(&db, scope, drop_id)
+                    .await
+                    .expect("drop operation is readable")
+                    .expect("drop operation exists");
+                let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+                let counted = SecondaryCleanupProgress::DeleteEntries(PrefixScanProgress {
+                    cursor: None,
+                    counters: OperationCounters {
+                        entities: 1,
+                        ..OperationCounters::default()
+                    },
+                });
+                assert!(matches!(
+                    step_cleanup(
+                        &transaction,
+                        scope,
+                        &operation,
+                        secondary,
+                        &counted,
+                        false,
+                        one_row
+                    )
+                    .await
+                    .unwrap(),
+                    IndexOperationStepResult::Progressed(IndexOperationProgress::SecondaryCleanup(
+                        SecondaryCleanupProgress::DeleteEntries(PrefixScanProgress {
+                            cursor: Some(_),
+                            ..
+                        })
+                    ))
+                ));
+                drop(transaction);
+
                 assert_eq!(
                     drive_one_with_limits(&db, &driver, drop_id, &mut claim_sequence, one_row)
                         .await,
