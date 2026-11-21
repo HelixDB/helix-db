@@ -520,26 +520,29 @@ async fn run_row_contracts(db: &Db) {
         .get_items_for_layer_cached_batch(&txn, 0, &[], &mut cache, &mut batch)
         .await
         .unwrap();
-    assert!(batch.is_empty());
+    assert!(batch.found.is_empty());
     let mut absent_only = MutationOpCache::<Cosine>::default();
     index
         .get_items_for_layer_cached_batch(&txn, 0, &[99], &mut absent_only, &mut batch)
         .await
         .unwrap();
-    assert!(batch.is_empty());
+    assert!(matches!(batch.found.as_slice(), [None]));
     assert!(absent_only.item_is_known_absent(0, 99));
     index
         .get_items_for_layer_cached_batch(&txn, 0, &[1, 1, 99], &mut cache, &mut batch)
         .await
         .unwrap();
-    assert_eq!(batch.len(), 1);
-    assert!(batch.contains(1));
+    // One entry per requested node, in request order.
+    let [Some(first), Some(repeated), None] = batch.found.as_slice() else {
+        panic!("a batch pairs each requested node with its item by position");
+    };
+    assert!(Arc::ptr_eq(first, repeated));
     // A reused batch holds exactly the latest lookup's items.
     index
         .get_items_for_layer_cached_batch(&txn, 0, &[99], &mut cache, &mut batch)
         .await
         .unwrap();
-    assert!(batch.is_empty() && !batch.contains(1));
+    assert!(matches!(batch.found.as_slice(), [None]));
     assert!(index
         .get_item_for_layer_cached(&txn, 0, 1, &mut cache)
         .await
@@ -571,8 +574,7 @@ async fn run_row_contracts(db: &Db) {
         .get_items_for_layer_cached_batch(&txn, 0, &[1, 99], &mut cached_batch, &mut batch)
         .await
         .unwrap();
-    assert_eq!(batch.len(), 1);
-    assert!(batch.contains(1));
+    assert!(matches!(batch.found.as_slice(), [Some(_), None]));
 
     for node_id in 20_000_u64
         ..20_000_u64 + u64::try_from(super::super::mutation::VECTOR_BUILD_ITEM_CACHE_LIMIT).unwrap()
@@ -583,7 +585,7 @@ async fn run_row_contracts(db: &Db) {
         .get_items_for_layer_cached_batch(&txn, 0, &[1], &mut cached_batch, &mut batch)
         .await
         .unwrap();
-    assert!(batch.contains(1));
+    assert!(matches!(batch.found.as_slice(), [Some(_)]));
     assert!(cached_batch.item_count() <= super::super::mutation::VECTOR_BUILD_ITEM_CACHE_LIMIT);
 
     let (results, stats) = index
@@ -613,9 +615,7 @@ async fn run_row_contracts(db: &Db) {
         .get_items_for_layer_cached_batch(&txn, 1, &[1, 2, 99], &mut upper_batch, &mut loaded)
         .await
         .unwrap();
-    assert_eq!(loaded.len(), 2);
-    assert!(loaded.contains(1));
-    assert!(loaded.contains(2));
+    assert!(matches!(loaded.found.as_slice(), [Some(_), Some(_), None]));
     txn.rollback();
 
     let snapshot = db.snapshot().await.unwrap();

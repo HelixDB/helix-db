@@ -460,6 +460,34 @@ async fn a_panicking_worker_never_returns_its_overlay() {
     }
 }
 
+#[tokio::test]
+async fn a_worker_lets_go_of_its_work_before_its_result_arrives() {
+    /// Reports its release only after a slow drop, as a worker's context
+    /// releases its graph only after everything it drops first.
+    struct SlowRelease(Arc<AtomicBool>);
+
+    impl Drop for SlowRelease {
+        fn drop(&mut self) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
+    let released = Arc::new(AtomicBool::new(false));
+    let held = Arc::new(SlowRelease(Arc::clone(&released)));
+    let workers = spawn_workers(NonZeroUsize::new(2).unwrap(), move || {
+        let held = Arc::clone(&held);
+        async move { drop(held) }
+    });
+    for worker in workers {
+        worker.await.expect("a worker returns");
+    }
+    assert!(
+        released.load(Ordering::Relaxed),
+        "settling would find the graph still shared and drop it"
+    );
+}
+
 #[test]
 fn a_worker_reads_the_graph_without_copying_it() {
     let mut read = overlay();
