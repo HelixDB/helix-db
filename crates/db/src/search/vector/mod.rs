@@ -1386,7 +1386,7 @@ mod tests {
         item_map.insert(3, euclidean_item(-10.0));
         item_map.insert(4, euclidean_item(20.0));
 
-        let mut candidates = vec![
+        let mut candidates = [
             Candidate::try_new(
                 1,
                 distance::Euclidean::distance(&query, item_map.get(&1).unwrap()),
