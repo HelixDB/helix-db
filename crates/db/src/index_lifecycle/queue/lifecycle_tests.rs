@@ -2429,29 +2429,7 @@ async fn a_reclaim_discards_exactly_an_aborted_generation() {
         "the abort left rows of its generation to compactions"
     );
     let deadline = Instant::now() + Duration::from_secs(60);
-    let reclaimed = loop {
-        match db.reclaim_dropped_index_storage().await.unwrap() {
-            // Lost its compaction to one the scheduler picked.
-            crate::DroppedStorageReclaim::Unproven { .. } => {
-                assert!(
-                    Instant::now() < deadline,
-                    "no reclaim proved its compaction"
-                );
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            outcome @ (crate::DroppedStorageReclaim::Idle
-            | crate::DroppedStorageReclaim::Retained { .. }
-            | crate::DroppedStorageReclaim::BelowShare { .. }
-            | crate::DroppedStorageReclaim::Reclaimed { .. }) => break outcome,
-        }
-    };
-    assert!(
-        matches!(
-            reclaimed,
-            crate::DroppedStorageReclaim::Reclaimed { entries: 1, .. }
-        ),
-        "{reclaimed:?}"
-    );
+    crate::index_lifecycle::dropped::reclaim_fixture(&db).await;
     let expected = before
         .into_iter()
         .filter(|(key, _)| !gone.iter().any(|prefix| key.starts_with(prefix)))
@@ -2466,9 +2444,12 @@ async fn a_reclaim_discards_exactly_an_aborted_generation() {
     }
     assert_exact_vectors(&db, &state, SearchConsistency::Strong).await;
     assert_eq!(
-        db.reclaim_dropped_index_storage().await.unwrap(),
+        db.reclaim_dropped_index_storage(Duration::from_secs(60))
+            .await
+            .unwrap(),
         crate::DroppedStorageReclaim::Idle
     );
+    assert_eq!(db.dropped_index_storage().entries(), 0);
     db.close().await.unwrap();
 }
 

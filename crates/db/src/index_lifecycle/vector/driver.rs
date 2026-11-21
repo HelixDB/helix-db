@@ -5565,19 +5565,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_refresh_fails_and_halts_on_an_entry_the_catalog_contradicts() {
-        super::driver_contracts::a_refresh_fails_and_halts_on_an_entry_the_catalog_contradicts()
+    async fn a_refresh_quarantines_an_entry_the_catalog_contradicts() {
+        super::driver_contracts::a_refresh_quarantines_an_entry_the_catalog_contradicts().await;
+    }
+
+    #[tokio::test]
+    async fn a_refresh_quarantines_an_entry_whose_drop_has_not_completed() {
+        super::driver_contracts::a_refresh_quarantines_an_entry_whose_drop_has_not_completed()
             .await;
     }
 
     #[tokio::test]
-    async fn a_refresh_fails_on_an_entry_whose_drop_has_not_completed() {
-        super::driver_contracts::a_refresh_fails_on_an_entry_whose_drop_has_not_completed().await;
-    }
-
-    #[tokio::test]
-    async fn an_id_an_entry_names_is_never_allocated() {
-        super::driver_contracts::an_id_an_entry_names_is_never_allocated().await;
+    async fn an_id_an_entry_names_is_never_allocated_or_never_discarded() {
+        super::driver_contracts::an_id_an_entry_names_is_never_allocated_or_never_discarded().await;
     }
 
     #[test]

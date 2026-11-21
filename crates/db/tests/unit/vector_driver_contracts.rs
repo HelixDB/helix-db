@@ -4930,15 +4930,17 @@ async fn put_mapping(
 }
 
 /// Proves an entry that names rows a live generation owns, or ids that were
-/// never allocated, arms nothing and halts the registry.
+/// never allocated, is quarantined: it is never armed, the refresh succeeds,
+/// and every other entry is armed as if the damaged one were not there.
 ///
 /// Each case starts from a completed drop, whose own entry passes, and
-/// damages the store in one way. A registry that reads the damaged store for
-/// the first time, as an open does, fails and from then on discards nothing.
-/// A registry that armed the drop's entry before the damage fails as well
-/// when the damage is a second entry; it does not look again at an entry it
+/// damages the store in one way: by a second entry, or by making the drop's
+/// own entry wrong. A registry that reads the damaged store for the first
+/// time, as an open does, quarantines the wrong entry with the reason and
+/// keeps doing so. A registry that armed the drop's entry before the damage
+/// quarantines a second entry too; it does not look again at an entry it
 /// has armed.
-pub(super) async fn a_refresh_fails_and_halts_on_an_entry_the_catalog_contradicts() {
+pub(super) async fn a_refresh_quarantines_an_entry_the_catalog_contradicts() {
     for (name, contradiction, reason, adds_an_entry) in [
         (
             "index-above-watermark",
@@ -5164,34 +5166,60 @@ pub(super) async fn a_refresh_fails_and_halts_on_an_entry_the_catalog_contradict
             }
         }
 
+        let stored = dropped::load_entries(&db).await.unwrap();
+        assert_eq!(stored.len(), 1 + usize::from(adds_an_entry), "{name}");
         let opened = dropped::Registry::default();
-        let error = opened.refresh(&db).await.expect_err(name);
-        assert!(
-            matches!(&error, HelixDbError::IndexCatalogCorruption(message) if message.contains(reason)),
-            "{name}: {error}"
-        );
-        assert_eq!(opened.armed(), vec![], "{name}");
-        let error = opened.refresh(&db).await.expect_err(name);
-        assert!(
-            matches!(&error, HelixDbError::IndexCatalogCorruption(message)
-                if message.contains("failed its cross-check")),
-            "{name}: {error}"
-        );
+        // Twice: a quarantined entry is checked again and fails again.
+        for _ in 0..2 {
+            opened.refresh(&db).await.expect(name);
+            let armed = opened
+                .armed()
+                .into_iter()
+                .map(|(entry, _)| entry)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                armed,
+                if adds_an_entry { vec![entry] } else { vec![] },
+                "{name}: only the drop's own entry, while it is right, is armed"
+            );
+            let storage = opened.storage();
+            let [quarantined] = &storage.quarantined[..] else {
+                panic!("{name}: one entry is wrong: {storage:?}");
+            };
+            assert_eq!(quarantined.contradiction, reason, "{name}");
+            assert!(
+                !armed
+                    .iter()
+                    .any(|armed| armed.index_id.get() == quarantined.index_id
+                        && armed.generation.get() == quarantined.generation),
+                "{name}: a quarantined entry is not armed"
+            );
+            assert_eq!(storage.entries(), stored.len(), "{name}");
+        }
 
-        assert_eq!(running.refresh(&db).await.is_err(), adds_an_entry, "{name}");
+        running.refresh(&db).await.expect(name);
         assert_eq!(
-            running.armed().is_empty(),
-            adds_an_entry,
-            "{name}: a halted registry forgets what it armed"
+            running
+                .armed()
+                .into_iter()
+                .map(|(entry, _)| entry)
+                .collect::<Vec<_>>(),
+            vec![entry],
+            "{name}: an armed entry stays armed"
+        );
+        assert_eq!(
+            running.storage().quarantined.len(),
+            usize::from(adds_an_entry),
+            "{name}: a registry does not look again at an entry it has armed"
         );
         db.close().await.expect("vector test database closes");
     }
 }
 
-/// Proves an entry beside a record that is still `Dropping` fails the
-/// refresh: the entry and the `Dropped` record are written together, so one
-/// without the other names rows a drop is still deleting.
-pub(super) async fn a_refresh_fails_on_an_entry_whose_drop_has_not_completed() {
+/// Proves an entry beside a record that is still `Dropping` is quarantined:
+/// the entry and the `Dropped` record are written together, so one without
+/// the other names rows a drop is still deleting.
+pub(super) async fn a_refresh_quarantines_an_entry_whose_drop_has_not_completed() {
     let db = test_db("vector-driver-dropped-contradiction-dropping").await;
     dropped::admit_fixture(&db).await;
     let scope = DataScope::LegacyUnscoped;
@@ -5223,13 +5251,16 @@ pub(super) async fn a_refresh_fails_on_an_entry_whose_drop_has_not_completed() {
     )
     .await;
     let registry = dropped::Registry::default();
-    let error = registry.refresh(&db).await.expect_err("the entry is early");
-    assert!(
-        matches!(&error, HelixDbError::IndexCatalogCorruption(message)
-            if message.contains("names a generation its index record still owns")),
-        "{error}"
-    );
+    registry.refresh(&db).await.expect("the refresh reads");
     assert_eq!(registry.armed(), vec![]);
+    assert_eq!(
+        registry.storage().quarantined,
+        vec![crate::QuarantinedDroppedGeneration {
+            index_id: entry.index_id.get(),
+            generation: entry.generation.get(),
+            contradiction: "names a generation its index record still owns",
+        }]
+    );
     db.close().await.expect("vector test database closes");
 }
 
@@ -5256,11 +5287,14 @@ pub(super) async fn a_refresh_that_fails_before_its_flush_arms_nothing() {
     db.close().await.expect("vector test database closes");
 }
 
-/// Proves no id an entry names is allocated: a new index does not take an
-/// index id, a recreated index a generation, nor an unpartitioned vector
-/// build a physical id that a stored entry gives up to compactions. Each
-/// refusal leaves the catalog as it was.
-pub(super) async fn an_id_an_entry_names_is_never_allocated() {
+/// Proves no logical id an entry names is allocated: a new index does not
+/// take an index id, nor a recreated index a generation, that a stored entry
+/// gives up to compactions. Each refusal leaves the catalog as it was.
+///
+/// A vector physical id is not checked when it is allocated. An entry that
+/// names an unallocated one is quarantined instead, and stays quarantined
+/// once a build has taken the id: the build's record owns it.
+pub(super) async fn an_id_an_entry_names_is_never_allocated_or_never_discarded() {
     let scope = DataScope::LegacyUnscoped;
     let refused = |result: Result<IndexDdlReceipt>, reason: &str| {
         let error = result.expect_err(reason);
@@ -5334,15 +5368,44 @@ pub(super) async fn an_id_an_entry_names_is_never_allocated() {
         },
     )
     .await;
-    refused(
-        create_unpartitioned(&db).await,
-        "names a vector physical index id that was never allocated",
+    let quarantined = |registry: &dropped::Registry| {
+        let storage = registry.storage();
+        assert_eq!(registry.armed(), vec![]);
+        let [quarantined] = &storage.quarantined[..] else {
+            panic!("the entry is wrong: {storage:?}");
+        };
+        quarantined.contradiction
+    };
+    let registry = dropped::Registry::default();
+    registry.refresh(&db).await.expect("the refresh reads");
+    assert_eq!(
+        quarantined(&registry),
+        "names a vector physical index id above the watermark"
     );
-    assert_eq!(peek_vector_physical_id(&db).await.unwrap(), unallocated);
-    assert!(matches!(
-        read_index(&db, scope, &definition(None)).await.state(),
-        IndexStateV2::Dropped { .. }
-    ));
+    create_unpartitioned(&db)
+        .await
+        .expect("the build takes the id the entry names");
+    let building = read_index(&db, scope, &definition(None)).await;
+    let IndexStateV2::Building {
+        physical:
+            PhysicalGeneration::Vector {
+                layout: VectorPhysicalLayout::Unpartitioned { physical_index_id },
+                ..
+            },
+        ..
+    } = building.state()
+    else {
+        panic!("the index is building again");
+    };
+    assert_eq!(*physical_index_id, unallocated);
+    // The registry that saw the id unallocated, and one that opens now.
+    for registry in [registry, dropped::Registry::default()] {
+        registry.refresh(&db).await.expect("the refresh reads");
+        assert_eq!(
+            quarantined(&registry),
+            "names a vector physical index an index record still owns"
+        );
+    }
     db.close().await.expect("vector test database closes");
 }
 

@@ -1094,7 +1094,6 @@ pub(crate) async fn allocate_vector_physical_id(
             .await?
             .is_none()
         {
-            super::dropped::ensure_physical_index_unclaimed(transaction, candidate).await?;
             return Ok(candidate);
         }
         candidate = next_id;

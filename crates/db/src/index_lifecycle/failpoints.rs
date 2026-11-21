@@ -54,15 +54,18 @@ pub enum IndexOutboxFailpoint {
     /// After a dropped-generation entry committed, before this process
     /// flushes and arms it.
     DroppedEntryArmBefore,
-    /// After a reclaim compaction completed, before the entries it proved
-    /// gone are deleted.
+    /// After a retirement pass proved the rows of some entries gone, before
+    /// it deletes anything.
     DroppedEntryDeleteBefore,
+    /// After a retirement pass deleted the partition mappings of the entries
+    /// it retires, before it deletes the entries.
+    DroppedEntryDeleteAfterMappings,
 }
 
 impl IndexOutboxFailpoint {
     /// Complete set used by crash-matrix tests and external harnesses.
     #[cfg(any(test, feature = "index-lifecycle-testing"))]
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::DdlEnqueueBefore,
         Self::DdlEnqueueAfterStaging,
         Self::ClaimBefore,
@@ -82,6 +85,7 @@ impl IndexOutboxFailpoint {
         Self::DroppedEntryStagingBefore,
         Self::DroppedEntryArmBefore,
         Self::DroppedEntryDeleteBefore,
+        Self::DroppedEntryDeleteAfterMappings,
     ];
 
     /// Stable snake-case environment value.
@@ -106,6 +110,7 @@ impl IndexOutboxFailpoint {
             Self::DroppedEntryStagingBefore => "dropped_entry_staging_before",
             Self::DroppedEntryArmBefore => "dropped_entry_arm_before",
             Self::DroppedEntryDeleteBefore => "dropped_entry_delete_before",
+            Self::DroppedEntryDeleteAfterMappings => "dropped_entry_delete_after_mappings",
         }
     }
 
