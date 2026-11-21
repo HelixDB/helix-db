@@ -1163,3 +1163,124 @@ async fn a_text_drop_racing_text_compactions_leaves_nothing_behind() {
     assert_eq!(left, Vec::<Bytes>::new());
     db.close().await.expect("the writer closes");
 }
+
+/// Proves a reclaim deletes no entry its compaction's filters did not vouch
+/// for, even when that compaction completed: here the watch is ended under
+/// the pass at every turn, as if no filter had been created for it.
+#[tokio::test]
+async fn a_reclaim_its_filters_did_not_prove_deletes_no_entry() {
+    let db = open("dropped-reclaim-unproven").await;
+    db.wait_for_background_migrations().await;
+    for seed in 0..48 {
+        add(&db, "Gone", seed).await;
+    }
+    create_index(&db, "Gone").await;
+    drop_index(&db, "Gone").await;
+    let entries = stored_entries(&db).await;
+    assert_eq!(entries.len(), 1);
+
+    let ended = AtomicBool::new(false);
+    let (outcome, ()) = tokio::join!(
+        async {
+            let outcome = db.reclaim_dropped_index_storage().await;
+            ended.store(true, Ordering::SeqCst);
+            outcome.expect("the pass runs")
+        },
+        async {
+            while !ended.load(Ordering::SeqCst) {
+                writer(&db).dropped().unwatch();
+                tokio::task::yield_now().await;
+            }
+        }
+    );
+    assert_eq!(outcome, DroppedStorageReclaim::Unproven { entries: 1 });
+    assert_eq!(stored_entries(&db).await, entries);
+
+    assert!(matches!(
+        reclaim(&db).await,
+        DroppedStorageReclaim::Reclaimed { entries: 1, .. }
+    ));
+    assert_eq!(stored_entries(&db).await, vec![]);
+    db.close().await.expect("the writer closes");
+}
+
+/// Proves a reclaimed partitioned generation loses every partition mapping,
+/// however many writes that takes, and no mapping of another generation.
+#[tokio::test]
+async fn a_reclaim_deletes_every_partition_mapping_of_its_generation_only() {
+    let db = open("dropped-reclaim-mappings").await;
+    db.wait_for_background_migrations().await;
+    let scope = DataScope::LegacyUnscoped;
+    let generation = |generation| DroppedGeneration {
+        index_id: IndexId::new(900).unwrap(),
+        generation: IndexGenerationId::new(generation).unwrap(),
+    };
+    let mappings = |entry| {
+        let prefix = dropped::partition_mappings_prefix(scope, entry);
+        (0..2 * MAPPING_DELETE_BATCH as u32 + 3)
+            .map(|partition| Bytes::from([&prefix[..], &partition.to_be_bytes()].concat()))
+            .collect::<Vec<_>>()
+    };
+    let storage = writer(&db).db();
+    let mut written = WriteBatch::new();
+    for key in mappings(generation(1))
+        .into_iter()
+        .chain(mappings(generation(2)))
+    {
+        written.put(key, b"mapping");
+    }
+    storage.write(written).await.expect("the mappings write");
+    let before = rows(storage).await;
+
+    db.inner
+        .dropped_reclaim
+        .lock()
+        .await
+        .as_ref()
+        .expect("an embedded writer reclaims")
+        .reclaimer()
+        .delete_partition_mappings(generation(1), scope)
+        .await
+        .expect("the mappings delete");
+    let deleted = mappings(generation(1));
+    let expected = before
+        .into_iter()
+        .filter(|(key, _)| !deleted.contains(key))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(rows(storage).await, expected);
+    assert_eq!(
+        expected
+            .keys()
+            .filter(|key| mappings(generation(2)).contains(key))
+            .count(),
+        2 * MAPPING_DELETE_BATCH + 3
+    );
+    db.close().await.expect("the writer closes");
+}
+
+/// Proves a supervisor dropped without `stop` ends its task: nothing keeps
+/// the reclaimer, and the writer it holds, alive behind a handle that was
+/// never closed.
+#[tokio::test]
+async fn a_dropped_supervisor_releases_its_reclaimer() {
+    let db = open("dropped-reclaim-supervisor-drop").await;
+    let HelixStorage::Writer(shared) = db.storage() else {
+        panic!("the contract opens a writer");
+    };
+    let supervisor = ReclaimSupervisor::start(Reclaimer::new(
+        Arc::clone(shared),
+        db.inner.storage.path(),
+        Arc::clone(db.inner.storage.object_store()),
+    ));
+    let reclaimer = Arc::downgrade(&supervisor.reclaimer());
+    assert_eq!(reclaimer.strong_count(), 2, "the supervisor and its task");
+    drop(supervisor);
+    tokio::time::timeout(WAIT, async {
+        while reclaimer.strong_count() > 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the task ends and releases the reclaimer");
+    db.close().await.expect("the writer closes");
+}

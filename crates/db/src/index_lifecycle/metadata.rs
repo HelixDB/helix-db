@@ -251,9 +251,10 @@ pub(crate) enum DroppedGenerationRows {
 
 /// Value of one dropped-generation entry.
 ///
-/// The entry takes effect at its own commit sequence, which SlateDB keeps
-/// with the row: a compaction may discard the generation's rows only once no
-/// snapshot older than that sequence can still read them.
+/// The value holds no sequence. A writer that arms the entry reads it through
+/// a snapshot and takes that snapshot's sequence, at or after the entry's
+/// commit, as the entry's gate: a compaction may discard the generation's
+/// rows only once no snapshot older than the gate can still read them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct DroppedGenerationValue {
     pub(crate) scope: DataScope,

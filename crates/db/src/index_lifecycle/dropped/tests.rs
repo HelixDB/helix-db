@@ -5,6 +5,7 @@ use super::*;
 use crate::encoding::v2::keys::scope::TenantId;
 
 const SCOPE: DataScope = DataScope::Tenant(TenantId::from_u128(7));
+const COMPLETED: Option<CompactionStatus> = Some(CompactionStatus::Completed);
 
 fn entry(index_id: u64) -> DroppedGeneration {
     DroppedGeneration {
@@ -114,38 +115,71 @@ fn a_watch_proves_only_what_every_filter_of_its_destination_discarded() {
     assert_eq!(registry.unwatch(), HashSet::new());
 
     // A watch no filter was created for proves nothing.
-    registry.watch(3);
-    assert_eq!(registry.unwatch(), HashSet::new());
+    assert_eq!(registry.watch(3).proven(COMPLETED), HashSet::new());
 
     // Filters of other destinations are not the watched compaction's.
-    registry.watch(3);
+    let watching = registry.watch(3);
     registry.discardable(&job(2, Some(30)));
-    assert_eq!(registry.unwatch(), HashSet::new());
+    assert_eq!(watching.proven(COMPLETED), HashSet::new());
 
-    registry.watch(3);
+    let watching = registry.watch(3);
     registry.discardable(&job(3, Some(30)));
     registry.discardable(&job(3, Some(30)));
-    assert_eq!(registry.unwatch(), HashSet::from([entry(1), entry(2)]));
-    // The watch ended with the first unwatch.
+    assert_eq!(
+        watching.proven(COMPLETED),
+        HashSet::from([entry(1), entry(2)])
+    );
+    // The watch ended when its proof was read.
     registry.discardable(&job(3, Some(30)));
     assert_eq!(registry.unwatch(), HashSet::new());
 
     // One filter that could not discard an entry withdraws its proof.
-    registry.watch(3);
+    let watching = registry.watch(3);
     registry.discardable(&job(3, Some(30)));
     registry.discardable(&job(3, Some(15)));
-    assert_eq!(registry.unwatch(), HashSet::from([entry(1)]));
-    registry.watch(3);
+    assert_eq!(watching.proven(COMPLETED), HashSet::from([entry(1)]));
+    let watching = registry.watch(3);
     registry.discardable(&job(3, Some(30)));
     registry.discardable(&job(3, None));
-    assert_eq!(registry.unwatch(), HashSet::new());
+    assert_eq!(watching.proven(COMPLETED), HashSet::new());
 
     // A new watch forgets the filters of the one it replaces.
-    registry.watch(3);
+    let replaced = registry.watch(3);
     registry.discardable(&job(3, Some(30)));
-    registry.watch(4);
+    let watching = registry.watch(4);
     registry.discardable(&job(4, Some(15)));
-    assert_eq!(registry.unwatch(), HashSet::from([entry(1)]));
+    assert_eq!(watching.proven(COMPLETED), HashSet::from([entry(1)]));
+    drop(replaced);
+
+    // A watch dropped unread, as a cancelled reclaim pass drops it, ends.
+    drop(registry.watch(3));
+    registry.discardable(&job(3, Some(30)));
+    assert_eq!(registry.unwatch(), HashSet::new());
+}
+
+#[test]
+fn only_a_completed_compaction_proves_what_its_filters_discarded() {
+    let registry = registry(&[(1, 10)]);
+    for status in [
+        None,
+        Some(CompactionStatus::Submitted),
+        Some(CompactionStatus::Scheduled),
+        Some(CompactionStatus::Running),
+        Some(CompactionStatus::Compacted),
+        Some(CompactionStatus::Failed),
+    ] {
+        let watching = registry.watch(3);
+        assert_eq!(
+            registry.discardable(&job(3, Some(30))),
+            HashSet::from([owner(1)])
+        );
+        assert_eq!(watching.proven(status), HashSet::new(), "{status:?}");
+        // The watch ended all the same.
+        assert_eq!(registry.unwatch(), HashSet::new(), "{status:?}");
+    }
+    let watching = registry.watch(3);
+    registry.discardable(&job(3, Some(30)));
+    assert_eq!(watching.proven(COMPLETED), HashSet::from([entry(1)]));
 }
 
 #[test]
@@ -171,12 +205,12 @@ fn a_halted_registry_discards_and_proves_nothing() {
     let registry = registry(&[(1, 10)]);
     *registry.state.lock() = State::Halted;
     assert_eq!(registry.armed(), Vec::new());
-    registry.watch(0);
+    let watching = registry.watch(0);
     assert_eq!(
         registry.discardable(&job(0, Some(u64::MAX))),
         HashSet::new()
     );
-    assert_eq!(registry.unwatch(), HashSet::new());
+    assert_eq!(watching.proven(COMPLETED), HashSet::new());
     registry.disarm(&HashSet::from([entry(1)]));
     assert!(matches!(&*registry.state.lock(), State::Halted));
 }

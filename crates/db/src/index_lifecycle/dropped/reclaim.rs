@@ -30,8 +30,12 @@
 //! the scheduler's L0 compactions while it runs. Its work is lost when a
 //! scheduler compaction of the same runs commits first, or when the process
 //! restarts. An entry whose rows passing compactions have already discarded
-//! stays, costing a filter lookup and a refresh row, until the next reclaim.
-//! Every tick with an armed entry reads the manifest from object storage.
+//! stays, costing a filter lookup and a refresh row, until the next reclaim:
+//! entries below the share accumulate until their sum reaches it or a caller
+//! asks. Every tick reads the entry rows, and every tick with an armed entry
+//! reads the manifest from object storage. A database whose manifest has
+//! segments is not reclaimed: its drops still skip their deletes, and every
+//! pass fails until the reclaim learns to compact segments.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -201,9 +205,8 @@ impl Reclaimer {
         let live_bytes = stored_bytes.saturating_sub(dropped_bytes);
         match trigger {
             Trigger::Share
-                if dropped_bytes == 0
-                    || dropped_bytes.saturating_mul(100)
-                        < live_bytes.saturating_mul(DROPPED_PERCENT_OF_LIVE) =>
+                if dropped_bytes.saturating_mul(100)
+                    < live_bytes.saturating_mul(DROPPED_PERCENT_OF_LIVE) =>
             {
                 return Ok(DroppedStorageReclaim::BelowShare {
                     entries: candidates.len(),
@@ -248,27 +251,17 @@ impl Reclaimer {
             ?trigger,
             "reclaiming dropped generations: compacting every table"
         );
-        registry.watch(destination);
-        let finished = self
+        let watching = registry.watch(destination);
+        // An error or a cancelled pass drops `watching`, which ends the watch.
+        let status = self
             .compacted(CompactionSpec::new(sources, destination))
-            .await;
-        let proven = registry.unwatch();
-        let status = finished?;
-        let reclaimed = match status {
-            Some(CompactionStatus::Completed) => candidates
-                .iter()
-                .copied()
-                .filter(|(entry, _)| proven.contains(entry))
-                .collect::<Vec<_>>(),
-            Some(
-                CompactionStatus::Submitted
-                | CompactionStatus::Scheduled
-                | CompactionStatus::Running
-                | CompactionStatus::Compacted
-                | CompactionStatus::Failed,
-            )
-            | None => Vec::new(),
-        };
+            .await?;
+        let proven = watching.proven(status);
+        let reclaimed = candidates
+            .iter()
+            .copied()
+            .filter(|(entry, _)| proven.contains(entry))
+            .collect::<Vec<_>>();
         if reclaimed.is_empty() {
             tracing::info!(
                 ?status,
@@ -487,6 +480,15 @@ pub(crate) struct ReclaimSupervisor {
     handle: JoinHandle<()>,
 }
 
+/// A supervisor dropped without [`ReclaimSupervisor::stop`] still ends its
+/// task, which would otherwise keep the writer alive.
+impl Drop for ReclaimSupervisor {
+    fn drop(&mut self) {
+        self.reclaimer.closed.send_replace(true);
+        self.handle.abort();
+    }
+}
+
 impl ReclaimSupervisor {
     /// Starts the background passes of `reclaimer`.
     pub(crate) fn start(reclaimer: Reclaimer) -> Self {
@@ -529,9 +531,9 @@ impl ReclaimSupervisor {
 
     /// Ends the background task and any pass in flight, before storage
     /// closes.
-    pub(crate) async fn stop(self) {
+    pub(crate) async fn stop(mut self) {
         self.reclaimer.closed.send_replace(true);
-        match self.handle.await {
+        match (&mut self.handle).await {
             Ok(()) => {}
             Err(error) if error.is_cancelled() => {}
             Err(error) => {

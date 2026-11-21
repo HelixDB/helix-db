@@ -97,10 +97,15 @@ most version 5 refuse a version-6 store, which they would not keep exact, so a
 rollback after the first open needs a backup taken before the upgrade. Labels
 longer than the label index bound are rejected as invalid queries.
 
-New databases initialize at version 7. Versions after 7 return the existing
-unsupported-version error on reader, embedded-writer, and managed-failover open;
-startup must not lower or remove their marker. Managed bootstrap still refuses
-any nonempty store before version dispatch. The
+A writer open moves a version-7 store to version 8 in one commit that writes only
+the marker, so new databases end their first open at version 8. From version 8 a
+completed index drop or build abort leaves a dropped-generation entry and
+compactions discard the generation's rows. Binaries that support at most version
+7 refuse a version-8 store, whose entries they would neither decode nor honour, so
+a rollback after the first open needs a backup taken before the upgrade. Versions
+after 8 return the existing unsupported-version error on reader, embedded-writer,
+and managed-failover open; startup must not lower or remove their marker. Managed
+bootstrap still refuses any nonempty store before version dispatch. The
 retired activation key tag `0x0C` and value tag `0x08` are not reused. Malformed
 metadata checks, managed-writer fencing, and existing version-2/3 equality
 migrations (which publish version 5, after which the same open starts the label

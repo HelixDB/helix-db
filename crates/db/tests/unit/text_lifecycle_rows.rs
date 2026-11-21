@@ -44,8 +44,8 @@ pub(super) async fn verify_steady_state(db: &crate::HelixDB, expected_live_entit
 /// Waits for terminal DROP/abort cleanup to leave no generation-owned row
 /// that nothing will remove.
 ///
-/// An abort deletes its rows itself. A drop leaves them to compactions under
-/// a dropped-generation entry, and the lifecycle model runs no compactor, so
+/// A drop and an abort both leave the rows to compactions under a
+/// dropped-generation entry, and the lifecycle model runs no compactor, so
 /// the rows of a dropped generation stay: each must be a row an entry that
 /// passes its cross-check gives up.
 pub(super) async fn verify_dropped(db: &crate::HelixDB) {

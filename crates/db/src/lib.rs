@@ -1629,13 +1629,14 @@ impl HelixDB {
             Arc::clone(&dropped),
         );
         let reclaims = compactor.is_some();
-        let mut builder = Db::builder(path.clone(), Arc::clone(&object_store))
+        let builder = Db::builder(path.clone(), Arc::clone(&object_store))
             .with_merge_operator(Arc::new(merge_operator::HelixMergeOperator::new()))
             .with_settings(settings)
             .with_write_runtime(write_runtime.handle());
-        if let Some(compactor) = compactor {
-            builder = builder.with_compactor_builder(compactor);
-        }
+        let mut builder = match compactor {
+            Some(compactor) => builder.with_compactor_builder(compactor),
+            None => builder,
+        };
         if let WriterOpenMode::Managed { writer_epoch, .. } = &open_mode {
             builder = builder.with_writer_epoch(*writer_epoch);
         }

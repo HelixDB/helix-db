@@ -74,12 +74,13 @@
 //! filter; a partitioned vector generation has one owner per partition. A
 //! refresh scans the entry prefix and, for each new entry, the index records
 //! of its scope; for a new vector entry it also scans the scope's partition
-//! mappings and reads one metadata key per physical id. Allocating a vector
-//! physical id scans every entry. Dropping a partitioned vector generation
-//! still costs one cleanup commit per partition, and its mappings stay until
-//! the reclaim. Entries leave only through a reclaim, so one whose rows are a
-//! small share of the store stays until a larger drop or a request triggers
-//! one.
+//! mappings and reads one metadata key per physical id. Every entry is new
+//! to a writer that opens, so an open costs those scans once per stored
+//! entry. Allocating a vector physical id scans every entry. Dropping a
+//! partitioned vector generation still costs one cleanup commit per
+//! partition, and its mappings stay until the reclaim. Entries leave only
+//! through a reclaim, so one whose rows are a small share of the store stays
+//! until a larger drop or a request triggers one.
 
 pub(crate) mod filter;
 pub(crate) mod ownership;
@@ -89,6 +90,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use bytes::Bytes;
+use slatedb::compactor::CompactionStatus;
 use slatedb::config::{FlushOptions, FlushType};
 use slatedb::object_store::ObjectStore;
 use slatedb::{CompactionJobContext, Db, DbReadOps};
@@ -150,8 +152,9 @@ pub(crate) fn compactor(
     registry: Arc<Registry>,
 ) -> Option<slatedb::CompactorBuilder<String>> {
     let mut options = settings.compactor_options.clone()?;
-    // A trivial move re-links tables into a run without any filter seeing
-    // their rows, so a reclaim made of one would complete and prove nothing.
+    // SlateDB's default, pinned: a trivial move re-links tables into a run
+    // without creating a filter, so a reclaim made of one would discard
+    // nothing, prove nothing, and repeat for ever.
     options.enable_trivial_move = false;
     Some(
         slatedb::CompactorBuilder::new(path.to_string(), object_store)
@@ -726,8 +729,12 @@ impl Registry {
     }
 
     /// Starts recording the filters created for compactions into
-    /// `destination`, replacing any earlier watch.
-    fn watch(&self, destination: u32) {
+    /// `destination`, replacing any earlier watch, until the returned
+    /// [`Watching`] is consumed or dropped.
+    ///
+    /// The registry holds one watch: callers watch one at a time, as the
+    /// reclaimer's pass lock makes them.
+    fn watch(&self, destination: u32) -> Watching<'_> {
         match &mut *self.state.lock() {
             State::Filtering { watch, .. } => {
                 *watch = Some(Watch {
@@ -737,6 +744,7 @@ impl Registry {
             }
             State::Halted => {}
         }
+        Watching(self)
     }
 
     /// Ends the watch and returns the entries that every filter created for
@@ -761,6 +769,40 @@ impl Registry {
             State::Filtering { armed, .. } => armed.retain(|entry, _| !entries.contains(entry)),
             State::Halted => {}
         }
+    }
+}
+
+/// A running [`Registry::watch`]. Dropping it ends the watch, so a reclaim
+/// pass that is cancelled while its compaction runs leaves none behind.
+#[must_use]
+struct Watching<'a>(&'a Registry);
+
+impl Watching<'_> {
+    /// Ends the watch and returns the entries whose rows the watched
+    /// compaction, last seen with `status`, has discarded from every table it
+    /// read: those every filter created for its destination could discard,
+    /// and none unless the compaction completed. A job that failed, was
+    /// lost, or is still running may have written nothing its filters
+    /// decided.
+    fn proven(self, status: Option<CompactionStatus>) -> HashSet<DroppedGeneration> {
+        let discardable = self.0.unwatch();
+        match status {
+            Some(CompactionStatus::Completed) => discardable,
+            Some(
+                CompactionStatus::Submitted
+                | CompactionStatus::Scheduled
+                | CompactionStatus::Running
+                | CompactionStatus::Compacted
+                | CompactionStatus::Failed,
+            )
+            | None => HashSet::new(),
+        }
+    }
+}
+
+impl Drop for Watching<'_> {
+    fn drop(&mut self) {
+        self.0.unwatch();
     }
 }
 
