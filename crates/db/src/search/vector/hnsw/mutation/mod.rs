@@ -2950,8 +2950,9 @@ impl<K: Copy + Ord + core::hash::Hash, V: Touched> RecencyMap<K, V> {
     /// Compaction looks up each entry once, and only once stale entries
     /// outnumber current ones or removals left the allocation above four
     /// entries per value. It then shrinks an oversized allocation to twice the
-    /// values plus one. Either takes about half the values removed, so
-    /// settling costs `O(1)` amortized next to the rebuild.
+    /// values plus one. Either takes about half the values removed, or as
+    /// many touches within the horizon as values remain, so settling costs
+    /// `O(1)` amortized next to the rebuild.
     fn settle(&mut self, key: K) {
         let capacity_bound = self.values.len().max(1).saturating_mul(4);
         if self.order.len() > self.values.len().saturating_mul(2)
@@ -6465,6 +6466,11 @@ mod tests {
         /// Caches a key at a touch older than every earlier one, as after
         /// another namespace renumbered the session's sequence.
         Older(NodeId),
+        /// Stamps a key, cached or not, with a touch of the small range that
+        /// renumbering also assigns, so that touches tie across keys, repeat
+        /// stale entries, sort anywhere among the settled ones, and equal the
+        /// horizon.
+        At(NodeId, u64),
         Remove(NodeId),
         Renumber,
         /// Changes a cached key's value in place, restamping it newer than
@@ -6498,6 +6504,7 @@ mod tests {
             (0_u64..24).prop_map(RecencyOp::Insert),
             (0_u64..24).prop_map(RecencyOp::Touch),
             (0_u64..24).prop_map(RecencyOp::Older),
+            (0_u64..24, 0_u64..32).prop_map(|(key, touch)| RecencyOp::At(key, touch)),
             (0_u64..24).prop_map(RecencyOp::Remove),
             Just(RecencyOp::Renumber),
             (0_u64..24).prop_map(RecencyOp::Restamp),
@@ -6540,6 +6547,13 @@ mod tests {
                         older -= 1;
                         map.insert(key, simhash(touch));
                         model.insert(key, touch);
+                    }
+                    RecencyOp::At(key, touch) => {
+                        let touch = CacheSequence(touch);
+                        match model.insert(key, touch) {
+                            Some(_) => prop_assert!(map.touch(key, touch).is_some()),
+                            None => prop_assert!(map.insert(key, simhash(touch)).is_none()),
+                        }
                     }
                     RecencyOp::Remove(key) => {
                         prop_assert_eq!(map.remove(&key).is_some(), model.remove(&key).is_some());
@@ -6655,6 +6669,49 @@ mod tests {
         assert_eq!(map.horizon, Some((CacheSequence(80), 3)));
         assert!(map.remove(&3).is_some());
         assert!(map.order.is_empty() && map.oldest().is_none());
+    }
+
+    /// A value stamped again with the horizon's touch, after compaction took
+    /// its stale horizon entry out of the order, is listed there again: it
+    /// does not sort after the horizon, so nothing else would order it.
+    #[test]
+    fn recency_order_lists_a_touch_at_its_horizon() {
+        let entries = |map: &RecencyMap<NodeId, CachedSimHash>| {
+            map.oldest_first()
+                .map(|(key, cached)| (cached.last_touch.0, key))
+                .collect::<Vec<_>>()
+        };
+        let mut map = RecencyMap::<NodeId, CachedSimHash>::default();
+        for (key, touch) in [(1, 10), (2, 20), (3, 30), (4, 40)] {
+            map.insert(
+                key,
+                CachedSimHash {
+                    value: None,
+                    last_touch: CacheSequence(touch),
+                },
+            );
+        }
+        assert!(map.touch(1, CacheSequence(50)).is_some());
+        assert_eq!(map.horizon, Some((CacheSequence(50), 1)));
+        assert_eq!(map.order.len(), 4);
+
+        // The horizon entry goes stale, and compaction then drops it.
+        assert!(map.touch(1, CacheSequence(60)).is_some());
+        assert!(map.remove(&3).is_some() && map.remove(&4).is_some());
+        assert!(map.touch(2, CacheSequence(25)).is_some());
+        assert_eq!(map.order, VecDeque::from([(CacheSequence(25), 2)]));
+        assert_eq!(map.horizon, Some((CacheSequence(50), 1)));
+        assert_eq!(entries(&map), [(25, 2), (60, 1)]);
+
+        assert!(map.touch(1, CacheSequence(50)).is_some());
+        assert_eq!(
+            map.order,
+            VecDeque::from([(CacheSequence(25), 2), (CacheSequence(50), 1)])
+        );
+        assert_eq!(entries(&map), [(25, 2), (50, 1)]);
+        assert!(map.touch(2, CacheSequence(70)).is_some());
+        assert_eq!(map.oldest(), Some((CacheSequence(50), 1)));
+        assert_eq!(entries(&map), [(50, 1), (70, 2)]);
     }
 
     /// Random touches keep the order's allocation within four entries per
