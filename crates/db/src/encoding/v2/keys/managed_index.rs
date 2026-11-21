@@ -1248,6 +1248,13 @@ tenant=fd0102030405060708111213141516171806050000000000000001000000000000000201e
                 "text_compaction_pointer",
                 GlobalKey::TextCompactionPointer(target),
             ),
+            (
+                "dropped_generation",
+                GlobalKey::DroppedGeneration {
+                    index_id: index_id(),
+                    generation: generation(),
+                },
+            ),
         ];
         let mut rendered = String::new();
         for (name, key) in fixtures {
@@ -1262,6 +1269,7 @@ vector_physical_watermark=fefefefefefefefefefefefefefefefefe03
 operation_pointer=fefefefefefefefefefefefefefefefefe0411111111111111111111111111111111
 legacy_vector_reservation=fefefefefefefefefefefefefefefefefe0a0000000000000009
 text_compaction_pointer=fefefefefefefefefefefefefefefefefe0b01000000000000000000000000000000070401000000014c000000017000000000000000010000000000000002222222222222222222222222222222222222222222222222222222222222222200000004
+dropped_generation=fefefefefefefefefefefefefefefefefe0d00000000000000010000000000000002
 ");
     }
 }

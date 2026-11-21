@@ -342,7 +342,7 @@ async fn legacy_store() -> (Arc<dyn ObjectStore>, Vec<serde_json::Value>, Rows) 
     let db = open_writer(&store).await;
     assert_eq!(
         storage_version(db.inner_db().as_ref()).await.unwrap(),
-        IndexStorageVersion::LABEL_IDENTITY
+        IndexStorageVersion::DROPPED_GENERATIONS
     );
     for scope in scopes() {
         write_graph(&db, scope).await;
@@ -852,7 +852,7 @@ async fn a_failover_writer_serves_and_finishes_the_copy() {
     wait_for(&inner, LABEL_HASH_CLEANUP_READY).await;
     assert_eq!(
         storage_version(inner.as_ref()).await.unwrap(),
-        IndexStorageVersion::LABEL_IDENTITY
+        IndexStorageVersion::DROPPED_GENERATIONS
     );
     let (exact, legacy) = label_rows(inner.as_ref()).await;
     assert_eq!(exact, exact_before);
@@ -874,7 +874,7 @@ async fn writer_open_starts_the_copy_and_the_background_worker_finishes_it() {
     wait_for(&inner, LABEL_HASH_CLEANUP_READY).await;
     assert_eq!(
         storage_version(inner.as_ref()).await.unwrap(),
-        IndexStorageVersion::LABEL_IDENTITY
+        IndexStorageVersion::DROPPED_GENERATIONS
     );
     let (exact, legacy) = label_rows(inner.as_ref()).await;
     assert_eq!(exact, exact_before);
@@ -1546,7 +1546,7 @@ async fn the_copy_starts_only_from_the_operation_queue_version() {
     start_label_identity_copy(&inner).await.unwrap();
     assert_eq!(
         storage_version(inner.as_ref()).await.unwrap(),
-        IndexStorageVersion::LABEL_IDENTITY
+        IndexStorageVersion::DROPPED_GENERATIONS
     );
     let set_version = |version| {
         let inner = &inner;
@@ -2256,7 +2256,7 @@ async fn background_label_steps_leave_foreground_writes_room_under_a_slow_store(
     let peak = sampler.await.unwrap();
     assert_eq!(
         storage_version(inner.as_ref()).await.unwrap(),
-        IndexStorageVersion::LABEL_IDENTITY
+        IndexStorageVersion::DROPPED_GENERATIONS
     );
     assert!(cleanup_ready(&inner).await.unwrap());
     let unflushed = inner.unflushed_bytes().unwrap();

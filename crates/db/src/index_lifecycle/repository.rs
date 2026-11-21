@@ -1040,7 +1040,28 @@ pub(crate) async fn allocate_index_id(
     transaction: &impl crate::transaction::Mutation,
 ) -> Result<IndexId> {
     let key = global_key(GlobalKey::LogicalIndexIdWatermark);
-    let Some(value) = transaction.get(&key).await? else {
+    let watermark = load_logical_index_watermark(transaction).await?;
+    if watermark.next_id.get() == u64::MAX {
+        return Err(HelixDbError::IdentifierExhausted("logical index ID"));
+    }
+    let allocated = watermark.next_id;
+    let next_id = allocated.checked_next()?;
+    super::dropped::ensure_index_unclaimed(transaction, allocated).await?;
+    transaction.put(
+        key,
+        encode_metadata_value(&IndexV2MetadataValue::LogicalIndexIdWatermark(
+            LogicalIndexIdWatermark { next_id },
+        )),
+    )?;
+    Ok(allocated)
+}
+
+/// Loads the next logical index ID that [`allocate_index_id`] would reserve.
+pub(crate) async fn load_logical_index_watermark(
+    read: &(impl DbReadOps + Sync),
+) -> Result<LogicalIndexIdWatermark> {
+    let key = global_key(GlobalKey::LogicalIndexIdWatermark);
+    let Some(value) = read.get(key).await? else {
         return Err(HelixDbError::MigrationRequired {
             reason: "V2 logical index watermark is missing".to_string(),
         });
@@ -1052,18 +1073,7 @@ pub(crate) async fn allocate_index_id(
             reason: "V2 logical index watermark contains the wrong value kind".to_string(),
         });
     };
-    if watermark.next_id.get() == u64::MAX {
-        return Err(HelixDbError::IdentifierExhausted("logical index ID"));
-    }
-    let allocated = watermark.next_id;
-    let next_id = allocated.checked_next()?;
-    transaction.put(
-        key,
-        encode_metadata_value(&IndexV2MetadataValue::LogicalIndexIdWatermark(
-            LogicalIndexIdWatermark { next_id },
-        )),
-    )?;
-    Ok(allocated)
+    Ok(watermark)
 }
 
 /// Reserves the current vector physical ID and advances its watermark.
@@ -1084,6 +1094,7 @@ pub(crate) async fn allocate_vector_physical_id(
             .await?
             .is_none()
         {
+            super::dropped::ensure_physical_index_unclaimed(transaction, candidate).await?;
             return Ok(candidate);
         }
         candidate = next_id;
@@ -1344,6 +1355,7 @@ mod tests {
         }
         assert_eq!(writes(0x0006), LabelRowWrites::HashAndExact);
         assert_eq!(writes(0x0007), LabelRowWrites::Exact);
+        assert_eq!(writes(0x0008), LabelRowWrites::Exact);
         for (writes, hash, exact, reads) in [
             (
                 LabelRowWrites::Hash,
@@ -1372,7 +1384,7 @@ mod tests {
 
     #[test]
     fn storage_versions_map_to_their_reader_compatibility() {
-        assert_eq!(IndexStorageVersion::CURRENT.get(), 0x0007);
+        assert_eq!(IndexStorageVersion::CURRENT.get(), 0x0008);
         assert_eq!(IndexStorageVersion::LABEL_IDENTITY.get(), 0x0007);
         assert_eq!(IndexStorageVersion::LABEL_COPY.get(), 0x0006);
         assert_eq!(IndexStorageVersion::OPERATION_QUEUES.get(), 0x0005);
@@ -1498,8 +1510,8 @@ mod tests {
         assert!(matches!(
             validate_bootstrap_values(&marker, None, None),
             Err(HelixDbError::UnsupportedIndexStorageVersion {
-                found: 0x0008,
-                supported: 0x0007,
+                found: 0x0009,
+                supported: 0x0008,
             })
         ));
     }
@@ -1544,7 +1556,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejected_writer_preflight_preserves_every_byte() {
-        for rejected_state in ["malformed", "partial", "v1", "v8"] {
+        for rejected_state in ["malformed", "partial", "v1", "future"] {
             let db = Db::builder(
                 format!("writer-preflight-preserves-{rejected_state}"),
                 Arc::new(InMemory::new()),
@@ -1586,8 +1598,13 @@ mod tests {
                 "v1" => {
                     put_bootstrap_tuple(&db, IndexStorageVersion::new(0x0001).unwrap()).await;
                 }
-                "v8" => {
-                    put_bootstrap_tuple(&db, IndexStorageVersion::new(0x0008).unwrap()).await;
+                "future" => {
+                    put_bootstrap_tuple(
+                        &db,
+                        IndexStorageVersion::new(IndexStorageVersion::MAX_SUPPORTED.get() + 1)
+                            .unwrap(),
+                    )
+                    .await;
                 }
                 _ => unreachable!(),
             }

@@ -992,7 +992,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn writer_open_error_drains_an_inflight_refill_before_closing_storage() {
         let db = test_db().await;
-        let writer = Arc::new(crate::HelixWriter::new(Arc::clone(&db), 4, 2));
+        let writer = Arc::new(crate::HelixWriter::new(
+            Arc::clone(&db),
+            4,
+            2,
+            Arc::default(),
+        ));
 
         assert_eq!(writer.node_ids().allocate().await.unwrap(), 0);
         let extension_guard = writer.node_ids().0.extend_lock.lock().await;

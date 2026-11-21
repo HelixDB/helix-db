@@ -561,6 +561,7 @@ async fn empty_migration_controller_executes_every_stage_and_catalog_family_to_c
         Arc::clone(&raw),
         config.id_lease_size(),
         config.id_lease_refill_threshold(),
+        Arc::default(),
     );
     let scope = DataScope::LegacyUnscoped;
 

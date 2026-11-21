@@ -2764,6 +2764,7 @@ async fn advance_vector_recovery_job(
         Arc::clone(&raw),
         config.id_lease_size(),
         config.id_lease_refill_threshold(),
+        Arc::default(),
     );
     let target = recovery_stage.migration_stage();
     let target_rank = recovery_stage

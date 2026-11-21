@@ -14,17 +14,23 @@ use crate::{HelixDB, Result};
 
 /// Runs every migration that must finish before the runtime is constructed.
 #[cfg(test)]
-pub(crate) async fn prepare_writer(db: Arc<Db>, config: &DbConfig) -> Result<HelixWriter> {
+pub(crate) async fn prepare_writer(
+    db: Arc<Db>,
+    config: &DbConfig,
+    dropped: Arc<crate::index_lifecycle::dropped::Registry>,
+) -> Result<HelixWriter> {
     super::bootstrap_writer(&db).await?;
     super::super::preflight_legacy_vector_reservations(&db).await?;
     let writer = HelixWriter::new(
         db,
         config.id_lease_size(),
         config.id_lease_refill_threshold(),
+        dropped,
     );
     let prepare_result: Result<()> = async {
         super::super::run_blocking_startup_migration(&writer, config.migrations()).await?;
         super::super::start_label_identity_copy(writer.db()).await?;
+        crate::index_lifecycle::dropped::admit(writer.db()).await?;
         writer.observe_storage_version(super::stored_storage_version(writer.db()).await?);
         crate::index_lifecycle::outbox::reconcile_legacy_reader_coordination_operations(
             writer.db(),
@@ -32,6 +38,7 @@ pub(crate) async fn prepare_writer(db: Arc<Db>, config: &DbConfig) -> Result<Hel
         )
         .await?;
         crate::index_lifecycle::outbox::reconcile_operation_queue(writer.db()).await?;
+        writer.dropped().refresh(writer.db()).await?;
         Ok(())
     }
     .await;

@@ -317,6 +317,16 @@ async fn create_index_operation_in_transaction_with_physical(
         },
     };
 
+    // A fresh index id was checked when it was allocated; a recreated index
+    // builds the generation after its last.
+    super::dropped::ensure_generation_unclaimed(
+        &transaction,
+        super::dropped::DroppedGeneration {
+            index_id,
+            generation,
+        },
+    )
+    .await?;
     let operation_id = super::repository::allocate_operation_id(&transaction, scope).await?;
     let physical =
         physical_generation(&transaction, &definition, generation, vector_physical).await?;
@@ -614,7 +624,8 @@ async fn linked_operation(
             | IndexV2MetadataValue::LogicalIndexIdWatermark(_)
             | IndexV2MetadataValue::VectorPhysicalIdWatermark(_)
             | IndexV2MetadataValue::LegacyVectorPhysicalReservation(_)
-            | IndexV2MetadataValue::TextCompactionPointer(_) => Err(corruption(
+            | IndexV2MetadataValue::TextCompactionPointer(_)
+            | IndexV2MetadataValue::DroppedGeneration(_) => Err(corruption(
                 "operation pointer key contains the wrong value kind",
             )),
         })

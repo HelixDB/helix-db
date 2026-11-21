@@ -98,6 +98,7 @@ use std::sync::{Arc, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 pub use config::{DbConfig, HelixConfig};
+pub use index_lifecycle::dropped::reclaim::DroppedStorageReclaim;
 pub use index_lifecycle::queue::lag::PublicationLagHistogram;
 pub use index_lifecycle::queue::{BlockedIndexEntity, IndexOperationQueueStats};
 pub use merge_operator::{operation_queue_merge_stats, OperationQueueMergeStats, QueueMergeCost};
@@ -666,11 +667,22 @@ pub(crate) struct HelixWriter {
     /// store never moves back, so from then on no transaction reads the
     /// storage marker to learn which keys its label rows go under.
     label_rows_published: std::sync::atomic::AtomicBool,
+    /// The dropped generations whose rows this writer's compactions discard.
+    dropped: Arc<index_lifecycle::dropped::Registry>,
 }
 
 impl HelixWriter {
-    pub(crate) fn new(db: Arc<Db>, lease_size: u64, refill_threshold: u64) -> Self {
+    /// Writer state over `db`. `dropped` is the registry behind the
+    /// compaction filter supplier `db` was built with, or a fresh one when
+    /// `db` runs no compactor of this process.
+    pub(crate) fn new(
+        db: Arc<Db>,
+        lease_size: u64,
+        refill_threshold: u64,
+        dropped: Arc<index_lifecycle::dropped::Registry>,
+    ) -> Self {
         Self {
+            dropped,
             db: Arc::clone(&db),
             node_ids: Arc::new(NodeIdAllocator::new_with_refill_threshold(
                 Arc::clone(&db),
@@ -688,6 +700,10 @@ impl HelixWriter {
 
     pub(crate) fn db(&self) -> &Db {
         self.db.as_ref()
+    }
+
+    pub(crate) fn dropped(&self) -> &index_lifecycle::dropped::Registry {
+        self.dropped.as_ref()
     }
 
     /// The label row writes of every transaction from now on, once known
@@ -1118,6 +1134,9 @@ struct HelixDBInner {
     index_worker_wake: Option<index_lifecycle::worker::IndexWorkerWakeHandle>,
     index_worker: Mutex<Option<index_lifecycle::worker::IndexWorkerSupervisor>>,
     migration_worker: Mutex<Option<migrations::background::MigrationWorkerSupervisor>>,
+    /// The reclaim of dropped index storage: only on a writer that runs its
+    /// compactor, from the end of its open until it closes.
+    dropped_reclaim: Mutex<Option<index_lifecycle::dropped::reclaim::ReclaimSupervisor>>,
     index_claim_sequences: Arc<index_lifecycle::worker::ClaimSequenceAllocator>,
     index_operation_backlog: Arc<index_lifecycle::queue::backlog::IndexOperationBacklog>,
     index_queue_store: Arc<index_lifecycle::queue::storage::QueueStore>,
@@ -1484,18 +1503,29 @@ impl HelixDB {
     ) -> Result<Self> {
         let path = database.into();
         let config = DbConfig::new();
-        let db = Arc::new(
-            Db::builder(path.clone(), Arc::clone(&object_store))
-                .with_merge_operator(Arc::new(merge_operator::HelixMergeOperator::new()))
-                .with_settings(
-                    config
-                        .slate()
-                        .to_writer_settings(config.cache().object_store_cache()),
-                )
-                .build()
-                .await?,
+        let settings = config
+            .slate()
+            .to_writer_settings(config.cache().object_store_cache());
+        let dropped = Arc::<index_lifecycle::dropped::Registry>::default();
+        let compactor = index_lifecycle::dropped::compactor(
+            &settings,
+            &path,
+            Arc::clone(&object_store),
+            Arc::clone(&dropped),
         );
-        let writer = migrations::startup::prepare_writer(Arc::clone(&db), &config).await?;
+        let reclaims = compactor.is_some();
+        let builder = Db::builder(path.clone(), Arc::clone(&object_store))
+            .with_merge_operator(Arc::new(merge_operator::HelixMergeOperator::new()))
+            .with_settings(settings);
+        let db = Arc::new(
+            match compactor {
+                Some(compactor) => builder.with_compactor_builder(compactor),
+                None => builder,
+            }
+            .build()
+            .await?,
+        );
+        let writer = migrations::startup::prepare_writer(Arc::clone(&db), &config, dropped).await?;
         let runtime_inputs: Result<_> = async {
             let loaded_catalog = index_lifecycle::repository::load_scope_catalog(
                 db.as_ref(),
@@ -1524,6 +1554,9 @@ impl HelixDB {
         db.close_on_open_error(finish_result).await?;
         db.start_background_migration_worker(migrations::background::BackgroundMigrations::All)
             .await;
+        if reclaims {
+            db.start_dropped_storage_reclaim().await;
+        }
         Ok(db)
     }
 
@@ -1587,10 +1620,22 @@ impl HelixDB {
         let slate_db_cache = build_slate_db_cache(config.cache().mode()).await?;
         log_stage("slatedb_cache_construction", stage_started);
         let write_runtime = write_runtime::WriteRuntime::start()?;
+        let settings = gc_boundary_files.writer_settings(&config);
+        let dropped = Arc::<index_lifecycle::dropped::Registry>::default();
+        let compactor = index_lifecycle::dropped::compactor(
+            &settings,
+            &path,
+            Arc::clone(&object_store),
+            Arc::clone(&dropped),
+        );
+        let reclaims = compactor.is_some();
         let mut builder = Db::builder(path.clone(), Arc::clone(&object_store))
             .with_merge_operator(Arc::new(merge_operator::HelixMergeOperator::new()))
-            .with_settings(gc_boundary_files.writer_settings(&config))
+            .with_settings(settings)
             .with_write_runtime(write_runtime.handle());
+        if let Some(compactor) = compactor {
+            builder = builder.with_compactor_builder(compactor);
+        }
         if let WriterOpenMode::Managed { writer_epoch, .. } = &open_mode {
             builder = builder.with_writer_epoch(*writer_epoch);
         }
@@ -1625,6 +1670,7 @@ impl HelixDB {
             Arc::clone(&db),
             config.id_lease_size(),
             config.id_lease_refill_threshold(),
+            dropped,
         );
         let runtime_inputs: Result<_> = async {
             let stage_started = Instant::now();
@@ -1682,6 +1728,7 @@ impl HelixDB {
                 // while the writer serves, and every graph write files label
                 // rows under both keys meanwhile.
                 migrations::start_label_identity_copy(&db).await?;
+                index_lifecycle::dropped::admit(&db).await?;
                 index_lifecycle::outbox::reconcile_legacy_reader_coordination_operations(
                     &db,
                     DataScope::LegacyUnscoped,
@@ -1704,6 +1751,11 @@ impl HelixDB {
             let stage_started = Instant::now();
             index_lifecycle::outbox::reconcile_operation_queue(&db).await?;
             log_stage("operation_queue_reconciliation", stage_started);
+            let stage_started = Instant::now();
+            // Fails the open on an entry that names rows a live generation
+            // owns, before any compaction of this writer can discard them.
+            writer.dropped().refresh(&db).await?;
+            log_stage("dropped_generation_cross_check", stage_started);
             let stage_started = Instant::now();
             let loaded_catalog = index_lifecycle::repository::load_scope_catalog(
                 db.as_ref(),
@@ -1761,6 +1813,9 @@ impl HelixDB {
             migrations::background::BackgroundMigrations::LabelIdentity
         })
         .await;
+        if reclaims {
+            db.start_dropped_storage_reclaim().await;
+        }
         tracing::info!(
             open_intent,
             writer_epoch,
@@ -2211,6 +2266,7 @@ impl HelixDB {
                 index_worker_wake,
                 index_worker: Mutex::new(index_worker),
                 migration_worker: Mutex::new(None),
+                dropped_reclaim: Mutex::new(None),
                 index_claim_sequences,
                 index_operation_backlog,
                 index_queue_store,
@@ -2271,6 +2327,86 @@ impl HelixDB {
                 background,
             );
         }
+    }
+
+    /// Starts the background reclaim of dropped index storage on a writer
+    /// whose storage runs its compactor in this process.
+    async fn start_dropped_storage_reclaim(&self) {
+        let HelixStorage::Writer(writer) = self.inner.storage.handle() else {
+            return;
+        };
+        let mut reclaim = self.inner.dropped_reclaim.lock().await;
+        if reclaim.is_none() {
+            *reclaim = Some(index_lifecycle::dropped::reclaim::ReclaimSupervisor::start(
+                index_lifecycle::dropped::reclaim::Reclaimer::new(
+                    Arc::clone(writer),
+                    self.inner.storage.path(),
+                    Arc::clone(self.inner.storage.object_store()),
+                ),
+            ));
+        }
+    }
+
+    /// Reclaims the storage of dropped indexes now, instead of waiting for
+    /// the background reclaim to find it worth a compaction.
+    ///
+    /// Dropping an index, or aborting its build, removes it from the catalog
+    /// at once and leaves its rows for compactions to discard. This call
+    /// flushes the memtable, compacts every table of the database into one
+    /// sorted run, and returns once that compaction has finished: it rewrites
+    /// every stored byte, so its cost grows with the database, not with the
+    /// dropped indexes. Reads and writes proceed meanwhile.
+    ///
+    /// Rows are retained, and [`DroppedStorageReclaim::Retained`] returned,
+    /// while a snapshot or transaction older than the drop is open. A
+    /// compaction that loses a race against another compaction returns
+    /// [`DroppedStorageReclaim::Unproven`]; call again.
+    ///
+    /// # Errors
+    ///
+    /// [`HelixDbError::WriterModeRequired`] on a read-only handle, and
+    /// [`HelixDbError::Config`] on a writer configured without a compactor,
+    /// which compacts nothing.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # tokio_test::block_on(async {
+    /// use db::{DroppedStorageReclaim, HelixDB, HelixDbSource};
+    ///
+    /// let db = HelixDB::open(HelixDbSource::InMemory {
+    ///     database: "helix-db-reclaim-example".to_string(),
+    /// }).await.unwrap();
+    /// // No index has been dropped, so there is nothing to compact.
+    /// assert_eq!(
+    ///     db.reclaim_dropped_index_storage().await.unwrap(),
+    ///     DroppedStorageReclaim::Idle,
+    /// );
+    /// db.close().await.unwrap();
+    /// # });
+    /// ```
+    pub async fn reclaim_dropped_index_storage(&self) -> Result<DroppedStorageReclaim> {
+        let HelixStorage::Writer(_) = self.storage() else {
+            return Err(HelixDbError::WriterModeRequired {
+                actual: self.mode().as_str(),
+            });
+        };
+        let Some(reclaimer) = self
+            .inner
+            .dropped_reclaim
+            .lock()
+            .await
+            .as_ref()
+            .map(index_lifecycle::dropped::reclaim::ReclaimSupervisor::reclaimer)
+        else {
+            return Err(HelixDbError::Config(
+                "this writer runs no compactor, so it reclaims no dropped index storage"
+                    .to_string(),
+            ));
+        };
+        reclaimer
+            .pass(index_lifecycle::dropped::reclaim::Trigger::Request)
+            .await
     }
 
     /// Reports readiness of graph, secondary, and vector operations.
@@ -3273,6 +3409,9 @@ impl HelixDB {
             }
             if let Some(worker) = self.inner.migration_worker.lock().await.take() {
                 worker.stop().await;
+            }
+            if let Some(reclaim) = self.inner.dropped_reclaim.lock().await.take() {
+                reclaim.stop().await;
             }
             if let Some(worker) = self.inner.index_worker.lock().await.take() {
                 worker.stop().await;
@@ -5807,8 +5946,8 @@ mod tests {
                     matches!(
                         error,
                         HelixDbError::UnsupportedIndexStorageVersion {
-                            found: 8,
-                            supported: 7,
+                            found: 9,
+                            supported: 8,
                         }
                     ),
                     "{role}: {error}"
@@ -5904,7 +6043,7 @@ mod tests {
                 HelixDbError::WriterMigrationRequired {
                     requirement: crate::error::WriterMigrationRequirement::StorageVersion {
                         found: 4,
-                        target: 7,
+                        target: 8,
                     },
                 }
             ),
@@ -6180,7 +6319,7 @@ mod tests {
             HelixDbError::WriterMigrationRequired {
                 requirement: crate::error::WriterMigrationRequirement::StorageVersion {
                     found: 2,
-                    target: 7,
+                    target: 8,
                 },
             }
         ));

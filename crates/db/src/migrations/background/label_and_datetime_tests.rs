@@ -380,7 +380,7 @@ async fn one_worker_finishes_the_label_copy_and_the_datetime_conversion() {
     // The label copy published and its cleanup removed every hash row.
     assert_eq!(
         startup::storage_version(inner.as_ref()).await.unwrap(),
-        IndexStorageVersion::LABEL_IDENTITY
+        IndexStorageVersion::DROPPED_GENERATIONS
     );
     assert_eq!(legacy_label_rows(inner.as_ref()).await, 0);
 
@@ -882,7 +882,7 @@ async fn a_failing_migration_job_backs_off_alone_and_blocks_the_datetime_convers
     let inner = db.inner_db();
     assert_eq!(
         startup::storage_version(inner.as_ref()).await.unwrap(),
-        IndexStorageVersion::LABEL_IDENTITY
+        IndexStorageVersion::DROPPED_GENERATIONS
     );
     assert_eq!(legacy_label_rows(inner.as_ref()).await, 0);
 
@@ -1117,7 +1117,7 @@ async fn the_worker_paces_each_migration_on_its_own_backoff_and_exits_once_all_f
     .expect("the worker exits once the copy finishes");
     assert_eq!(
         startup::storage_version(inner.as_ref()).await.unwrap(),
-        IndexStorageVersion::LABEL_IDENTITY
+        IndexStorageVersion::DROPPED_GENERATIONS
     );
     assert_eq!(legacy_label_rows(inner.as_ref()).await, 0);
     worker.stop().await;

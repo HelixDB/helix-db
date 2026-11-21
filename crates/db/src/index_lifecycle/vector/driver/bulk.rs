@@ -447,8 +447,8 @@ use super::{
     corruption, delete_delta_and_applied_rows, delete_physical_namespace, deterministic_layer,
     lifecycle_write_measurement, measurement_error, operation_error, progressed_build,
     stage_applied, AppliedStateTransition, CleanupWorkOutcome, IndexStateVectorPhysical,
-    PhysicalCleanupOutcome, VectorBatchAccounting, VectorCleanupResume, VectorPlanTarget,
-    VectorStepResult,
+    PhysicalCleanupOutcome, PhysicalRows, VectorBatchAccounting, VectorCleanupResume,
+    VectorPlanTarget, VectorStepResult,
 };
 use crate::config::{
     self, IndexLifecycleScanTuning, SearchIndexBatchLimits, VectorBulkBuildMemory,
@@ -3001,6 +3001,9 @@ async fn discard<D: Distance>(
         handle.generation(),
         None,
         physical_resume.as_ref(),
+        // No dropped-generation entry names a generation that is still
+        // building, so no compaction discards any of these rows.
+        PhysicalRows::All,
         step.definition.element_kind(),
         nothing,
         step.limits,

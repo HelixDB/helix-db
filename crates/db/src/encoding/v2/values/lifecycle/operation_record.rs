@@ -727,10 +727,11 @@ mod wire_fixtures {
     use crate::encoding::v2::keys::scope::{DataScope, TenantId};
     use crate::encoding::v2::values::global::{decode_metadata_value, encode_metadata_value};
     use crate::index_lifecycle::{
-        IndexCursor, IndexElementKind, IndexGenerationId, IndexId, IndexOperationExecutionState,
-        IndexOperationId, IndexOperationRevision, IndexRevision, IndexStorageVersion,
-        IndexV2MetadataValue, LegacyVectorPhysicalReservation, LogicalIndexIdWatermark,
-        OperationCounters, OperationQueuePointerValue, PhysicalGeneration, SourceScanProgress,
+        DroppedGenerationRows, DroppedGenerationValue, IndexCursor, IndexElementKind,
+        IndexGenerationId, IndexId, IndexOperationExecutionState, IndexOperationId,
+        IndexOperationRevision, IndexRevision, IndexStorageVersion, IndexV2MetadataValue,
+        LegacyVectorPhysicalReservation, LogicalIndexIdWatermark, OperationCounters,
+        OperationQueuePointerValue, PhysicalGeneration, SourceScanProgress,
         TextCompactionPointerValue, TextManifestRevision, ValidatedDynamicIndexDefinition,
         VectorPhysicalIdWatermark, VectorPhysicalIndexId,
     };
@@ -1159,6 +1160,36 @@ bulk_build_stage=070000000575707065720100000006637572736f72000000000000000500000
                     revision: TextManifestRevision::new(4).unwrap(),
                 }),
             ),
+            (
+                "dropped_unpartitioned_vector",
+                IndexV2MetadataValue::DroppedGeneration(DroppedGenerationValue {
+                    scope: DataScope::Tenant(TenantId::from_u128(7)),
+                    rows: DroppedGenerationRows::UnpartitionedVector {
+                        physical_index_id: VectorPhysicalIndexId::new(4).unwrap(),
+                    },
+                }),
+            ),
+            (
+                "dropped_partitioned_vector",
+                IndexV2MetadataValue::DroppedGeneration(DroppedGenerationValue {
+                    scope: DataScope::LegacyUnscoped,
+                    rows: DroppedGenerationRows::PartitionedVector,
+                }),
+            ),
+            (
+                "dropped_secondary",
+                IndexV2MetadataValue::DroppedGeneration(DroppedGenerationValue {
+                    scope: DataScope::LegacyUnscoped,
+                    rows: DroppedGenerationRows::Secondary,
+                }),
+            ),
+            (
+                "dropped_text",
+                IndexV2MetadataValue::DroppedGeneration(DroppedGenerationValue {
+                    scope: DataScope::LegacyUnscoped,
+                    rows: DroppedGenerationRows::Text,
+                }),
+            ),
         ];
 
         let mut rendered = String::new();
@@ -1177,6 +1208,10 @@ legacy_vector_adoption=010602000000000000000100000000000000021111111111111111111
 legacy_vector_active=01060300000000000000010000000000000002
 legacy_vector_retiring=01060400000000000000010000000000000002
 text_compaction_pointer=01070000000000000004
+dropped_unpartitioned_vector=0109010000000000000000000000000000000702010000000000000004
+dropped_partitioned_vector=0109000202
+dropped_secondary=0109000103
+dropped_text=0109000303
 ");
     }
 }

@@ -43,6 +43,7 @@ use crate::encoding::v2::values::indexes::vector::{
 };
 use crate::encoding::NodeId;
 use crate::error::HelixDbError;
+use crate::index_lifecycle::dropped::ownership::RowOwner;
 use crate::index_lifecycle::{ValidatedVectorIndexDefinition, VectorPhysicalIndexId};
 
 // Legacy item validation delegates metric semantics to the central decoder.
@@ -590,6 +591,18 @@ fn validate_legacy_row<D: Distance>(
 }
 
 impl VectorCleanupScan {
+    /// Narrows the scan to the lanes whose rows no compaction filter may
+    /// discard: the ones a drop that leaves a dropped-generation entry still
+    /// deletes itself.
+    pub(crate) fn never_filtered(mut self) -> Self {
+        self.lanes
+            .retain(|(lane, _)| match RowOwner::of_vector_lane(*lane) {
+                RowOwner::Never => true,
+                RowOwner::PhysicalIndex | RowOwner::Generation => false,
+            });
+        self
+    }
+
     /// Returns the next exact row while rejecting cross-lane or cross-index data.
     pub(crate) async fn next(&mut self) -> Result<Option<VectorCleanupRow>, HelixDbError> {
         loop {

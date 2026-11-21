@@ -212,7 +212,7 @@ pub async fn run_deterministic_lifecycle_reopen_contracts() {
 }
 
 /// Returns every stable process-abort boundary from the production failpoint ADT.
-pub fn index_outbox_failpoint_names() -> [&'static str; 16] {
+pub fn index_outbox_failpoint_names() -> [&'static str; 19] {
     crate::index_lifecycle::failpoints::IndexOutboxFailpoint::ALL
         .map(|failpoint| failpoint.as_str())
 }

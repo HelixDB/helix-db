@@ -143,6 +143,19 @@ pub(super) async fn drive_one(
     claim_sequence: &mut u64,
     limits: SearchIndexBatchLimits,
 ) -> CommittedOperationStep {
+    try_drive_one(db, driver, operation_id, claim_sequence, limits)
+        .await
+        .expect("vector step commits")
+}
+
+/// Claims `operation_id` and runs one step, which may fail.
+async fn try_drive_one(
+    db: &Db,
+    driver: &dyn IndexOperationDriver,
+    operation_id: IndexOperationId,
+    claim_sequence: &mut u64,
+    limits: SearchIndexBatchLimits,
+) -> Result<CommittedOperationStep> {
     let writer_epoch = WriterEpoch::from_bytes([0x6B; 16]).expect("writer epoch is non-nil");
     let observation = observe_operation_pointer(db, operation_id, writer_epoch, NOW_MILLIS)
         .await
@@ -165,9 +178,7 @@ pub(super) async fn drive_one(
     .await
     .expect("vector claim succeeds")
     .expect("vector revision is claimable");
-    execute_claimed_step(db, &claimed, driver, limits, NOW_MILLIS)
-        .await
-        .expect("vector step commits")
+    execute_claimed_step(db, &claimed, driver, limits, NOW_MILLIS).await
 }
 
 pub(super) async fn drive_to_terminal(
@@ -3893,4 +3904,977 @@ pub(super) async fn adoption_and_activation_guards_fail_closed() {
     ));
     drop(transaction);
     db.close().await.expect("vector test database closes");
+}
+
+/// Moves a bootstrapped fixture store to the storage version that admits
+/// dropped-generation entries.
+async fn admit(db: &Db) {
+    db.put(
+        IndexKey::Global {
+            kind: GlobalKey::StorageVersion,
+        }
+        .to_bytes(),
+        encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
+            crate::index_lifecycle::IndexStorageVersion::LABEL_IDENTITY,
+        )),
+    )
+    .await
+    .expect("fixture storage version is written");
+    dropped::admit(db)
+        .await
+        .expect("fixture store admits dropped-generation entries");
+    assert!(dropped::admitted(db).await.expect("storage version reads"));
+}
+
+/// The generation an enqueued drop of the unpartitioned fixture removes.
+async fn dropping_generation(db: &Db) -> dropped::DroppedGeneration {
+    let record = read_index(db, DataScope::LegacyUnscoped, &definition(None)).await;
+    assert!(matches!(record.state(), IndexStateV2::Dropping { .. }));
+    dropped::DroppedGeneration {
+        index_id: record.index_id(),
+        generation: record.state().generation(),
+    }
+}
+
+/// Returns the keys of every vector row keyed by `entry`'s generation.
+async fn generation_keys(db: &Db, entry: dropped::DroppedGeneration) -> Vec<Bytes> {
+    let mut keys = Vec::new();
+    for kind in [RecordKind::BuildDelta, RecordKind::AppliedState] {
+        keys.extend(
+            prefix_keys(
+                db,
+                ScopedKey::generation_prefix(kind, entry.index_id, entry.generation),
+            )
+            .await,
+        );
+    }
+    keys
+}
+
+/// Proves a drop on an admitted store deletes only the rows no compaction
+/// filter may match and leaves its entry in the step that writes `Dropped`.
+///
+/// The drop takes three steps however many rows the generation has. Until
+/// the last one commits the record is `Dropping` and no entry exists; the
+/// last one writes both. Every hot, layer-0 and generation-keyed row stays
+/// for compactions.
+pub(super) async fn an_admitted_drop_deletes_only_unfiltered_rows_and_leaves_its_entry() {
+    let db = test_db("vector-driver-dropped-entry").await;
+    admit(&db).await;
+    let scope = DataScope::LegacyUnscoped;
+    let driver = driver();
+    let (drop_id, physical_index_id, mut claim_sequence) = unpartitioned_drop(&db, &driver).await;
+    let entry = dropping_generation(&db).await;
+    // A build delta the build left behind: the drop leaves it to compactions.
+    let leftover = IndexEntity {
+        kind: IndexElementKind::Node,
+        id: IndexEntityId::new(2),
+    };
+    db.put(
+        scoped_index_key(
+            scope,
+            ScopedKey::BuildDelta(IndexEntityStateKey {
+                index_id: entry.index_id,
+                generation: entry.generation,
+                entity: leftover,
+            }),
+        ),
+        encode_build_delta(&CoalescedBuildDeltaValue {
+            index_id: entry.index_id,
+            generation: entry.generation,
+            entity_kind: leftover.kind,
+            entity_id: leftover.id,
+            state: crate::index_lifecycle::work::CoalescedBuildDeltaState::Marker,
+        }),
+    )
+    .await
+    .expect("fixture build delta is written");
+    let core = prefix_keys(
+        &db,
+        DataKey::data_prefix(
+            scope,
+            VectorStorageLane::Core
+                .prefix_key(physical_index_id)
+                .to_bytes(),
+        ),
+    )
+    .await;
+    assert!(!core.is_empty());
+    let filtered = physical_keys(&db, scope, physical_index_id)
+        .await
+        .into_iter()
+        .filter(|key| !core.contains(key))
+        .collect::<Vec<_>>();
+    assert!(
+        filtered.len() > 9,
+        "row-by-row cleanup would take several batches"
+    );
+    let generation_rows = generation_keys(&db, entry).await;
+    assert!(!generation_rows.is_empty());
+    // Too few operations a step for the namespace, enough for the core rows.
+    let three_rows = batch_limits(1024, 1024 * 1024, 3, 16 * 1024 * 1024);
+    assert!(core.len() <= 3);
+
+    for step in ["retire the cache", "delete the unfiltered rows"] {
+        assert_eq!(
+            drive_one(&db, &driver, drop_id, &mut claim_sequence, three_rows).await,
+            CommittedOperationStep::Progressed,
+            "{step}"
+        );
+        assert!(matches!(
+            read_index(&db, scope, &definition(None)).await.state(),
+            IndexStateV2::Dropping { .. }
+        ));
+        assert_eq!(dropped::load_entries(&db).await.unwrap(), vec![], "{step}");
+    }
+    assert_eq!(physical_keys(&db, scope, physical_index_id).await, filtered);
+    assert!(matches!(
+        read_operation(&db, scope, drop_id).await.progress(),
+        IndexOperationProgress::VectorCleanup(VectorCleanupProgress::Finalize(_))
+    ));
+
+    assert_eq!(
+        drive_one(&db, &driver, drop_id, &mut claim_sequence, three_rows).await,
+        CommittedOperationStep::Completed
+    );
+    assert!(matches!(
+        read_index(&db, scope, &definition(None)).await.state(),
+        IndexStateV2::Dropped { .. }
+    ));
+    assert_eq!(
+        dropped::load_entries(&db).await.unwrap(),
+        vec![(
+            entry,
+            DroppedGenerationValue {
+                scope,
+                rows: DroppedGenerationRows::UnpartitionedVector {
+                    physical_index_id: VectorPhysicalIndexId::new(physical_index_id).unwrap(),
+                },
+            }
+        )]
+    );
+    assert_eq!(physical_keys(&db, scope, physical_index_id).await, filtered);
+    assert_eq!(generation_keys(&db, entry).await, generation_rows);
+    db.close().await.expect("vector test database closes");
+}
+
+/// Proves a drop leaves no entry where compactions must not discard its
+/// rows, and deletes every row itself.
+///
+/// A store below the admitting storage version can still be opened by a
+/// binary that knows no entries. A generation with a legacy reservation was
+/// adopted from legacy storage, whose physical id this catalog did not
+/// allocate; the drop deletes the reservation with its last step.
+pub(super) async fn a_drop_that_must_not_be_filtered_deletes_every_row_and_leaves_no_entry() {
+    for (name, admitted, adopted) in [
+        ("vector-driver-unadmitted-drop", false, false),
+        ("vector-driver-adopted-drop", true, true),
+        ("vector-driver-unadmitted-adopted-drop", false, true),
+    ] {
+        let db = test_db(name).await;
+        if admitted {
+            admit(&db).await;
+        }
+        let scope = DataScope::LegacyUnscoped;
+        let driver = driver();
+        let (drop_id, physical_index_id, mut claim_sequence) =
+            unpartitioned_drop(&db, &driver).await;
+        let entry = dropping_generation(&db).await;
+        let reservation_key = IndexKey::Global {
+            kind: GlobalKey::LegacyVectorPhysicalReservation(
+                VectorPhysicalIndexId::new(physical_index_id).unwrap(),
+            ),
+        }
+        .to_bytes();
+        if adopted {
+            db.put(
+                &reservation_key,
+                encode_metadata_value(&IndexV2MetadataValue::LegacyVectorPhysicalReservation(
+                    LegacyVectorPhysicalReservation::AdoptedActive {
+                        index_id: entry.index_id,
+                        generation: entry.generation,
+                    },
+                )),
+            )
+            .await
+            .expect("fixture reservation is written");
+        }
+        assert_eq!(
+            drive_to_terminal(&db, &driver, drop_id, &mut claim_sequence).await,
+            CommittedOperationStep::Completed,
+            "{name}"
+        );
+        assert!(matches!(
+            read_index(&db, scope, &definition(None)).await.state(),
+            IndexStateV2::Dropped { .. }
+        ));
+        assert_eq!(dropped::load_entries(&db).await.unwrap(), vec![], "{name}");
+        assert_eq!(
+            physical_keys(&db, scope, physical_index_id).await,
+            Vec::<Bytes>::new(),
+            "{name}"
+        );
+        assert_eq!(
+            generation_keys(&db, entry).await,
+            Vec::<Bytes>::new(),
+            "{name}"
+        );
+        assert_eq!(db.get(&reservation_key).await.unwrap(), None, "{name}");
+        db.close().await.expect("vector test database closes");
+    }
+}
+
+/// Proves a drop whose first delete step could not hold the unfiltered rows
+/// finishes row by row and still leaves its entry.
+///
+/// The counters are the only record that rows were deleted one by one, so a
+/// step that deleted any never hands the rest to compactions: a later step
+/// could not tell which lanes the earlier one had finished.
+pub(super) async fn a_drop_that_began_row_by_row_finishes_row_by_row() {
+    let db = test_db("vector-driver-dropped-entry-fallback").await;
+    admit(&db).await;
+    let scope = DataScope::LegacyUnscoped;
+    let driver = driver();
+    let (drop_id, physical_index_id, mut claim_sequence) = unpartitioned_drop(&db, &driver).await;
+    let entry = dropping_generation(&db).await;
+    // A second core row beside the metadata: one step cannot hold both.
+    db.put(
+        DataKey::Data {
+            scope,
+            kind: DataKeyKind::Vector(
+                crate::encoding::v2::keys::indexes::vector::VectorKey::TxnGuard(
+                    crate::encoding::v2::legacy::vector::transaction_guard::LegacyVectorTxnGuardKey::new(
+                        physical_index_id,
+                    ),
+                ),
+            ),
+        }
+        .to_bytes(),
+        b"fixture guard",
+    )
+    .await
+    .expect("fixture core row is written");
+    let rows = physical_keys(&db, scope, physical_index_id).await.len();
+    let one_row = batch_limits(1024, 1024 * 1024, 1, 16 * 1024 * 1024);
+
+    // Retiring the cache, then one core row: more remain.
+    for _ in 0..2 {
+        assert_eq!(
+            drive_one(&db, &driver, drop_id, &mut claim_sequence, one_row).await,
+            CommittedOperationStep::Progressed
+        );
+    }
+    assert_eq!(
+        physical_keys(&db, scope, physical_index_id).await.len(),
+        rows - 1
+    );
+    assert!(deleting_physical(&db, drop_id).await);
+
+    let mut steps = 0;
+    while drive_one(&db, &driver, drop_id, &mut claim_sequence, one_row).await
+        == CommittedOperationStep::Progressed
+    {
+        steps += 1;
+        assert!(steps < 256, "the drop exceeded bounded test checkpoints");
+        assert_eq!(dropped::load_entries(&db).await.unwrap(), vec![]);
+    }
+    assert!(steps >= rows - 1, "every remaining row took its own step");
+    assert_eq!(
+        physical_keys(&db, scope, physical_index_id).await,
+        Vec::<Bytes>::new()
+    );
+    assert_eq!(generation_keys(&db, entry).await, Vec::<Bytes>::new());
+    // The entry names no row any more; a reclaim deletes it.
+    assert_eq!(
+        dropped::load_entries(&db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(entry, _)| entry)
+            .collect::<Vec<_>>(),
+        vec![entry]
+    );
+    db.close().await.expect("vector test database closes");
+}
+
+/// Proves the entry and the `Dropped` record commit together or not at all:
+/// a step that fails where the entry is staged blocks the operation, leaving
+/// the record `Dropping` with no entry, and its retry writes both.
+pub(super) async fn a_failed_final_step_leaves_neither_the_entry_nor_the_dropped_record() {
+    let db = test_db("vector-driver-dropped-entry-failpoint").await;
+    admit(&db).await;
+    let scope = DataScope::LegacyUnscoped;
+    let driver = driver();
+    let (drop_id, _, mut claim_sequence) = unpartitioned_drop(&db, &driver).await;
+    let entry = dropping_generation(&db).await;
+    let limits = SearchIndexBackfillLimits::default().batch();
+    for _ in 0..2 {
+        assert_eq!(
+            drive_one(&db, &driver, drop_id, &mut claim_sequence, limits).await,
+            CommittedOperationStep::Progressed
+        );
+    }
+
+    failpoints::inject_once(IndexOutboxFailpoint::DroppedEntryStagingBefore).unwrap();
+    assert_eq!(
+        drive_one(&db, &driver, drop_id, &mut claim_sequence, limits).await,
+        CommittedOperationStep::Blocked
+    );
+    assert!(failpoints::was_triggered());
+    assert!(matches!(
+        read_index(&db, scope, &definition(None)).await.state(),
+        IndexStateV2::Dropping { .. }
+    ));
+    assert!(matches!(
+        read_operation(&db, scope, drop_id).await.progress(),
+        IndexOperationProgress::VectorCleanup(VectorCleanupProgress::Finalize(_))
+    ));
+    assert_eq!(dropped::load_entries(&db).await.unwrap(), vec![]);
+
+    crate::index_lifecycle::outbox::retry_operation(&db, scope, drop_id)
+        .await
+        .expect("the blocked drop is retried");
+    assert_eq!(
+        drive_one(&db, &driver, drop_id, &mut claim_sequence, limits).await,
+        CommittedOperationStep::Completed
+    );
+    assert!(matches!(
+        read_index(&db, scope, &definition(None)).await.state(),
+        IndexStateV2::Dropped { .. }
+    ));
+    assert_eq!(
+        dropped::load_entries(&db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(entry, _)| entry)
+            .collect::<Vec<_>>(),
+        vec![entry]
+    );
+    db.close().await.expect("vector test database closes");
+}
+
+/// Proves a store admitted while a drop is half-way through its rows lets
+/// the drop finish row by row.
+///
+/// This is the store a binary that knows no entries leaves behind when it is
+/// replaced mid-drop: the rows it deleted are counted in the operation, so
+/// the new binary hands none of the rest to compactions.
+pub(super) async fn a_drop_admitted_half_way_finishes_row_by_row() {
+    let db = test_db("vector-driver-dropped-entry-admitted-half-way").await;
+    let scope = DataScope::LegacyUnscoped;
+    let driver = driver();
+    let (drop_id, physical_index_id, mut claim_sequence) = unpartitioned_drop(&db, &driver).await;
+    let entry = dropping_generation(&db).await;
+    let rows = physical_keys(&db, scope, physical_index_id).await.len();
+    let one_row = batch_limits(1024, 1024 * 1024, 1, 16 * 1024 * 1024);
+    // Retiring the cache, then two rows.
+    for _ in 0..3 {
+        assert_eq!(
+            drive_one(&db, &driver, drop_id, &mut claim_sequence, one_row).await,
+            CommittedOperationStep::Progressed
+        );
+    }
+    assert_eq!(
+        physical_keys(&db, scope, physical_index_id).await.len(),
+        rows - 2
+    );
+
+    admit(&db).await;
+    assert_eq!(
+        drive_one(&db, &driver, drop_id, &mut claim_sequence, one_row).await,
+        CommittedOperationStep::Progressed
+    );
+    assert_eq!(
+        physical_keys(&db, scope, physical_index_id).await.len(),
+        rows - 3,
+        "the admitted store's first step deletes one row, as the steps before it"
+    );
+    assert_eq!(
+        drive_to_terminal(&db, &driver, drop_id, &mut claim_sequence).await,
+        CommittedOperationStep::Completed
+    );
+    assert_eq!(
+        physical_keys(&db, scope, physical_index_id).await,
+        Vec::<Bytes>::new()
+    );
+    assert_eq!(generation_keys(&db, entry).await, Vec::<Bytes>::new());
+    db.close().await.expect("vector test database closes");
+}
+
+/// Writes `value` as the entry of `entry`, as only a damaged store holds it.
+async fn put_entry(db: &Db, entry: dropped::DroppedGeneration, value: DroppedGenerationValue) {
+    db.put(
+        IndexKey::Global {
+            kind: GlobalKey::DroppedGeneration {
+                index_id: entry.index_id,
+                generation: entry.generation,
+            },
+        }
+        .to_bytes(),
+        encode_metadata_value(&IndexV2MetadataValue::DroppedGeneration(value)),
+    )
+    .await
+    .expect("fixture entry is written");
+}
+
+/// Drops the unpartitioned fixture on an admitted store. Returns the entry
+/// the drop left, its value, the physical id it names and the next claim
+/// sequence.
+async fn completed_drop(
+    db: &Db,
+    driver: &VectorIndexDriver,
+) -> (
+    dropped::DroppedGeneration,
+    DroppedGenerationValue,
+    VectorPhysicalIndexId,
+    u64,
+) {
+    admit(db).await;
+    let (drop_id, _, mut claim_sequence) = unpartitioned_drop(db, driver).await;
+    let entry = dropping_generation(db).await;
+    assert_eq!(
+        drive_to_terminal(db, driver, drop_id, &mut claim_sequence).await,
+        CommittedOperationStep::Completed
+    );
+    let entries = dropped::load_entries(db).await.unwrap();
+    let [(stored, value)] = entries[..] else {
+        panic!("the drop leaves one entry");
+    };
+    assert_eq!(stored, entry);
+    let DroppedGenerationRows::UnpartitionedVector { physical_index_id } = value.rows else {
+        panic!("an unpartitioned drop names its physical id");
+    };
+    (entry, value, physical_index_id, claim_sequence)
+}
+
+/// Builds the unpartitioned fixture again after its drop and returns the new
+/// generation and its physical id.
+async fn recreated(
+    db: &Db,
+    driver: &VectorIndexDriver,
+    claim_sequence: &mut u64,
+) -> (IndexGenerationId, VectorPhysicalIndexId) {
+    let scope = DataScope::LegacyUnscoped;
+    let (build_id, _, generation) = create_build(db, scope, &definition(None), 5).await;
+    assert_eq!(
+        drive_to_terminal(db, driver, build_id, claim_sequence).await,
+        CommittedOperationStep::Completed
+    );
+    let record = read_index(db, scope, &definition(None)).await;
+    let IndexStateV2::Active {
+        physical:
+            PhysicalGeneration::Vector {
+                layout: VectorPhysicalLayout::Unpartitioned { physical_index_id },
+                ..
+            },
+        ..
+    } = record.state()
+    else {
+        panic!("the recreated index is active and unpartitioned");
+    };
+    (generation, *physical_index_id)
+}
+
+fn metadata_key(scope: DataScope, physical_index_id: VectorPhysicalIndexId) -> Bytes {
+    DataKey::Data {
+        scope,
+        kind: DataKeyKind::Vector(
+            crate::encoding::v2::keys::indexes::vector::VectorKey::IndexMetadata(
+                crate::encoding::v2::keys::indexes::vector::VectorIndexMetadataKey::new(
+                    physical_index_id.get(),
+                ),
+            ),
+        ),
+    }
+    .to_bytes()
+}
+
+/// Proves a refresh arms a completed drop's entry with every owner its rows
+/// have, behind a gate that no view of the `Dropping` record reaches, and
+/// that a later refresh leaves an armed entry as it is.
+pub(super) async fn a_refresh_arms_a_completed_drop_behind_its_gate() {
+    let db = test_db("vector-driver-dropped-refresh").await;
+    admit(&db).await;
+    let scope = DataScope::LegacyUnscoped;
+    let driver = driver();
+    let (drop_id, physical_index_id, mut claim_sequence) = unpartitioned_drop(&db, &driver).await;
+    let entry = dropping_generation(&db).await;
+    let registry = dropped::Registry::default();
+    let limits = SearchIndexBackfillLimits::default().batch();
+    for _ in 0..2 {
+        assert_eq!(
+            drive_one(&db, &driver, drop_id, &mut claim_sequence, limits).await,
+            CommittedOperationStep::Progressed
+        );
+    }
+    // The last view that reads the generation as `Dropping`.
+    let dropping = db.snapshot().await.unwrap();
+    registry
+        .refresh(&db)
+        .await
+        .expect("a store without entries arms nothing");
+    assert_eq!(registry.armed(), vec![]);
+    assert_eq!(
+        drive_one(&db, &driver, drop_id, &mut claim_sequence, limits).await,
+        CommittedOperationStep::Completed
+    );
+
+    registry.refresh(&db).await.expect("the drop's entry arms");
+    let armed = registry.armed();
+    let [(armed_entry, armed)] = &armed[..] else {
+        panic!("one entry is armed");
+    };
+    assert_eq!(*armed_entry, entry);
+    assert!(
+        armed.gate > dropping.seq(),
+        "a view of the Dropping record is older than the gate"
+    );
+    assert_eq!(armed.owners.len(), 2);
+    assert_eq!(
+        armed
+            .owners
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>(),
+        std::collections::HashSet::from([
+            dropped::ownership::OwnerKey::Generation {
+                scope,
+                index_id: entry.index_id.get(),
+                generation: entry.generation.get(),
+            },
+            dropped::ownership::OwnerKey::PhysicalIndex {
+                scope,
+                physical_index_id,
+            },
+        ])
+    );
+
+    put_source(&db, scope, 99, &properties([9.0, 2.0, 3.0], None)).await;
+    registry
+        .refresh(&db)
+        .await
+        .expect("a second refresh passes");
+    assert_eq!(registry.armed(), vec![(entry, armed.clone())]);
+    drop(dropping);
+    db.close().await.expect("vector test database closes");
+}
+
+/// One way a stored entry contradicts the catalog or the id watermarks.
+#[derive(Debug, Clone, Copy)]
+enum Contradiction {
+    IndexAboveWatermark,
+    GenerationNotReached,
+    AnotherFamily,
+    AnotherScope,
+    PhysicalIndexAboveWatermark,
+    MetadataRowPresent,
+    MappedByAnotherGeneration,
+    GenerationStillLive,
+    PhysicalIndexStillLive,
+}
+
+/// Proves an entry that names rows a live generation owns, or ids that were
+/// never allocated, arms nothing and halts the registry.
+///
+/// Each case starts from a completed drop, whose own entry passes, and
+/// damages the store in one way. A registry that reads the damaged store for
+/// the first time, as an open does, fails and from then on discards nothing.
+/// A registry that armed the drop's entry before the damage fails as well
+/// when the damage is a second entry; it does not look again at an entry it
+/// has armed.
+pub(super) async fn a_refresh_fails_and_halts_on_an_entry_the_catalog_contradicts() {
+    for (name, contradiction, reason, adds_an_entry) in [
+        (
+            "index-above-watermark",
+            Contradiction::IndexAboveWatermark,
+            "names an index id above the watermark",
+            true,
+        ),
+        (
+            "generation-not-reached",
+            Contradiction::GenerationNotReached,
+            "names a generation its index has not reached",
+            true,
+        ),
+        (
+            "another-family",
+            Contradiction::AnotherFamily,
+            "names an index of another family",
+            false,
+        ),
+        (
+            "another-scope",
+            Contradiction::AnotherScope,
+            "names an index its scope has no record of",
+            false,
+        ),
+        (
+            "physical-above-watermark",
+            Contradiction::PhysicalIndexAboveWatermark,
+            "names a vector physical index id above the watermark",
+            false,
+        ),
+        (
+            "metadata-row-present",
+            Contradiction::MetadataRowPresent,
+            "names a vector physical index that has a metadata row",
+            false,
+        ),
+        (
+            "mapped-by-another-generation",
+            Contradiction::MappedByAnotherGeneration,
+            "names a vector physical index another generation's partition maps to",
+            false,
+        ),
+        (
+            "generation-still-live",
+            Contradiction::GenerationStillLive,
+            "names a generation its index record still owns",
+            true,
+        ),
+        (
+            "physical-still-live",
+            Contradiction::PhysicalIndexStillLive,
+            "names a vector physical index an index record still owns",
+            false,
+        ),
+    ] {
+        let db = test_db(&format!("vector-driver-dropped-contradiction-{name}")).await;
+        let scope = DataScope::LegacyUnscoped;
+        let driver = driver();
+        let (entry, value, physical_index_id, mut claim_sequence) =
+            completed_drop(&db, &driver).await;
+        let running = dropped::Registry::default();
+        running.refresh(&db).await.expect("the drop's entry passes");
+        assert_eq!(running.armed().len(), 1, "{name}");
+
+        match contradiction {
+            Contradiction::IndexAboveWatermark => {
+                let unallocated =
+                    crate::index_lifecycle::repository::load_logical_index_watermark(&db)
+                        .await
+                        .unwrap()
+                        .next_id;
+                put_entry(
+                    &db,
+                    dropped::DroppedGeneration {
+                        index_id: unallocated,
+                        ..entry
+                    },
+                    value,
+                )
+                .await;
+            }
+            Contradiction::GenerationNotReached => {
+                put_entry(
+                    &db,
+                    dropped::DroppedGeneration {
+                        generation: entry.generation.checked_next().unwrap(),
+                        ..entry
+                    },
+                    value,
+                )
+                .await;
+            }
+            Contradiction::AnotherFamily => {
+                put_entry(
+                    &db,
+                    entry,
+                    DroppedGenerationValue {
+                        rows: DroppedGenerationRows::Secondary,
+                        ..value
+                    },
+                )
+                .await;
+            }
+            Contradiction::AnotherScope => {
+                put_entry(
+                    &db,
+                    entry,
+                    DroppedGenerationValue {
+                        scope: DataScope::Tenant(
+                            crate::encoding::v2::keys::scope::TenantId::from_u128(9),
+                        ),
+                        ..value
+                    },
+                )
+                .await;
+            }
+            Contradiction::PhysicalIndexAboveWatermark => {
+                put_entry(
+                    &db,
+                    entry,
+                    DroppedGenerationValue {
+                        rows: DroppedGenerationRows::UnpartitionedVector {
+                            physical_index_id: peek_vector_physical_id(&db).await.unwrap(),
+                        },
+                        ..value
+                    },
+                )
+                .await;
+            }
+            Contradiction::MetadataRowPresent => {
+                db.put(metadata_key(scope, physical_index_id), b"metadata")
+                    .await
+                    .unwrap();
+            }
+            Contradiction::MappedByAnotherGeneration => {
+                let tenant = VectorTenantPartition::try_new(Bytes::from_static(b"tenant")).unwrap();
+                let generation = entry.generation.checked_next().unwrap();
+                db.put(
+                    scoped_index_key(
+                        scope,
+                        ScopedKey::VectorPartitionMapping(
+                            crate::encoding::v2::keys::VectorPartitionMappingKey {
+                                index_id: entry.index_id,
+                                generation,
+                                partition: tenant.fingerprint(),
+                            },
+                        ),
+                    ),
+                    encode_partition_mapping(
+                        &crate::index_lifecycle::work::VectorPartitionMappingValue {
+                            index_id: entry.index_id,
+                            generation,
+                            partition: tenant,
+                            physical_index_id,
+                        },
+                    ),
+                )
+                .await
+                .unwrap();
+            }
+            Contradiction::GenerationStillLive => {
+                let (generation, _) = recreated(&db, &driver, &mut claim_sequence).await;
+                dropped::Registry::default()
+                    .refresh(&db)
+                    .await
+                    .expect("the drop's entry passes beside the recreated generation");
+                // The layout names no physical id, so only the generation
+                // contradicts the record.
+                put_entry(
+                    &db,
+                    dropped::DroppedGeneration {
+                        generation,
+                        ..entry
+                    },
+                    DroppedGenerationValue {
+                        rows: DroppedGenerationRows::PartitionedVector,
+                        ..value
+                    },
+                )
+                .await;
+            }
+            Contradiction::PhysicalIndexStillLive => {
+                let (_, live) = recreated(&db, &driver, &mut claim_sequence).await;
+                // Without its metadata row only the record says the id is live.
+                db.delete(metadata_key(scope, live)).await.unwrap();
+                put_entry(
+                    &db,
+                    entry,
+                    DroppedGenerationValue {
+                        rows: DroppedGenerationRows::UnpartitionedVector {
+                            physical_index_id: live,
+                        },
+                        ..value
+                    },
+                )
+                .await;
+            }
+        }
+
+        let opened = dropped::Registry::default();
+        let error = opened.refresh(&db).await.expect_err(name);
+        assert!(
+            matches!(&error, HelixDbError::IndexCatalogCorruption(message) if message.contains(reason)),
+            "{name}: {error}"
+        );
+        assert_eq!(opened.armed(), vec![], "{name}");
+        let error = opened.refresh(&db).await.expect_err(name);
+        assert!(
+            matches!(&error, HelixDbError::IndexCatalogCorruption(message)
+                if message.contains("failed its cross-check")),
+            "{name}: {error}"
+        );
+
+        assert_eq!(running.refresh(&db).await.is_err(), adds_an_entry, "{name}");
+        assert_eq!(
+            running.armed().is_empty(),
+            adds_an_entry,
+            "{name}: a halted registry forgets what it armed"
+        );
+        db.close().await.expect("vector test database closes");
+    }
+}
+
+/// Proves an entry beside a record that is still `Dropping` fails the
+/// refresh: the entry and the `Dropped` record are written together, so one
+/// without the other names rows a drop is still deleting.
+pub(super) async fn a_refresh_fails_on_an_entry_whose_drop_has_not_completed() {
+    let db = test_db("vector-driver-dropped-contradiction-dropping").await;
+    admit(&db).await;
+    let scope = DataScope::LegacyUnscoped;
+    let driver = driver();
+    let (drop_id, physical_index_id, mut claim_sequence) = unpartitioned_drop(&db, &driver).await;
+    let physical_index_id = VectorPhysicalIndexId::new(physical_index_id).unwrap();
+    let entry = dropping_generation(&db).await;
+    let limits = SearchIndexBackfillLimits::default().batch();
+    for _ in 0..2 {
+        assert_eq!(
+            drive_one(&db, &driver, drop_id, &mut claim_sequence, limits).await,
+            CommittedOperationStep::Progressed
+        );
+    }
+    assert_eq!(
+        db.get(metadata_key(scope, physical_index_id))
+            .await
+            .unwrap(),
+        None,
+        "the drop has deleted the metadata row"
+    );
+    put_entry(
+        &db,
+        entry,
+        DroppedGenerationValue {
+            scope,
+            rows: DroppedGenerationRows::UnpartitionedVector { physical_index_id },
+        },
+    )
+    .await;
+    let registry = dropped::Registry::default();
+    let error = registry.refresh(&db).await.expect_err("the entry is early");
+    assert!(
+        matches!(&error, HelixDbError::IndexCatalogCorruption(message)
+            if message.contains("names a generation its index record still owns")),
+        "{error}"
+    );
+    assert_eq!(registry.armed(), vec![]);
+    db.close().await.expect("vector test database closes");
+}
+
+/// Proves a refresh that fails before its flush arms nothing, and that its
+/// retry arms the entry.
+pub(super) async fn a_refresh_that_fails_before_its_flush_arms_nothing() {
+    let db = test_db("vector-driver-dropped-refresh-failpoint").await;
+    let driver = driver();
+    let (entry, _, _, _) = completed_drop(&db, &driver).await;
+    let registry = dropped::Registry::default();
+    failpoints::inject_once(IndexOutboxFailpoint::DroppedEntryArmBefore).unwrap();
+    assert!(registry.refresh(&db).await.is_err());
+    assert!(failpoints::was_triggered());
+    assert_eq!(registry.armed(), vec![]);
+    registry.refresh(&db).await.expect("the retry arms");
+    assert_eq!(
+        registry
+            .armed()
+            .into_iter()
+            .map(|(entry, _)| entry)
+            .collect::<Vec<_>>(),
+        vec![entry]
+    );
+    db.close().await.expect("vector test database closes");
+}
+
+/// Proves no id an entry names is allocated: a new index does not take an
+/// index id, a recreated index a generation, nor an unpartitioned vector
+/// build a physical id that a stored entry gives up to compactions. Each
+/// refusal leaves the catalog as it was.
+pub(super) async fn an_id_an_entry_names_is_never_allocated() {
+    let scope = DataScope::LegacyUnscoped;
+    let refused = |result: Result<IndexDdlReceipt>, reason: &str| {
+        let error = result.expect_err(reason);
+        assert!(
+            matches!(&error, HelixDbError::IndexCatalogCorruption(message) if message.contains(reason)),
+            "{reason}: {error}"
+        );
+    };
+
+    let db = test_db("vector-driver-dropped-unallocated-index").await;
+    admit(&db).await;
+    let watermark = crate::index_lifecycle::repository::load_logical_index_watermark(&db)
+        .await
+        .unwrap();
+    put_entry(
+        &db,
+        dropped::DroppedGeneration {
+            index_id: watermark.next_id,
+            generation: IndexGenerationId::initial(),
+        },
+        DroppedGenerationValue {
+            scope: DataScope::Tenant(crate::encoding::v2::keys::scope::TenantId::from_u128(9)),
+            rows: DroppedGenerationRows::Text,
+        },
+    )
+    .await;
+    refused(create_unpartitioned(&db).await, "which was never allocated");
+    assert_eq!(
+        crate::index_lifecycle::repository::load_logical_index_watermark(&db)
+            .await
+            .unwrap()
+            .next_id,
+        watermark.next_id
+    );
+    db.close().await.expect("vector test database closes");
+
+    let db = test_db("vector-driver-dropped-unallocated-generation").await;
+    let driver = driver();
+    let (entry, value, _, _) = completed_drop(&db, &driver).await;
+    let dropped_record = read_index(&db, scope, &definition(None)).await;
+    put_entry(
+        &db,
+        dropped::DroppedGeneration {
+            generation: entry.generation.checked_next().unwrap(),
+            ..entry
+        },
+        value,
+    )
+    .await;
+    refused(
+        create_unpartitioned(&db).await,
+        "names a generation that was never built",
+    );
+    assert_eq!(
+        read_index(&db, scope, &definition(None)).await,
+        dropped_record
+    );
+    db.close().await.expect("vector test database closes");
+
+    let db = test_db("vector-driver-dropped-unallocated-physical").await;
+    let (entry, value, _, _) = completed_drop(&db, &driver).await;
+    let unallocated = peek_vector_physical_id(&db).await.unwrap();
+    put_entry(
+        &db,
+        entry,
+        DroppedGenerationValue {
+            rows: DroppedGenerationRows::UnpartitionedVector {
+                physical_index_id: unallocated,
+            },
+            ..value
+        },
+    )
+    .await;
+    refused(
+        create_unpartitioned(&db).await,
+        "names a vector physical index id that was never allocated",
+    );
+    assert_eq!(peek_vector_physical_id(&db).await.unwrap(), unallocated);
+    assert!(matches!(
+        read_index(&db, scope, &definition(None)).await.state(),
+        IndexStateV2::Dropped { .. }
+    ));
+    db.close().await.expect("vector test database closes");
+}
+
+/// Enqueues a build of the unpartitioned fixture definition.
+async fn create_unpartitioned(db: &Db) -> Result<IndexDdlReceipt> {
+    let scope = DataScope::LegacyUnscoped;
+    create_index_operation(
+        db,
+        scope,
+        definition(None),
+        helix_planner::ir::IndexCreateMode::ErrorIfExists,
+        InitialBuildProgress::vector(source_cursor(scope, 5)),
+    )
+    .await
 }
