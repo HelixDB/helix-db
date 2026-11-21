@@ -1,11 +1,14 @@
 //! Dropped generations whose rows compactions discard.
 //!
-//! A drop that completes on a store at
+//! A drop, or the abort of a build, that completes on a store at
 //! [`IndexStorageVersion::DROPPED_GENERATIONS`] does not delete the
 //! generation's rows one by one. It deletes the few rows no filter may match,
 //! and in the transaction that moves the index record to `Dropped` it writes
 //! one global *dropped-generation entry*. From then on the rows are garbage
-//! that nothing reads, and compactions discard them.
+//! that nothing reads, and compactions discard them. An aborted build ends
+//! in the `Dropped` state a drop ends in, and its ids are as final: a
+//! recreated index builds the next generation under new physical ids. What
+//! this module says of a drop holds for an abort unless it says otherwise.
 //!
 //! # Contract
 //!
@@ -48,16 +51,17 @@
 //!   Text split blobs in object storage are not rows and are retained, as
 //!   they were before.
 //!
-//! Three kinds of cleanup still delete row by row: a build abort, which
-//! leaves no entry; a drop whose row-by-row cleanup had deleted rows before
-//! the store was admitted; and a vector drop whose first physical id has more
-//! unfiltered rows than one step deletes, which the persisted progress cannot
-//! tell from the second. Both drops finish on an admitted store, so each
-//! still leaves an entry, which then names rows that are already gone.
+//! Two kinds of cleanup still delete row by row: one that had deleted rows
+//! before the store was admitted; and a vector cleanup whose first physical
+//! id has more unfiltered rows than one step deletes, which the persisted
+//! progress cannot tell from the first. Both finish on an admitted store, so
+//! each still leaves an entry, which then names rows that are already gone.
 //!
 //! A generation adopted from legacy vector storage is never given an entry:
 //! its physical id was not allocated by this catalog and its rows may be
-//! shared with a legacy index.
+//! shared with a legacy index. Its drop deletes every row one by one. The
+//! abort of its build deletes the directory and the generation-keyed rows
+//! the build added, one by one, and hands the legacy rows back untouched.
 //!
 //! Whether a drop leaves an entry depends on the store alone, not on the
 //! writer that runs it. A writer opened without a compactor still leaves

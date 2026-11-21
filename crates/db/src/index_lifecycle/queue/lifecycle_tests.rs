@@ -37,10 +37,10 @@ use crate::encoding::v2::keys::{self, DataKey, DataKeyKind, IndexEntity};
 use crate::encoding::v2::values::indexes::operation_queue::{QueueFamily, QueuedOperationId};
 use crate::index_lifecycle::outbox::step_pause::{self, StepPause};
 use crate::index_lifecycle::{
-    IndexElementKind, IndexEntityId, IndexGenerationPublicationPermit, IndexOperationId,
-    IndexOperationProgress, SourceScanProgress, TextBuildProgress, TextBuildStage,
-    ValidatedDynamicIndexDefinition, VectorBuildPath, VectorBuildProgress, VectorBuildStage,
-    VectorCleanupProgress, VectorSerialBuildReason,
+    DroppedGenerationRows, IndexElementKind, IndexEntityId, IndexGenerationPublicationPermit,
+    IndexOperationId, IndexOperationProgress, SourceScanProgress, TextBuildProgress,
+    TextBuildStage, ValidatedDynamicIndexDefinition, VectorBuildPath, VectorBuildProgress,
+    VectorBuildStage, VectorCleanupProgress, VectorSerialBuildReason,
 };
 use crate::HelixDB;
 
@@ -2258,6 +2258,133 @@ async fn aborting_a_build_discards_operations_written_during_it() {
         .index_operation_backlog()
         .outstanding_targets()
         .is_empty());
+    db.close().await.unwrap();
+}
+
+/// Proves an aborted build leaves the rows it wrote to compactions under one
+/// entry, and that a reclaim discards exactly those rows, the aborted
+/// generation's partition mappings and the entry. Every other row, the
+/// generation rebuilt while the entry waited included, is identical, and the
+/// rebuilt index answers as exact search does.
+#[tokio::test]
+async fn a_reclaim_discards_exactly_an_aborted_generation() {
+    let db = open("abort-reclaim", Arc::new(InMemory::new()), config()).await;
+    let (_, mut state) = seed_vectors(&db, 60).await;
+    let (operation, target, held) = create_held(&db, vector_spec(), QueueFamily::Vector, 1).await;
+    let paused = pause_when(&db, &operation, held, |status| scanned(status) >= 8).await;
+    let abort = drop_index(&db, vector_spec())
+        .await
+        .unwrap_or_else(|| operation.clone());
+    drop(paused);
+    assert_eq!(wait_terminal(&db, &operation).await, "aborted");
+    if abort != operation {
+        assert_eq!(wait_terminal(&db, &abort).await, "succeeded");
+    }
+
+    let crate::HelixStorage::Writer(writer) = db.storage() else {
+        panic!("the fixture opens a writer");
+    };
+    writer
+        .dropped()
+        .refresh(writer.db())
+        .await
+        .expect("the abort's entry arms");
+    let armed = writer.dropped().armed();
+    let [(entry, armed)] = &armed[..] else {
+        panic!("one abort leaves one entry: {armed:?}");
+    };
+    assert_eq!(
+        (entry.index_id, entry.generation),
+        (target.index_id, target.generation)
+    );
+    assert_eq!(armed.value.rows, DroppedGenerationRows::PartitionedVector);
+    assert!(
+        armed.owners.len() > 1,
+        "the build mapped a partition before it was aborted"
+    );
+    // Everything a reclaim removes: the rows the entry gives up, then the
+    // mappings that list its physical ids, then the entry.
+    let gone = armed
+        .owners
+        .iter()
+        .flat_map(|owner| owner.prefixes())
+        .chain([
+            keys::ManagedIndexKey::data_prefix(
+                target.scope,
+                keys::ScopedKey::generation_prefix(
+                    keys::RecordKind::VectorPartitionMapping,
+                    target.index_id,
+                    target.generation,
+                ),
+            ),
+            keys::ManagedIndexKey::Global {
+                kind: keys::GlobalKey::DroppedGeneration {
+                    index_id: target.index_id,
+                    generation: target.generation,
+                },
+            }
+            .to_bytes(),
+        ])
+        .collect::<Vec<_>>();
+
+    let rebuilt = create(&db, vector_spec()).await;
+    assert_eq!(wait_terminal(&db, &rebuilt).await, "succeeded");
+    // SlateDB publishes its oldest open reader when it flushes a memtable, so
+    // the reclaim's flush needs a row to carry.
+    state.insert(
+        add(&db, [7.0, 7.0], "doc", Some("a")).await,
+        ("a", [7.0, 7.0]),
+    );
+    let before = rows(&db, |_| true).await;
+    assert!(
+        before
+            .keys()
+            .filter(|key| gone.iter().any(|prefix| key.starts_with(prefix)))
+            .count()
+            > armed.owners.len(),
+        "the abort left rows of its generation to compactions"
+    );
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let reclaimed = loop {
+        match db.reclaim_dropped_index_storage().await.unwrap() {
+            // Lost its compaction to one the scheduler picked.
+            crate::DroppedStorageReclaim::Unproven { .. } => {
+                assert!(
+                    Instant::now() < deadline,
+                    "no reclaim proved its compaction"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            outcome @ (crate::DroppedStorageReclaim::Idle
+            | crate::DroppedStorageReclaim::Retained { .. }
+            | crate::DroppedStorageReclaim::BelowShare { .. }
+            | crate::DroppedStorageReclaim::Reclaimed { .. }) => break outcome,
+        }
+    };
+    assert!(
+        matches!(
+            reclaimed,
+            crate::DroppedStorageReclaim::Reclaimed { entries: 1, .. }
+        ),
+        "{reclaimed:?}"
+    );
+    let expected = before
+        .into_iter()
+        .filter(|(key, _)| !gone.iter().any(|prefix| key.starts_with(prefix)))
+        .collect::<BTreeMap<_, _>>();
+    // The writer stops reading the discarded rows at its next manifest poll.
+    while rows(&db, |_| true).await != expected {
+        assert!(
+            Instant::now() < deadline,
+            "the reclaim left or removed other rows than the aborted generation's"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_exact_vectors(&db, &state, SearchConsistency::Strong).await;
+    assert_eq!(
+        db.reclaim_dropped_index_storage().await.unwrap(),
+        crate::DroppedStorageReclaim::Idle
+    );
     db.close().await.unwrap();
 }
 

@@ -1559,7 +1559,19 @@ pub(super) async fn abort_removes_hidden_physical_rows_and_builder_work() {
 }
 
 pub(super) async fn adoption_abort_restores_source_reservation_without_deleting_physical_rows() {
-    let db = test_db("vector-driver-adoption-abort").await;
+    adoption_abort("vector-driver-adoption-abort", false).await;
+    adoption_abort("vector-driver-admitted-adoption-abort", true).await;
+}
+
+/// Aborts a legacy adoption on a store that does or does not admit
+/// dropped-generation entries. Either way the abort deletes its directory and
+/// its build deltas itself, hands the legacy rows back untouched and leaves
+/// no entry: this catalog did not allocate the namespace's physical id.
+async fn adoption_abort(name: &str, admitted: bool) {
+    let db = test_db(name).await;
+    if admitted {
+        dropped::admit_fixture(&db).await;
+    }
     let scope = DataScope::LegacyUnscoped;
     let definition = definition(None);
     let physical_index_id = VectorPhysicalIndexId::new(55).expect("fixture ID is nonzero");
@@ -1657,6 +1669,11 @@ pub(super) async fn adoption_abort_restores_source_reservation_without_deleting_
     // A reservation the abort does not own fails closed.
     let aborting = read_operation(&db, scope, operation_id).await;
     let aborting_record = read_index(&db, scope, &definition).await;
+    let aborted = dropped::DroppedGeneration {
+        index_id: aborting.index_id(),
+        generation: aborting.generation(),
+    };
+    put_build_delta(&db, aborted).await;
     let delete = VectorCleanupProgress::DeletePhysical(PrefixScanProgress {
         cursor: None,
         counters: OperationCounters::default(),
@@ -1764,6 +1781,8 @@ pub(super) async fn adoption_abort_restores_source_reservation_without_deleting_
             "adoption abort must delete only its partial directory"
         );
     }
+    assert_eq!(generation_keys(&db, aborted).await, Vec::<Bytes>::new());
+    assert_eq!(dropped::load_entries(&db).await.unwrap(), vec![], "{name}");
     db.close().await.expect("vector test database closes");
 }
 
@@ -3917,6 +3936,34 @@ async fn dropping_generation(db: &Db) -> dropped::DroppedGeneration {
     }
 }
 
+/// Writes one build delta of `entry`'s generation, as a build leaves behind
+/// for a write it has not applied.
+async fn put_build_delta(db: &Db, entry: dropped::DroppedGeneration) {
+    let entity = IndexEntity {
+        kind: IndexElementKind::Node,
+        id: IndexEntityId::new(2),
+    };
+    db.put(
+        scoped_index_key(
+            DataScope::LegacyUnscoped,
+            ScopedKey::BuildDelta(IndexEntityStateKey {
+                index_id: entry.index_id,
+                generation: entry.generation,
+                entity,
+            }),
+        ),
+        encode_build_delta(&CoalescedBuildDeltaValue {
+            index_id: entry.index_id,
+            generation: entry.generation,
+            entity_kind: entity.kind,
+            entity_id: entity.id,
+            state: crate::index_lifecycle::work::CoalescedBuildDeltaState::Marker,
+        }),
+    )
+    .await
+    .expect("fixture build delta is written");
+}
+
 /// Returns the keys of every vector row keyed by `entry`'s generation.
 async fn generation_keys(db: &Db, entry: dropped::DroppedGeneration) -> Vec<Bytes> {
     let mut keys = Vec::new();
@@ -3947,29 +3994,7 @@ pub(super) async fn an_admitted_drop_deletes_only_unfiltered_rows_and_leaves_its
     let (drop_id, physical_index_id, mut claim_sequence) = unpartitioned_drop(&db, &driver).await;
     let entry = dropping_generation(&db).await;
     // A build delta the build left behind: the drop leaves it to compactions.
-    let leftover = IndexEntity {
-        kind: IndexElementKind::Node,
-        id: IndexEntityId::new(2),
-    };
-    db.put(
-        scoped_index_key(
-            scope,
-            ScopedKey::BuildDelta(IndexEntityStateKey {
-                index_id: entry.index_id,
-                generation: entry.generation,
-                entity: leftover,
-            }),
-        ),
-        encode_build_delta(&CoalescedBuildDeltaValue {
-            index_id: entry.index_id,
-            generation: entry.generation,
-            entity_kind: leftover.kind,
-            entity_id: leftover.id,
-            state: crate::index_lifecycle::work::CoalescedBuildDeltaState::Marker,
-        }),
-    )
-    .await
-    .expect("fixture build delta is written");
+    put_build_delta(&db, entry).await;
     let core = prefix_keys(
         &db,
         DataKey::data_prefix(
@@ -5272,4 +5297,365 @@ async fn create_unpartitioned(db: &Db) -> Result<IndexDdlReceipt> {
         InitialBuildProgress::vector(source_cursor(scope, 5)),
     )
     .await
+}
+
+/// Builds the fixture index over eight entities, in two tenants when
+/// `tenant_property` partitions it, up to activation and aborts it there.
+/// Returns the build, now aborting, the generation it removes, the physical
+/// ids of its namespaces in mapping order and the next claim sequence.
+async fn aborting_build(
+    db: &Db,
+    driver: &VectorIndexDriver,
+    tenant_property: Option<&str>,
+) -> (IndexOperationId, dropped::DroppedGeneration, Vec<u64>, u64) {
+    let scope = DataScope::LegacyUnscoped;
+    let definition = definition(tenant_property);
+    for entity_id in 0..8_u8 {
+        put_source(
+            db,
+            scope,
+            u64::from(entity_id),
+            &properties(
+                [f32::from(entity_id), 5.0, 6.0],
+                tenant_property.map(|_| 10 * (1 + i64::from(entity_id % 2))),
+            ),
+        )
+        .await;
+    }
+    let (build_id, index_id, generation) = create_build(db, scope, &definition, 7).await;
+    let mut claim_sequence = 1;
+    for _ in 0..64 {
+        if matches!(
+            read_operation(db, scope, build_id).await.progress(),
+            IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+                VectorBuildStage::Activate(_)
+            ))
+        ) {
+            break;
+        }
+        assert_eq!(
+            drive_one(
+                db,
+                driver,
+                build_id,
+                &mut claim_sequence,
+                SearchIndexBackfillLimits::default().batch(),
+            )
+            .await,
+            CommittedOperationStep::Progressed
+        );
+    }
+    let building = read_index(db, scope, &definition).await;
+    let IndexStateV2::Building {
+        physical: PhysicalGeneration::Vector { layout, .. },
+        ..
+    } = building.state()
+    else {
+        panic!("the build has not activated");
+    };
+    let physical_ids = match layout {
+        VectorPhysicalLayout::Unpartitioned { physical_index_id } => {
+            vec![physical_index_id.get()]
+        }
+        VectorPhysicalLayout::Partitioned => mapping_values(db, scope, index_id, generation)
+            .await
+            .iter()
+            .map(|mapping| mapping.physical_index_id.get())
+            .collect(),
+    };
+    let receipt = drop_index_operation(db, scope, &definition)
+        .await
+        .expect("a building vector index converts to abort cleanup");
+    assert!(matches!(
+        receipt,
+        IndexDdlReceipt::ExistingOperation { operation_id } if operation_id == build_id
+    ));
+    (
+        build_id,
+        dropped::DroppedGeneration {
+            index_id,
+            generation,
+        },
+        physical_ids,
+        claim_sequence,
+    )
+}
+
+/// Proves an aborted build on an admitted store is removed as a drop is: it
+/// deletes only the rows no compaction filter may match, keeps its partition
+/// mappings and leaves its entry in the step that writes `Dropped`.
+///
+/// Both layouts take one step to retire the cache and one for each namespace.
+/// Until the last step commits the record is `Aborting` and no entry exists.
+/// A fresh registry, as an open builds, arms the entry with the generation
+/// and every namespace as owners, and still does once the index is built
+/// again as a later generation, whose build touches none of the rows the
+/// entry gives up.
+pub(super) async fn an_admitted_abort_deletes_only_unfiltered_rows_and_leaves_its_entry() {
+    for (name, tenant_property, namespaces) in [
+        ("vector-driver-aborted-entry", None, 1),
+        (
+            "vector-driver-aborted-partitioned-entry",
+            Some("account_id"),
+            2,
+        ),
+    ] {
+        let db = test_db(name).await;
+        dropped::admit_fixture(&db).await;
+        let scope = DataScope::LegacyUnscoped;
+        let driver = driver();
+        let definition = definition(tenant_property);
+        let (build_id, entry, physical_ids, mut claim_sequence) =
+            aborting_build(&db, &driver, tenant_property).await;
+        assert_eq!(physical_ids.len(), namespaces, "{name}");
+        put_build_delta(&db, entry).await;
+        let mut filtered = Vec::new();
+        for &physical_index_id in &physical_ids {
+            let core = core_keys(&db, scope, physical_index_id).await;
+            assert!(!core.is_empty() && core.len() <= 3, "{name}");
+            filtered.push(
+                physical_keys(&db, scope, physical_index_id)
+                    .await
+                    .into_iter()
+                    .filter(|key| !core.contains(key))
+                    .collect::<Vec<_>>(),
+            );
+            assert!(
+                filtered.last().is_some_and(|rows| rows.len() > 3),
+                "{name}: row-by-row cleanup would take several batches"
+            );
+        }
+        let generation_rows = generation_keys(&db, entry).await;
+        assert!(!generation_rows.is_empty(), "{name}");
+        let mappings = mapped_physical_ids(&db, entry).await;
+        // Too few operations a step for a namespace, enough for its core rows.
+        let three_rows = batch_limits(1024, 1024 * 1024, 3, 16 * 1024 * 1024);
+
+        for step in 0..=namespaces {
+            assert_eq!(
+                drive_one(&db, &driver, build_id, &mut claim_sequence, three_rows).await,
+                CommittedOperationStep::Progressed,
+                "{name}: step {step}"
+            );
+            assert!(matches!(
+                read_index(&db, scope, &definition).await.state(),
+                IndexStateV2::Aborting { .. }
+            ));
+            assert_eq!(dropped::load_entries(&db).await.unwrap(), vec![], "{name}");
+        }
+        assert!(matches!(
+            read_operation(&db, scope, build_id).await.progress(),
+            IndexOperationProgress::VectorBuild(VectorBuildProgress::Aborting(
+                VectorCleanupProgress::Finalize(_)
+            ))
+        ));
+
+        assert_eq!(
+            drive_one(&db, &driver, build_id, &mut claim_sequence, three_rows).await,
+            CommittedOperationStep::Completed,
+            "{name}"
+        );
+        assert!(matches!(
+            read_index(&db, scope, &definition).await.state(),
+            IndexStateV2::Dropped { .. }
+        ));
+        assert_eq!(
+            dropped::load_entries(&db).await.unwrap(),
+            vec![(
+                entry,
+                DroppedGenerationValue {
+                    scope,
+                    rows: match tenant_property {
+                        None => DroppedGenerationRows::UnpartitionedVector {
+                            physical_index_id: VectorPhysicalIndexId::new(physical_ids[0]).unwrap(),
+                        },
+                        Some(_) => DroppedGenerationRows::PartitionedVector,
+                    },
+                }
+            )],
+            "{name}"
+        );
+        let owners = std::iter::once(dropped::ownership::OwnerKey::Generation {
+            scope,
+            index_id: entry.index_id.get(),
+            generation: entry.generation.get(),
+        })
+        .chain(physical_ids.iter().map(|&physical_index_id| {
+            dropped::ownership::OwnerKey::PhysicalIndex {
+                scope,
+                physical_index_id,
+            }
+        }))
+        .collect::<std::collections::HashSet<_>>();
+
+        for stage in ["aborted", "built again"] {
+            for (physical_index_id, filtered) in physical_ids.iter().zip(&filtered) {
+                assert_eq!(
+                    physical_keys(&db, scope, *physical_index_id).await,
+                    *filtered,
+                    "{name}: {stage}"
+                );
+            }
+            assert_eq!(
+                mapped_physical_ids(&db, entry).await,
+                mappings,
+                "{name}: {stage}"
+            );
+            assert_eq!(
+                generation_keys(&db, entry).await,
+                generation_rows,
+                "{name}: {stage}"
+            );
+            let registry = dropped::Registry::default();
+            registry.refresh(&db).await.expect("the abort's entry arms");
+            let armed = registry.armed();
+            let [(armed_entry, armed)] = &armed[..] else {
+                panic!("{name}: one entry is armed once {stage}");
+            };
+            assert_eq!(*armed_entry, entry);
+            assert_eq!(armed.owners.len(), 1 + namespaces);
+            assert_eq!(
+                armed
+                    .owners
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::HashSet<_>>(),
+                owners,
+                "{name}: {stage}"
+            );
+            if stage == "aborted" {
+                let (rebuild_id, _, generation) = create_build(&db, scope, &definition, 7).await;
+                assert!(generation > entry.generation);
+                assert_eq!(
+                    drive_to_terminal(&db, &driver, rebuild_id, &mut claim_sequence).await,
+                    CommittedOperationStep::Completed,
+                    "{name}"
+                );
+                assert!(matches!(
+                    read_index(&db, scope, &definition).await.state(),
+                    IndexStateV2::Active { .. }
+                ));
+            }
+        }
+        db.close().await.expect("vector test database closes");
+    }
+}
+
+/// Proves a store admitted while an abort is half-way through its rows lets
+/// the abort finish row by row, as a drop does.
+///
+/// The entry its last step leaves names a generation without rows.
+pub(super) async fn an_abort_admitted_half_way_finishes_row_by_row() {
+    let db = test_db("vector-driver-aborted-entry-admitted-half-way").await;
+    let scope = DataScope::LegacyUnscoped;
+    let driver = driver();
+    let (build_id, entry, physical_ids, mut claim_sequence) =
+        aborting_build(&db, &driver, None).await;
+    let [physical_index_id] = physical_ids[..] else {
+        panic!("an unpartitioned build has one namespace");
+    };
+    put_build_delta(&db, entry).await;
+    let rows = physical_keys(&db, scope, physical_index_id).await.len();
+    let one_row = batch_limits(1024, 1024 * 1024, 1, 16 * 1024 * 1024);
+    // Retiring the cache, then two rows.
+    for _ in 0..3 {
+        assert_eq!(
+            drive_one(&db, &driver, build_id, &mut claim_sequence, one_row).await,
+            CommittedOperationStep::Progressed
+        );
+    }
+    assert_eq!(
+        physical_keys(&db, scope, physical_index_id).await.len(),
+        rows - 2
+    );
+
+    dropped::admit_fixture(&db).await;
+    assert_eq!(
+        drive_one(&db, &driver, build_id, &mut claim_sequence, one_row).await,
+        CommittedOperationStep::Progressed
+    );
+    assert_eq!(
+        physical_keys(&db, scope, physical_index_id).await.len(),
+        rows - 3,
+        "the admitted store's first step deletes one row, as the steps before it"
+    );
+    assert_eq!(dropped::load_entries(&db).await.unwrap(), vec![]);
+    assert_eq!(
+        drive_to_terminal(&db, &driver, build_id, &mut claim_sequence).await,
+        CommittedOperationStep::Completed
+    );
+    assert_eq!(
+        physical_keys(&db, scope, physical_index_id).await,
+        Vec::<Bytes>::new()
+    );
+    assert_eq!(generation_keys(&db, entry).await, Vec::<Bytes>::new());
+    assert_eq!(
+        dropped::load_entries(&db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(entry, _)| entry)
+            .collect::<Vec<_>>(),
+        vec![entry]
+    );
+    db.close().await.expect("vector test database closes");
+}
+
+/// Proves an abort's entry and its `Dropped` record commit together or not
+/// at all: a step that fails where the entry is staged blocks the build,
+/// leaving the record `Aborting` with no entry, and its retry writes both.
+pub(super) async fn a_failed_final_step_of_an_abort_leaves_neither_the_entry_nor_the_dropped_record(
+) {
+    let db = test_db("vector-driver-aborted-entry-failpoint").await;
+    dropped::admit_fixture(&db).await;
+    let scope = DataScope::LegacyUnscoped;
+    let driver = driver();
+    let (build_id, entry, _, mut claim_sequence) = aborting_build(&db, &driver, None).await;
+    let limits = SearchIndexBackfillLimits::default().batch();
+    for _ in 0..2 {
+        assert_eq!(
+            drive_one(&db, &driver, build_id, &mut claim_sequence, limits).await,
+            CommittedOperationStep::Progressed
+        );
+    }
+
+    failpoints::inject_once(IndexOutboxFailpoint::DroppedEntryStagingBefore).unwrap();
+    assert_eq!(
+        drive_one(&db, &driver, build_id, &mut claim_sequence, limits).await,
+        CommittedOperationStep::Blocked
+    );
+    assert!(failpoints::was_triggered());
+    assert!(matches!(
+        read_index(&db, scope, &definition(None)).await.state(),
+        IndexStateV2::Aborting { .. }
+    ));
+    assert!(matches!(
+        read_operation(&db, scope, build_id).await.progress(),
+        IndexOperationProgress::VectorBuild(VectorBuildProgress::Aborting(
+            VectorCleanupProgress::Finalize(_)
+        ))
+    ));
+    assert_eq!(dropped::load_entries(&db).await.unwrap(), vec![]);
+
+    crate::index_lifecycle::outbox::retry_operation(&db, scope, build_id)
+        .await
+        .expect("the blocked abort is retried");
+    assert_eq!(
+        drive_one(&db, &driver, build_id, &mut claim_sequence, limits).await,
+        CommittedOperationStep::Completed
+    );
+    assert!(matches!(
+        read_index(&db, scope, &definition(None)).await.state(),
+        IndexStateV2::Dropped { .. }
+    ));
+    assert_eq!(
+        dropped::load_entries(&db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(entry, _)| entry)
+            .collect::<Vec<_>>(),
+        vec![entry]
+    );
+    db.close().await.expect("vector test database closes");
 }

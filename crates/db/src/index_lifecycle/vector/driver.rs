@@ -1644,14 +1644,17 @@ async fn step_cleanup<D: Distance>(
                         "unpartitioned vector cleanup retained a mapping cursor",
                     ));
                 }
-                if aborting
-                    && let Some(reservation) =
-                        super::super::repository::load_legacy_vector_physical_reservation(
-                            transaction,
-                            physical_index_id,
-                        )
-                        .await?
-                {
+                // Only a generation adopted from legacy storage has a
+                // reservation: this catalog allocated every other physical id.
+                let reservation =
+                    super::super::repository::load_legacy_vector_physical_reservation(
+                        transaction,
+                        physical_index_id,
+                    )
+                    .await?;
+                // Aborting an adopted build hands the legacy rows back: it
+                // deletes the directory the build added and nothing else.
+                if aborting && let Some(reservation) = reservation {
                     if !matches!(
                         reservation,
                         LegacyVectorPhysicalReservation::AdoptionBuilding { .. }
@@ -1741,21 +1744,15 @@ async fn step_cleanup<D: Distance>(
                         measured,
                     ));
                 }
-                // A drop that will leave a dropped-generation entry at
-                // `Finalize` deletes only the rows no compaction filter may
-                // match. One that already deleted rows one by one, on an
+                // A drop or abort that will leave a dropped-generation entry
+                // at `Finalize` deletes only the rows no compaction filter
+                // may match. One that already deleted rows one by one, on an
                 // older store or because that first batch did not fit a
                 // step, finishes one by one: the counters are zero only
                 // before the first delete.
-                let delete = if !aborting
+                let delete = if reservation.is_none()
                     && progress.counters == OperationCounters::default()
                     && dropped::admitted(transaction).await?
-                    && super::super::repository::load_legacy_vector_physical_reservation(
-                        transaction,
-                        physical_index_id,
-                    )
-                    .await?
-                    .is_none()
                 {
                     PhysicalRows::NeverFiltered
                 } else {
@@ -1841,13 +1838,12 @@ async fn step_cleanup<D: Distance>(
                     operation.generation(),
                 );
                 // As for the unpartitioned layout, with one difference: a
-                // drop that leaves an entry keeps its mappings, which list
+                // cleanup that leaves an entry keeps its mappings, which list
                 // the physical ids the entry gives up, and its cursor names
                 // the next partition. A row-by-row cleanup deletes each
                 // mapping before it moves on, so a mapping before the cursor
                 // tells the two apart once the counters are no longer zero.
-                let delete = if !aborting
-                    && dropped::admitted(transaction).await?
+                let delete = if dropped::admitted(transaction).await?
                     && match cursor_suffix(&mappings, progress.cursor.as_ref())? {
                         None => progress.counters == OperationCounters::default(),
                         Some(cursor) => transaction
@@ -2010,21 +2006,25 @@ async fn step_cleanup<D: Distance>(
             }
         }
         VectorCleanupProgress::Finalize(_) => {
-            // The rows a drop gives up to compactions, or none for an abort
-            // and for an adopted legacy generation.
-            let rows = match (aborting, authority.layout()) {
-                (true, _) => None,
-                (false, VectorPhysicalLayout::Unpartitioned { physical_index_id }) => {
-                    match super::super::repository::load_legacy_vector_physical_reservation(
-                        transaction,
-                        physical_index_id,
-                    )
-                    .await?
-                    {
+            // The rows the cleanup gives up to compactions, or none for an
+            // adopted legacy generation.
+            let rows = match authority.layout() {
+                VectorPhysicalLayout::Unpartitioned { physical_index_id } => {
+                    match (
+                        super::super::repository::load_legacy_vector_physical_reservation(
+                            transaction,
+                            physical_index_id,
+                        )
+                        .await?,
+                        aborting,
+                    ) {
                         // An adopted legacy generation: this catalog did not
-                        // allocate its physical id, so it gets no entry and
-                        // the steps before this one deleted every row.
-                        Some(reservation) => {
+                        // allocate its physical id, so it gets no entry. The
+                        // steps before this one deleted every row of a drop;
+                        // an abort handed the legacy rows back with their
+                        // reservation.
+                        (Some(_), true) => None,
+                        (Some(reservation), false) => {
                             if !reservation
                                 .is_owned_by(operation.index_id(), operation.generation())
                             {
@@ -2042,16 +2042,14 @@ async fn step_cleanup<D: Distance>(
                             )?;
                             None
                         }
-                        None => {
+                        (None, true | false) => {
                             Some(DroppedGenerationRows::UnpartitionedVector { physical_index_id })
                         }
                     }
                 }
-                // The partition mappings the drop left in place list the
-                // physical ids; a drop that deleted them left no rows.
-                (false, VectorPhysicalLayout::Partitioned) => {
-                    Some(DroppedGenerationRows::PartitionedVector)
-                }
+                // The partition mappings the cleanup left in place list the
+                // physical ids; a cleanup that deleted them left no rows.
+                VectorPhysicalLayout::Partitioned => Some(DroppedGenerationRows::PartitionedVector),
             };
             // Staged here, the entry commits in the transaction that moves
             // the record to `Dropped`.
@@ -5520,6 +5518,24 @@ mod tests {
     #[test]
     fn a_refresh_that_fails_before_its_flush_arms_nothing() {
         isolated(super::driver_contracts::a_refresh_that_fails_before_its_flush_arms_nothing);
+    }
+
+    #[tokio::test]
+    async fn an_admitted_abort_deletes_only_unfiltered_rows_and_leaves_its_entry() {
+        super::driver_contracts::an_admitted_abort_deletes_only_unfiltered_rows_and_leaves_its_entry()
+            .await;
+    }
+
+    #[tokio::test]
+    async fn an_abort_admitted_half_way_finishes_row_by_row() {
+        super::driver_contracts::an_abort_admitted_half_way_finishes_row_by_row().await;
+    }
+
+    #[test]
+    fn a_failed_final_step_of_an_abort_leaves_neither_the_entry_nor_the_dropped_record() {
+        isolated(
+            super::driver_contracts::a_failed_final_step_of_an_abort_leaves_neither_the_entry_nor_the_dropped_record,
+        );
     }
 
     #[tokio::test]
