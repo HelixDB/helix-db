@@ -16,6 +16,7 @@ use crate::encoding::property::property_value::PropertyValue;
 use crate::encoding::property::Property;
 use crate::encoding::v2::keys::NodePropertyKey;
 use crate::encoding::v2::values::encode_build_delta;
+use crate::index_lifecycle::failpoints::{self, IndexOutboxFailpoint};
 use crate::index_lifecycle::lifecycle::{
     create_index_operation, create_legacy_vector_adoption_operation, drop_index_operation,
     InitialBuildProgress,
@@ -3906,26 +3907,6 @@ pub(super) async fn adoption_and_activation_guards_fail_closed() {
     db.close().await.expect("vector test database closes");
 }
 
-/// Moves a bootstrapped fixture store to the storage version that admits
-/// dropped-generation entries.
-async fn admit(db: &Db) {
-    db.put(
-        IndexKey::Global {
-            kind: GlobalKey::StorageVersion,
-        }
-        .to_bytes(),
-        encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
-            crate::index_lifecycle::IndexStorageVersion::LABEL_IDENTITY,
-        )),
-    )
-    .await
-    .expect("fixture storage version is written");
-    dropped::admit(db)
-        .await
-        .expect("fixture store admits dropped-generation entries");
-    assert!(dropped::admitted(db).await.expect("storage version reads"));
-}
-
 /// The generation an enqueued drop of the unpartitioned fixture removes.
 async fn dropping_generation(db: &Db) -> dropped::DroppedGeneration {
     let record = read_index(db, DataScope::LegacyUnscoped, &definition(None)).await;
@@ -3960,7 +3941,7 @@ async fn generation_keys(db: &Db, entry: dropped::DroppedGeneration) -> Vec<Byte
 /// for compactions.
 pub(super) async fn an_admitted_drop_deletes_only_unfiltered_rows_and_leaves_its_entry() {
     let db = test_db("vector-driver-dropped-entry").await;
-    admit(&db).await;
+    dropped::admit_fixture(&db).await;
     let scope = DataScope::LegacyUnscoped;
     let driver = driver();
     let (drop_id, physical_index_id, mut claim_sequence) = unpartitioned_drop(&db, &driver).await;
@@ -4073,7 +4054,7 @@ pub(super) async fn a_drop_that_must_not_be_filtered_deletes_every_row_and_leave
     ] {
         let db = test_db(name).await;
         if admitted {
-            admit(&db).await;
+            dropped::admit_fixture(&db).await;
         }
         let scope = DataScope::LegacyUnscoped;
         let driver = driver();
@@ -4132,7 +4113,7 @@ pub(super) async fn a_drop_that_must_not_be_filtered_deletes_every_row_and_leave
 /// could not tell which lanes the earlier one had finished.
 pub(super) async fn a_drop_that_began_row_by_row_finishes_row_by_row() {
     let db = test_db("vector-driver-dropped-entry-fallback").await;
-    admit(&db).await;
+    dropped::admit_fixture(&db).await;
     let scope = DataScope::LegacyUnscoped;
     let driver = driver();
     let (drop_id, physical_index_id, mut claim_sequence) = unpartitioned_drop(&db, &driver).await;
@@ -4202,7 +4183,7 @@ pub(super) async fn a_drop_that_began_row_by_row_finishes_row_by_row() {
 /// the record `Dropping` with no entry, and its retry writes both.
 pub(super) async fn a_failed_final_step_leaves_neither_the_entry_nor_the_dropped_record() {
     let db = test_db("vector-driver-dropped-entry-failpoint").await;
-    admit(&db).await;
+    dropped::admit_fixture(&db).await;
     let scope = DataScope::LegacyUnscoped;
     let driver = driver();
     let (drop_id, _, mut claim_sequence) = unpartitioned_drop(&db, &driver).await;
@@ -4280,7 +4261,7 @@ pub(super) async fn a_drop_admitted_half_way_finishes_row_by_row() {
         rows - 2
     );
 
-    admit(&db).await;
+    dropped::admit_fixture(&db).await;
     assert_eq!(
         drive_one(&db, &driver, drop_id, &mut claim_sequence, one_row).await,
         CommittedOperationStep::Progressed
@@ -4300,6 +4281,420 @@ pub(super) async fn a_drop_admitted_half_way_finishes_row_by_row() {
     );
     assert_eq!(generation_keys(&db, entry).await, Vec::<Bytes>::new());
     db.close().await.expect("vector test database closes");
+}
+
+/// Builds the partitioned fixture over two tenants of four entities each and
+/// enqueues its drop. Returns the drop, the generation it removes, the
+/// physical ids of its partitions in mapping order and the next claim
+/// sequence.
+async fn partitioned_drop(
+    db: &Db,
+    driver: &VectorIndexDriver,
+) -> (IndexOperationId, dropped::DroppedGeneration, [u64; 2], u64) {
+    let scope = DataScope::LegacyUnscoped;
+    let definition = definition(Some("account_id"));
+    for entity_id in 0..8_u8 {
+        put_source(
+            db,
+            scope,
+            u64::from(entity_id),
+            &properties(
+                [f32::from(entity_id), 5.0, 6.0],
+                Some(10 * (1 + i64::from(entity_id % 2))),
+            ),
+        )
+        .await;
+    }
+    let (build_id, index_id, generation) = create_build(db, scope, &definition, 7).await;
+    let mut claim_sequence = 1;
+    assert_eq!(
+        drive_to_terminal(db, driver, build_id, &mut claim_sequence).await,
+        CommittedOperationStep::Completed
+    );
+    let mappings = mapping_values(db, scope, index_id, generation).await;
+    let [first, second] = &mappings[..] else {
+        panic!("the fixture has two partitions");
+    };
+    let drop_id = accepted_drop(
+        drop_index_operation(db, scope, &definition)
+            .await
+            .expect("partitioned drop enqueues"),
+    );
+    (
+        drop_id,
+        dropped::DroppedGeneration {
+            index_id,
+            generation,
+        },
+        [
+            first.physical_index_id.get(),
+            second.physical_index_id.get(),
+        ],
+        claim_sequence,
+    )
+}
+
+/// Returns the keys of one vector namespace in the lane no compaction filter
+/// may match.
+async fn core_keys(db: &Db, scope: DataScope, physical_index_id: u64) -> Vec<Bytes> {
+    prefix_keys(
+        db,
+        DataKey::data_prefix(
+            scope,
+            VectorStorageLane::Core
+                .prefix_key(physical_index_id)
+                .to_bytes(),
+        ),
+    )
+    .await
+}
+
+/// The physical ids the partition mappings of `entry` name, in mapping order.
+async fn mapped_physical_ids(db: &Db, entry: dropped::DroppedGeneration) -> Vec<u64> {
+    mapping_values(
+        db,
+        DataScope::LegacyUnscoped,
+        entry.index_id,
+        entry.generation,
+    )
+    .await
+    .iter()
+    .map(|mapping| mapping.physical_index_id.get())
+    .collect()
+}
+
+/// Proves a partitioned drop on an admitted store takes one step per
+/// partition, deletes only the rows no compaction filter may match, keeps
+/// every partition mapping and leaves its entry in the step that writes
+/// `Dropped`.
+///
+/// The mappings are the only list of the physical ids the entry gives up, so
+/// they stay until a reclaim deletes them with the entry. Until the last
+/// step commits the record is `Dropping`, no entry exists and a refresh arms
+/// nothing; afterwards a refresh arms the generation and one physical index
+/// for each mapping.
+pub(super) async fn an_admitted_partitioned_drop_keeps_its_mappings_and_leaves_its_entry() {
+    let db = test_db("vector-driver-dropped-partitioned-entry").await;
+    dropped::admit_fixture(&db).await;
+    let scope = DataScope::LegacyUnscoped;
+    let driver = driver();
+    let (drop_id, entry, partitions, mut claim_sequence) = partitioned_drop(&db, &driver).await;
+    let definition = definition(Some("account_id"));
+    let mut all = Vec::new();
+    let mut filtered = Vec::new();
+    for physical_index_id in partitions {
+        let core = core_keys(&db, scope, physical_index_id).await;
+        assert!(!core.is_empty() && core.len() <= 3);
+        let keys = physical_keys(&db, scope, physical_index_id).await;
+        filtered.push(
+            keys.iter()
+                .filter(|key| !core.contains(key))
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            filtered.last().is_some_and(|rows| rows.len() > 3),
+            "row-by-row cleanup would take several batches"
+        );
+        all.push(keys);
+    }
+    let generation_rows = generation_keys(&db, entry).await;
+    // Too few operations a step for a namespace, enough for its core rows.
+    let three_rows = batch_limits(1024, 1024 * 1024, 3, 16 * 1024 * 1024);
+    let registry = dropped::Registry::default();
+
+    for (step, core_deleted) in [
+        ("retire the cache", [false, false]),
+        ("the first partition", [true, false]),
+        ("the second partition", [true, true]),
+    ] {
+        assert_eq!(
+            drive_one(&db, &driver, drop_id, &mut claim_sequence, three_rows).await,
+            CommittedOperationStep::Progressed,
+            "{step}"
+        );
+        for partition in 0..2 {
+            assert_eq!(
+                physical_keys(&db, scope, partitions[partition]).await,
+                if core_deleted[partition] {
+                    filtered[partition].clone()
+                } else {
+                    all[partition].clone()
+                },
+                "{step}"
+            );
+        }
+        assert_eq!(mapped_physical_ids(&db, entry).await, partitions, "{step}");
+        assert!(matches!(
+            read_index(&db, scope, &definition).await.state(),
+            IndexStateV2::Dropping { .. }
+        ));
+        assert_eq!(dropped::load_entries(&db).await.unwrap(), vec![], "{step}");
+        registry
+            .refresh(&db)
+            .await
+            .expect("a store without entries arms nothing");
+        assert_eq!(registry.armed(), vec![], "{step}");
+    }
+    assert!(matches!(
+        read_operation(&db, scope, drop_id).await.progress(),
+        IndexOperationProgress::VectorCleanup(VectorCleanupProgress::Finalize(_))
+    ));
+
+    assert_eq!(
+        drive_one(&db, &driver, drop_id, &mut claim_sequence, three_rows).await,
+        CommittedOperationStep::Completed
+    );
+    assert!(matches!(
+        read_index(&db, scope, &definition).await.state(),
+        IndexStateV2::Dropped { .. }
+    ));
+    assert_eq!(
+        dropped::load_entries(&db).await.unwrap(),
+        vec![(
+            entry,
+            DroppedGenerationValue {
+                scope,
+                rows: DroppedGenerationRows::PartitionedVector,
+            }
+        )]
+    );
+    for partition in 0..2 {
+        assert_eq!(
+            physical_keys(&db, scope, partitions[partition]).await,
+            filtered[partition]
+        );
+    }
+    assert_eq!(mapped_physical_ids(&db, entry).await, partitions);
+    assert_eq!(generation_keys(&db, entry).await, generation_rows);
+
+    registry.refresh(&db).await.expect("the drop's entry arms");
+    let armed = registry.armed();
+    let [(armed_entry, armed)] = &armed[..] else {
+        panic!("one entry is armed");
+    };
+    assert_eq!(*armed_entry, entry);
+    assert_eq!(armed.owners.len(), 3);
+    assert_eq!(
+        armed
+            .owners
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>(),
+        std::iter::once(dropped::ownership::OwnerKey::Generation {
+            scope,
+            index_id: entry.index_id.get(),
+            generation: entry.generation.get(),
+        })
+        .chain(partitions.into_iter().map(|physical_index_id| {
+            dropped::ownership::OwnerKey::PhysicalIndex {
+                scope,
+                physical_index_id,
+            }
+        }))
+        .collect::<std::collections::HashSet<_>>()
+    );
+    db.close().await.expect("vector test database closes");
+}
+
+/// Proves a partitioned drop that a store is admitted under half-way
+/// finishes row by row, wherever the admission finds it.
+///
+/// A row-by-row drop deletes each mapping once its namespace is empty, so no
+/// mapping lies before its cursor; that is what tells its steps from those
+/// of a drop that keeps its mappings. The entry its last step leaves names a
+/// generation without mappings or rows.
+pub(super) async fn a_partitioned_drop_admitted_half_way_finishes_row_by_row() {
+    for (name, mappings_left_at_admission) in [
+        ("vector-driver-dropped-partitioned-half-way-first", 2),
+        ("vector-driver-dropped-partitioned-half-way-second", 1),
+    ] {
+        let db = test_db(name).await;
+        let scope = DataScope::LegacyUnscoped;
+        let driver = driver();
+        let (drop_id, entry, partitions, mut claim_sequence) = partitioned_drop(&db, &driver).await;
+        let three_rows = batch_limits(1024, 1024 * 1024, 3, 16 * 1024 * 1024);
+        // Retiring the cache and three rows of the first namespace, then on
+        // until the mappings left say where the drop is.
+        let mut steps = 0;
+        while steps < 2 || mapped_physical_ids(&db, entry).await.len() > mappings_left_at_admission
+        {
+            assert_eq!(
+                drive_one(&db, &driver, drop_id, &mut claim_sequence, three_rows).await,
+                CommittedOperationStep::Progressed,
+                "{name}"
+            );
+            steps += 1;
+            assert!(steps < 64, "{name}: the drop exceeded its bounded steps");
+        }
+        let mut left = Vec::new();
+        for physical_index_id in partitions {
+            left.push(physical_keys(&db, scope, physical_index_id).await.len());
+        }
+        assert!(left[1] > 3, "{name}: the second namespace has rows left");
+        assert_eq!(left[0] == 0, mappings_left_at_admission == 1, "{name}");
+
+        dropped::admit_fixture(&db).await;
+        assert_eq!(
+            drive_one(&db, &driver, drop_id, &mut claim_sequence, three_rows).await,
+            CommittedOperationStep::Progressed,
+            "{name}"
+        );
+        let mut left_after = 0;
+        for physical_index_id in partitions {
+            left_after += physical_keys(&db, scope, physical_index_id).await.len();
+        }
+        assert_eq!(
+            left_after,
+            left[0] + left[1] - 3,
+            "{name}: the admitted store's first step deletes three rows, as the steps before it"
+        );
+        while drive_one(&db, &driver, drop_id, &mut claim_sequence, three_rows).await
+            == CommittedOperationStep::Progressed
+        {
+            steps += 1;
+            assert!(steps < 64, "{name}: the drop exceeded its bounded steps");
+            assert_eq!(dropped::load_entries(&db).await.unwrap(), vec![], "{name}");
+        }
+        for physical_index_id in partitions {
+            assert_eq!(
+                physical_keys(&db, scope, physical_index_id).await,
+                Vec::<Bytes>::new(),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            mapped_physical_ids(&db, entry).await,
+            Vec::<u64>::new(),
+            "{name}"
+        );
+        assert_eq!(
+            generation_keys(&db, entry).await,
+            Vec::<Bytes>::new(),
+            "{name}"
+        );
+        assert_eq!(
+            dropped::load_entries(&db).await.unwrap(),
+            vec![(
+                entry,
+                DroppedGenerationValue {
+                    scope,
+                    rows: DroppedGenerationRows::PartitionedVector,
+                }
+            )],
+            "{name}"
+        );
+        let registry = dropped::Registry::default();
+        registry.refresh(&db).await.expect("the entry arms");
+        assert_eq!(
+            registry.armed()[0].1.owners.len(),
+            1,
+            "{name}: only the generation is left to name"
+        );
+        db.close().await.expect("vector test database closes");
+    }
+}
+
+/// Proves what a partitioned drop does when the unfiltered rows of one
+/// partition do not fit one step.
+///
+/// In the first partition the counters are then the only record that rows
+/// were deleted, so the drop finishes row by row and deletes its mappings,
+/// as an unpartitioned drop does. In a later partition the mappings before
+/// the cursor record that the drop keeps them: the cursor stays on the
+/// partition until a scan from its start finds no unfiltered row, and the
+/// drop still leaves every other row and every mapping to its entry.
+pub(super) async fn a_partition_whose_unfiltered_rows_need_several_steps() {
+    for (name, slow_partition) in [
+        ("vector-driver-dropped-partitioned-slow-first", 0),
+        ("vector-driver-dropped-partitioned-slow-second", 1),
+    ] {
+        let db = test_db(name).await;
+        dropped::admit_fixture(&db).await;
+        let scope = DataScope::LegacyUnscoped;
+        let driver = driver();
+        let (drop_id, entry, partitions, mut claim_sequence) = partitioned_drop(&db, &driver).await;
+        // A second core row beside the metadata: one step cannot hold both.
+        db.put(
+            DataKey::Data {
+                scope,
+                kind: DataKeyKind::Vector(
+                    crate::encoding::v2::keys::indexes::vector::VectorKey::TxnGuard(
+                        crate::encoding::v2::legacy::vector::transaction_guard::LegacyVectorTxnGuardKey::new(
+                            partitions[slow_partition],
+                        ),
+                    ),
+                ),
+            }
+            .to_bytes(),
+            b"fixture guard",
+        )
+        .await
+        .expect("fixture core row is written");
+        let mut filtered = Vec::new();
+        for physical_index_id in partitions {
+            let core = core_keys(&db, scope, physical_index_id).await;
+            filtered.push(
+                physical_keys(&db, scope, physical_index_id)
+                    .await
+                    .into_iter()
+                    .filter(|key| !core.contains(key))
+                    .collect::<Vec<_>>(),
+            );
+        }
+        let one_row = batch_limits(1024, 1024 * 1024, 1, 16 * 1024 * 1024);
+
+        let mut steps = 0;
+        while drive_one(&db, &driver, drop_id, &mut claim_sequence, one_row).await
+            == CommittedOperationStep::Progressed
+        {
+            steps += 1;
+            assert!(steps < 512, "{name}: the drop exceeded its bounded steps");
+            assert_eq!(dropped::load_entries(&db).await.unwrap(), vec![], "{name}");
+        }
+        let row_by_row = slow_partition == 0;
+        for partition in 0..2 {
+            assert_eq!(
+                physical_keys(&db, scope, partitions[partition]).await,
+                if row_by_row {
+                    Vec::new()
+                } else {
+                    filtered[partition].clone()
+                },
+                "{name}"
+            );
+        }
+        assert_eq!(
+            mapped_physical_ids(&db, entry).await,
+            if row_by_row {
+                Vec::new()
+            } else {
+                partitions.to_vec()
+            },
+            "{name}"
+        );
+        if row_by_row {
+            assert!(
+                steps > filtered[0].len() + filtered[1].len(),
+                "{name}: every row took its own step"
+            );
+        } else {
+            // The cache, one row, two rows over three steps, the last step.
+            assert_eq!(steps, 5, "{name}");
+        }
+        assert_eq!(
+            dropped::load_entries(&db).await.unwrap(),
+            vec![(
+                entry,
+                DroppedGenerationValue {
+                    scope,
+                    rows: DroppedGenerationRows::PartitionedVector,
+                }
+            )],
+            "{name}"
+        );
+        db.close().await.expect("vector test database closes");
+    }
 }
 
 /// Writes `value` as the entry of `entry`, as only a damaged store holds it.
@@ -4330,7 +4725,7 @@ async fn completed_drop(
     VectorPhysicalIndexId,
     u64,
 ) {
-    admit(db).await;
+    dropped::admit_fixture(db).await;
     let (drop_id, _, mut claim_sequence) = unpartitioned_drop(db, driver).await;
     let entry = dropping_generation(db).await;
     assert_eq!(
@@ -4395,7 +4790,7 @@ fn metadata_key(scope: DataScope, physical_index_id: VectorPhysicalIndexId) -> B
 /// that a later refresh leaves an armed entry as it is.
 pub(super) async fn a_refresh_arms_a_completed_drop_behind_its_gate() {
     let db = test_db("vector-driver-dropped-refresh").await;
-    admit(&db).await;
+    dropped::admit_fixture(&db).await;
     let scope = DataScope::LegacyUnscoped;
     let driver = driver();
     let (drop_id, physical_index_id, mut claim_sequence) = unpartitioned_drop(&db, &driver).await;
@@ -4713,7 +5108,7 @@ pub(super) async fn a_refresh_fails_and_halts_on_an_entry_the_catalog_contradict
 /// without the other names rows a drop is still deleting.
 pub(super) async fn a_refresh_fails_on_an_entry_whose_drop_has_not_completed() {
     let db = test_db("vector-driver-dropped-contradiction-dropping").await;
-    admit(&db).await;
+    dropped::admit_fixture(&db).await;
     let scope = DataScope::LegacyUnscoped;
     let driver = driver();
     let (drop_id, physical_index_id, mut claim_sequence) = unpartitioned_drop(&db, &driver).await;
@@ -4791,7 +5186,7 @@ pub(super) async fn an_id_an_entry_names_is_never_allocated() {
     };
 
     let db = test_db("vector-driver-dropped-unallocated-index").await;
-    admit(&db).await;
+    dropped::admit_fixture(&db).await;
     let watermark = crate::index_lifecycle::repository::load_logical_index_watermark(&db)
         .await
         .unwrap();

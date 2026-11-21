@@ -5,17 +5,21 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use helix_ast::batch::{read_batch, write_batch};
+use helix_ast::error_code::QueryErrorCode;
+use helix_ast::expr::Predicate;
 use helix_ast::index::{IndexSpec, VectorDistanceMetric};
 use helix_ast::query::QueryRequest;
-use helix_ast::traversal::g;
+use helix_ast::traversal::{g, Terminal, Traversal, WriteEnabled};
 use helix_ast::value::PropertyInput;
+use slatedb::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
 use slatedb::{DbReadOps, IsolationLevel};
 
 use super::*;
-use crate::encoding::v2::keys::scope::DataScope;
+use crate::encoding::v2::keys::scope::{DataScope, TenantId};
 use crate::encoding::v2::values::encode_metadata_value;
 use crate::index_lifecycle::{
     dropped, DroppedGenerationValue, IndexGenerationId, IndexId, IndexV2MetadataValue,
@@ -27,6 +31,8 @@ const DIMENSION: usize = 32;
 /// Longest wait for an operation, a compaction or a manifest poll.
 const WAIT: Duration = Duration::from_secs(60);
 const POLL: Duration = Duration::from_millis(50);
+/// Two scans this far apart that read the same rows have settled.
+const SETTLE: Duration = Duration::from_millis(500);
 
 /// Failpoints are process-global, so the contracts that arm one run in their
 /// own process.
@@ -91,47 +97,176 @@ async fn add(db: &HelixDB, label: &str, seed: usize) -> u64 {
         .expect("the write returns its node id")
 }
 
+/// The node ids `ids` selects in `scope`, or why the query failed.
+async fn selected(db: &HelixDB, scope: DataScope, ids: Traversal<Terminal>) -> Result<Vec<u64>> {
+    let response = db
+        .query_scoped(
+            QueryRequest::read(read_batch().var_as("ids", ids).returning(["ids"])),
+            scope,
+        )
+        .await?;
+    Ok(response["ids"]
+        .as_array()
+        .expect("the query returns ids")
+        .iter()
+        .map(|id| id.as_u64().expect("ids are numeric"))
+        .collect())
+}
+
+/// The ids of the `k` nodes of `label` nearest `vector(seed)`, or why the
+/// search failed.
+async fn searched(db: &HelixDB, label: &str, seed: usize, k: usize) -> Result<Vec<u64>> {
+    selected(
+        db,
+        DataScope::LegacyUnscoped,
+        g().vector_search_nodes_with(
+            label,
+            PROPERTY,
+            PropertyInput::from(vector(seed)),
+            k,
+            None::<PropertyInput>,
+        )
+        .id(),
+    )
+    .await
+}
+
 /// The ids of the `k` nodes of `label` nearest `vector(seed)`.
 async fn nearest(db: &HelixDB, label: &str, seed: usize, k: usize) -> Vec<u64> {
-    let response = db
-        .query(QueryRequest::read(
-            read_batch()
+    searched(db, label, seed, k).await.expect("the search runs")
+}
+
+/// One index of every family over `label`: a vector index partitioned by
+/// `tenant`, an equality index, a range index and a text index.
+fn family(label: &str) -> [IndexSpec; 4] {
+    [
+        IndexSpec::node_vector(
+            label,
+            PROPERTY,
+            NonZeroUsize::new(DIMENSION).expect("the dimension is nonzero"),
+            VectorDistanceMetric::Cosine,
+            Some("tenant"),
+        ),
+        IndexSpec::node_equality(label, "category"),
+        IndexSpec::node_range(label, "rank"),
+        IndexSpec::node_text(label, "body", None::<&str>),
+    ]
+}
+
+/// Writes one node of `label` in `scope` that every index of [`family`]
+/// covers.
+async fn add_document(db: &HelixDB, scope: DataScope, label: &str, seed: usize) {
+    db.query_scoped(
+        QueryRequest::write(
+            write_batch()
                 .var_as(
-                    "ids",
-                    g().vector_search_nodes_with(
+                    "node",
+                    g().add_n(
                         label,
-                        PROPERTY,
-                        PropertyInput::from(vector(seed)),
-                        k,
-                        None::<PropertyInput>,
+                        vec![
+                            (PROPERTY, PropertyInput::from(vector(seed))),
+                            (
+                                "tenant",
+                                PropertyInput::from(format!("tenant-{}", seed % 3)),
+                            ),
+                            (
+                                "category",
+                                PropertyInput::from(format!("category-{}", seed % 4)),
+                            ),
+                            (
+                                "rank",
+                                PropertyInput::from(i64::try_from(seed).expect("seeds are small")),
+                            ),
+                            (
+                                "body",
+                                PropertyInput::from(format!("common word{seed} group{}", seed % 5)),
+                            ),
+                        ],
                     )
                     .id(),
                 )
-                .returning(["ids"]),
-        ))
-        .await
-        .expect("the search runs");
-    response["ids"]
-        .as_array()
-        .expect("the search returns ids")
-        .iter()
-        .map(|id| id.as_u64().expect("ids are numeric"))
-        .collect()
+                .returning(["node"]),
+        ),
+        scope,
+    )
+    .await
+    .expect("the node is written");
 }
 
-/// Waits for the operation a DDL statement started to succeed.
-async fn succeeded(db: &HelixDB, receipt: &serde_json::Value) {
+/// What the indexes of [`family`] over `label` answer in `scope`: the nearest
+/// nodes of each vector partition, then the nodes of one category, of one
+/// rank range and of one text term, those three sorted by id.
+async fn family_answers(db: &HelixDB, scope: DataScope, label: &str) -> Vec<Vec<u64>> {
+    let mut answers = Vec::new();
+    for tenant in 0..3_usize {
+        answers.push(
+            selected(
+                db,
+                scope,
+                g().vector_search_nodes_with(
+                    label,
+                    PROPERTY,
+                    PropertyInput::from(vector(tenant)),
+                    5_usize,
+                    Some(PropertyInput::from(format!("tenant-{tenant}"))),
+                )
+                .id(),
+            )
+            .await
+            .expect("the partition search runs"),
+        );
+    }
+    for unordered in [
+        g().n_with_label_where(label, Predicate::eq("category", "category-1"))
+            .id(),
+        g().n_with_label_where(label, Predicate::between("rank", 5_i64, 15_i64))
+            .id(),
+        g().text_search_nodes_with(
+            label,
+            "body",
+            PropertyInput::from("group2"),
+            100_usize,
+            None::<PropertyInput>,
+        )
+        .id(),
+    ] {
+        let mut ids = selected(db, scope, unordered)
+            .await
+            .expect("the lookup runs");
+        ids.sort_unstable();
+        answers.push(ids);
+    }
+    answers
+}
+
+/// Runs one DDL statement in `scope` and waits for the operation it started
+/// to succeed.
+async fn applied(db: &HelixDB, scope: DataScope, statement: Traversal<Terminal, WriteEnabled>) {
+    let receipt = db
+        .query_scoped(
+            QueryRequest::write(
+                write_batch()
+                    .var_as("operation", statement)
+                    .returning(["operation"]),
+            ),
+            scope,
+        )
+        .await
+        .expect("the statement is accepted");
     let operation_id = receipt["operation"]["operation_id"]
         .as_str()
         .unwrap_or_else(|| panic!("the statement starts an operation: {receipt}"));
     tokio::time::timeout(WAIT, async {
         loop {
             let status = db
-                .query(QueryRequest::read(
-                    read_batch()
-                        .var_as("status", g().get_index_operation(operation_id))
-                        .returning(["status"]),
-                ))
+                .query_scoped(
+                    QueryRequest::read(
+                        read_batch()
+                            .var_as("status", g().get_index_operation(operation_id))
+                            .returning(["status"]),
+                    ),
+                    scope,
+                )
                 .await
                 .expect("the operation status reads");
             match status["status"]["status"].as_str() {
@@ -146,27 +281,16 @@ async fn succeeded(db: &HelixDB, receipt: &serde_json::Value) {
 }
 
 async fn create_index(db: &HelixDB, label: &str) {
-    let receipt = db
-        .query(QueryRequest::write(
-            write_batch()
-                .var_as("operation", g().create_index_if_not_exists(spec(label)))
-                .returning(["operation"]),
-        ))
-        .await
-        .expect("the index build is accepted");
-    succeeded(db, &receipt).await;
+    applied(
+        db,
+        DataScope::LegacyUnscoped,
+        g().create_index_if_not_exists(spec(label)),
+    )
+    .await;
 }
 
 async fn drop_index(db: &HelixDB, label: &str) {
-    let receipt = db
-        .query(QueryRequest::write(
-            write_batch()
-                .var_as("operation", g().drop_index(spec(label)))
-                .returning(["operation"]),
-        ))
-        .await
-        .expect("the index drop is accepted");
-    succeeded(db, &receipt).await;
+    applied(db, DataScope::LegacyUnscoped, g().drop_index(spec(label))).await;
 }
 
 /// Every row `read` sees.
@@ -180,6 +304,24 @@ async fn rows(read: &(impl DbReadOps + Sync)) -> BTreeMap<Bytes, Bytes> {
         rows.insert(row.key, row.value);
     }
     rows
+}
+
+/// The rows the writer reads once background index work has stopped changing
+/// them.
+async fn settled_rows(db: &HelixDB) -> BTreeMap<Bytes, Bytes> {
+    tokio::time::timeout(WAIT, async {
+        let mut last = rows(writer(db).db()).await;
+        loop {
+            tokio::time::sleep(SETTLE).await;
+            let next = rows(writer(db).db()).await;
+            if next == last {
+                break next;
+            }
+            last = next;
+        }
+    })
+    .await
+    .expect("background index work settles in time")
 }
 
 async fn stored_entries(db: &HelixDB) -> Vec<DroppedGeneration> {
@@ -694,4 +836,330 @@ async fn a_reader_reclaims_nothing() {
         Err(HelixDbError::WriterModeRequired { .. })
     ));
     reader.close().await.expect("the reader closes");
+}
+
+/// Builds the indexes of [`family`] over `Kept` and `Gone` in each of
+/// `scopes`, drops the four over `Gone` in `dropped_scope` and rebuilds them
+/// while their entries wait. Proves a reclaim discards exactly the four
+/// dropped generations, the dropped vector generation's partition mappings
+/// and the four entries: every other row of every scope, the rebuilt
+/// generations included, is identical, and every index answers as before.
+async fn a_reclaim_discards_exactly_the_dropped_families(
+    database: &str,
+    scopes: &[DataScope],
+    dropped_scope: DataScope,
+) {
+    let db = open(database).await;
+    db.wait_for_background_migrations().await;
+    for scope in scopes.iter().copied() {
+        for label in ["Kept", "Gone"] {
+            for seed in 0..24 {
+                add_document(&db, scope, label, seed).await;
+            }
+            for spec in family(label) {
+                applied(&db, scope, g().create_index_if_not_exists(spec)).await;
+            }
+        }
+    }
+    // No compaction discards a row a reader older than the drops can see, so
+    // until this snapshot closes every dropped row and every entry stays.
+    let older = writer(&db)
+        .db()
+        .snapshot()
+        .await
+        .expect("the snapshot opens");
+    for spec in family("Gone") {
+        applied(&db, dropped_scope, g().drop_index(spec)).await;
+    }
+    for spec in family("Gone") {
+        applied(&db, dropped_scope, g().create_index_if_not_exists(spec)).await;
+    }
+
+    let prefixes = armed_prefixes(&db).await;
+    let armed = writer(&db).dropped().armed();
+    let mut layouts = armed
+        .iter()
+        .map(|(_, armed)| {
+            assert_eq!(armed.value.scope, dropped_scope);
+            format!("{:?}", armed.value.rows)
+        })
+        .collect::<Vec<_>>();
+    layouts.sort_unstable();
+    assert_eq!(
+        layouts,
+        ["PartitionedVector", "Secondary", "Secondary", "Text"]
+    );
+    let mappings = armed
+        .iter()
+        .filter(|(_, armed)| armed.value.rows == DroppedGenerationRows::PartitionedVector)
+        .map(|(entry, _)| dropped::partition_mappings_prefix(dropped_scope, *entry))
+        .collect::<Vec<_>>();
+    let held = settled_rows(&db).await;
+    for (entry, armed) in &armed {
+        let owned = armed
+            .owners
+            .iter()
+            .flat_map(|owner| owner.prefixes())
+            .collect::<Vec<_>>();
+        assert!(
+            held.keys()
+                .any(|key| owned.iter().any(|prefix| key.starts_with(prefix))),
+            "the drop of {entry:?} left its rows to compactions"
+        );
+    }
+    assert_eq!(
+        held.keys()
+            .filter(|key| mappings.iter().any(|prefix| key.starts_with(prefix)))
+            .count(),
+        3,
+        "the dropped vector generation keeps one mapping per tenant value"
+    );
+    async fn answers(db: &HelixDB, scopes: &[DataScope]) -> Vec<Vec<Vec<u64>>> {
+        let mut answers = Vec::new();
+        for scope in scopes.iter().copied() {
+            for label in ["Kept", "Gone"] {
+                answers.push(family_answers(db, scope, label).await);
+            }
+        }
+        answers
+    }
+    let answered = answers(&db, scopes).await;
+    assert!(answered
+        .iter()
+        .all(|family| family.iter().map(Vec::len).eq([5, 5, 5, 6, 11, 5])));
+
+    drop(older);
+    // SlateDB publishes the oldest open reader when it flushes a memtable, so
+    // the flush needs a row to carry.
+    add(&db, "Other", 0).await;
+    let before = rows(writer(&db).db()).await;
+    let reclaimed = reclaim(&db).await;
+    assert!(
+        matches!(
+            reclaimed,
+            DroppedStorageReclaim::Reclaimed { entries: 4, .. }
+        ),
+        "{reclaimed:?}"
+    );
+    let expected = before
+        .into_iter()
+        .filter(|(key, _)| {
+            armed.iter().all(|(entry, _)| *key != entry.key())
+                && !prefixes
+                    .iter()
+                    .chain(&mappings)
+                    .any(|prefix| key.starts_with(prefix))
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_rows(&db, &expected).await;
+    assert_eq!(answers(&db, scopes).await, answered);
+    assert_eq!(
+        db.reclaim_dropped_index_storage().await.unwrap(),
+        DroppedStorageReclaim::Idle
+    );
+    db.close().await.expect("the writer closes");
+}
+
+#[tokio::test]
+async fn a_reclaim_discards_exactly_the_dropped_generations_of_every_family() {
+    a_reclaim_discards_exactly_the_dropped_families(
+        "dropped-reclaim-families",
+        &[DataScope::LegacyUnscoped],
+        DataScope::LegacyUnscoped,
+    )
+    .await;
+}
+
+/// The dropped indexes are one tenant's; its neighbours on either side of it
+/// in key order hold the same labels, properties and indexes.
+#[tokio::test]
+async fn a_reclaim_discards_exactly_one_tenant_among_many() {
+    let [before, dropped, after] =
+        [1_u128, 2, 3].map(|tenant| DataScope::Tenant(TenantId::from_u128(tenant)));
+    a_reclaim_discards_exactly_the_dropped_families(
+        "dropped-reclaim-tenants",
+        &[before, dropped, after],
+        dropped,
+    )
+    .await;
+}
+
+/// Proves a read replica never answers from a partly discarded index. Across
+/// a drop, a reclaim and a collection of the tables the reclaim replaced,
+/// every search a replica answers returns what it returned before the drop,
+/// every other search fails with index-not-found, and a snapshot the replica
+/// opened before the drop reads the same rows throughout. One replica polls
+/// the manifest at the default ten seconds, the other every ten milliseconds.
+#[tokio::test]
+async fn a_replica_answers_a_dropped_index_in_full_or_not_at_all() {
+    const SEEDS: [usize; 4] = [0, 13, 29, 47];
+    /// Searches `replica` until the index is gone from it and `collected`
+    /// is set. Returns how many searches it answered.
+    async fn probed(replica: &HelixDB, full: &[Vec<u64>], collected: &AtomicBool) -> usize {
+        let mut answered = 0_usize;
+        let mut missing = false;
+        while !(missing && collected.load(Ordering::Relaxed)) {
+            for (seed, full) in SEEDS.into_iter().zip(full) {
+                match searched(replica, "Gone", seed, 5).await {
+                    Ok(ids) => {
+                        assert!(!missing, "a replica found the dropped index again");
+                        assert_eq!(&ids, full, "a replica answered from a discarded index");
+                        answered += 1;
+                    }
+                    Err(error) => {
+                        assert_eq!(error.error_code(), QueryErrorCode::IndexNotFound, "{error}");
+                        missing = true;
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        answered
+    }
+
+    let token = ProcessLocalDatabaseToken::new("dropped-reclaim-replica").unwrap();
+    let db = HelixDB::open(HelixDbSource::InMemoryToken {
+        token: token.clone(),
+    })
+    .await
+    .expect("the writer opens");
+    db.wait_for_background_migrations().await;
+    for seed in 0..48 {
+        add(&db, "Gone", seed).await;
+    }
+    create_index(&db, "Gone").await;
+    writer(&db)
+        .db()
+        .flush()
+        .await
+        .expect("the index becomes replica-visible");
+    let mut full = Vec::new();
+    for seed in SEEDS {
+        full.push(nearest(&db, "Gone", seed, 5).await);
+    }
+    let lagging = HelixDB::open_reader(HelixDbSource::InMemoryToken {
+        token: token.clone(),
+    })
+    .await
+    .expect("the lagging replica opens");
+    let prompt = HelixDB::open_reader_with_object_store_for_tests(
+        token.database().to_string(),
+        token.object_store(),
+    )
+    .await
+    .expect("the prompt replica opens");
+    for replica in [&lagging, &prompt] {
+        tokio::time::timeout(WAIT, async {
+            while searched(replica, "Gone", SEEDS[0], 5).await.ok().as_ref() != Some(&full[0]) {
+                tokio::time::sleep(POLL).await;
+            }
+        })
+        .await
+        .expect("a replica sees the built index in time");
+    }
+    let HelixStorage::Reader(lagging_reader) = lagging.storage() else {
+        panic!("the contract opens a replica");
+    };
+    let snapshot = lagging_reader
+        .snapshot()
+        .await
+        .expect("the replica snapshot opens");
+    let snapshot_rows = rows(snapshot.as_ref()).await;
+
+    let collected = AtomicBool::new(false);
+    let (lagging_answered, prompt_answered, ()) = tokio::time::timeout(WAIT, async {
+        tokio::join!(
+            probed(&lagging, &full, &collected),
+            probed(&prompt, &full, &collected),
+            async {
+                tokio::time::sleep(POLL).await;
+                drop_index(&db, "Gone").await;
+                let prefixes = armed_prefixes(&db).await;
+                add(&db, "Other", 0).await;
+                assert!(matches!(
+                    reclaim(&db).await,
+                    DroppedStorageReclaim::Reclaimed { entries: 1, .. }
+                ));
+                assert_discarded(&db, &prefixes).await;
+                let every_file = Some(GarbageCollectorDirectoryOptions {
+                    interval: None,
+                    min_age: Duration::ZERO,
+                    dry_run: false,
+                });
+                Admin::builder(
+                    db.inner.storage.path(),
+                    Arc::clone(db.inner.storage.object_store()),
+                )
+                .build()
+                .run_gc_once(GarbageCollectorOptions {
+                    manifest_options: every_file,
+                    wal_options: every_file,
+                    compacted_options: every_file,
+                    ..GarbageCollectorOptions::default()
+                })
+                .await
+                .expect("the collection runs");
+                collected.store(true, Ordering::Relaxed);
+            }
+        )
+    })
+    .await
+    .expect("both replicas see the drop in time");
+    assert!(lagging_answered > 0 && prompt_answered > 0);
+    assert_eq!(rows(snapshot.as_ref()).await, snapshot_rows);
+    drop(snapshot);
+    lagging.close().await.expect("the lagging replica closes");
+    prompt.close().await.expect("the prompt replica closes");
+    db.close().await.expect("the writer closes");
+}
+
+/// Proves node writes and the text compactions they start, racing a text
+/// drop, leave nothing of the dropped generation behind: once its entry is
+/// reclaimed no row of the generation and no compaction pointer to it is
+/// written again.
+#[tokio::test]
+async fn a_text_drop_racing_text_compactions_leaves_nothing_behind() {
+    let db = open("dropped-reclaim-text-race").await;
+    db.wait_for_background_migrations().await;
+    let scope = DataScope::LegacyUnscoped;
+    let text = || IndexSpec::node_text("Gone", "body", None::<&str>);
+    for seed in 0..64 {
+        add_document(&db, scope, "Gone", seed).await;
+    }
+    applied(&db, scope, g().create_index_if_not_exists(text())).await;
+    tokio::join!(
+        async {
+            for seed in 64..320 {
+                add_document(&db, scope, "Gone", seed).await;
+            }
+        },
+        async {
+            tokio::time::sleep(2 * POLL).await;
+            applied(&db, scope, g().drop_index(text())).await;
+        }
+    );
+
+    let prefixes = armed_prefixes(&db).await;
+    assert_eq!(stored_entries(&db).await.len(), 1);
+    assert!(matches!(
+        reclaim(&db).await,
+        DroppedStorageReclaim::Reclaimed { entries: 1, .. }
+    ));
+    assert_eq!(stored_entries(&db).await, vec![]);
+    for seed in 320..352 {
+        add_document(&db, scope, "Gone", seed).await;
+    }
+    compact_every_table(&db).await;
+    let pointers = crate::encoding::v2::keys::GlobalKey::logical_prefix(
+        crate::encoding::v2::keys::GlobalKind::TextCompactionPointer,
+    );
+    let left = settled_rows(&db)
+        .await
+        .into_keys()
+        .filter(|key| {
+            key.starts_with(&pointers) || prefixes.iter().any(|prefix| key.starts_with(prefix))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(left, Vec::<Bytes>::new());
+    db.close().await.expect("the writer closes");
 }

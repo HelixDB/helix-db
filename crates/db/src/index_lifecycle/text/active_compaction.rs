@@ -514,10 +514,20 @@ mod tests {
         assert_eq!(select_tier(&entries, limits(5)), None);
     }
 
-    #[tokio::test]
-    async fn active_page_compaction_replaces_inputs_and_consumes_pointer() {
+    /// A store whose Active text generation has one manifest page of two
+    /// compactable splits and a pointer to it. Returns the store, the
+    /// generation's record and the page and pointer keys.
+    async fn compactable_page(
+        database: &str,
+    ) -> (
+        Arc<dyn ObjectStore>,
+        Db,
+        index_lifecycle::IndexRecordV2,
+        Bytes,
+        Bytes,
+    ) {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let db = Db::builder("active-page-compaction", Arc::clone(&store))
+        let db = Db::builder(database, Arc::clone(&store))
             .build()
             .await
             .unwrap();
@@ -665,6 +675,13 @@ mod tests {
         )
         .await
         .unwrap();
+        (store, db, record, page_key, pointer_key)
+    }
+
+    #[tokio::test]
+    async fn active_page_compaction_replaces_inputs_and_consumes_pointer() {
+        let (store, db, _, page_key, pointer_key) =
+            compactable_page("active-page-compaction").await;
 
         assert!(compact_once(
             &db,
@@ -680,5 +697,69 @@ mod tests {
             index_values::decode_manifest_page(&db.get(page_key).await.unwrap().unwrap()).unwrap();
         assert_eq!(page.entries().len(), 1);
         assert!(db.get(pointer_key).await.unwrap().is_none());
+    }
+
+    /// Proves a compaction that runs after its generation's drop began or
+    /// completed writes no row of that generation. A completed drop gives the
+    /// generation's rows up to storage compactions under a dropped-generation
+    /// entry, and a row written after that entry was reclaimed would never be
+    /// removed. The compaction only consumes its pointer, which no generation
+    /// owns.
+    #[tokio::test]
+    async fn a_compaction_of_a_dropped_generation_writes_none_of_its_rows() {
+        let drop_operation_id = index_lifecycle::IndexOperationId::new_v4();
+        for completed in [false, true] {
+            let (store, db, record, _, pointer_key) =
+                compactable_page(&format!("dropped-page-compaction-{completed}")).await;
+            let dropping = record
+                .transition(index_lifecycle::IndexStateTransition::BeginDrop { drop_operation_id })
+                .unwrap();
+            let record = match completed {
+                false => dropping,
+                true => dropping
+                    .transition(index_lifecycle::IndexStateTransition::CompleteDrop)
+                    .unwrap(),
+            };
+            db.put(
+                scoped_key(
+                    crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                    index_keys::ScopedKey::index_record(record.identity().clone()),
+                ),
+                index_values::encode_index_record(&record),
+            )
+            .await
+            .unwrap();
+            async fn rows(db: &Db) -> BTreeMap<Bytes, Bytes> {
+                let mut scan = db.scan_prefix(Bytes::new(), ..).await.unwrap();
+                let mut rows = BTreeMap::new();
+                while let Some(row) = scan.next().await.unwrap() {
+                    rows.insert(row.key, row.value);
+                }
+                rows
+            }
+            let mut expected = rows(&db).await;
+
+            assert!(compact_once(
+                &db,
+                &index_lifecycle::IndexScopeGates::default(),
+                &store,
+                "db",
+                limits(2)
+            )
+            .await
+            .unwrap());
+
+            assert!(expected.remove(&pointer_key).is_some());
+            assert_eq!(rows(&db).await, expected, "completed: {completed}");
+            assert!(!compact_once(
+                &db,
+                &index_lifecycle::IndexScopeGates::default(),
+                &store,
+                "db",
+                limits(2)
+            )
+            .await
+            .unwrap());
+        }
     }
 }

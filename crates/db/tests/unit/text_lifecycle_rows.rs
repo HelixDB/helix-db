@@ -41,13 +41,20 @@ pub(super) async fn verify_steady_state(db: &crate::HelixDB, expected_live_entit
     }
 }
 
-/// Waits for terminal DROP/abort cleanup to remove all generation-owned rows.
+/// Waits for terminal DROP/abort cleanup to leave no generation-owned row
+/// that nothing will remove.
+///
+/// An abort deletes its rows itself. A drop leaves them to compactions under
+/// a dropped-generation entry, and the lifecycle model runs no compactor, so
+/// the rows of a dropped generation stay: each must be a row an entry that
+/// passes its cross-check gives up.
 pub(super) async fn verify_dropped(db: &crate::HelixDB) {
     let HelixStorage::Writer(writer) = db.storage() else {
         panic!("text row contracts require writer storage");
     };
     tokio::time::timeout(ROW_DRAIN_TIMEOUT, async {
         loop {
+            let given_up = given_up(db).await;
             let mut residue = 0_usize;
             for kind in [
                 index_keys::RecordKind::BuildDelta,
@@ -72,12 +79,14 @@ pub(super) async fn verify_dropped(db: &crate::HelixDB) {
                     )
                     .await
                     .expect("scoped text cleanup lane remains readable");
-                while rows
+                while let Some(row) = rows
                     .next()
                     .await
                     .expect("scoped text cleanup scan succeeds")
-                    .is_some()
                 {
+                    if given_up.iter().any(|prefix| row.key.starts_with(prefix)) {
+                        continue;
+                    }
                     residue = residue
                         .checked_add(1)
                         .expect("bounded text cleanup residue count does not overflow");
@@ -114,8 +123,33 @@ pub(super) async fn verify_dropped(db: &crate::HelixDB) {
     .expect("terminal text lifecycle cleanup drains every generation-owned row");
 }
 
+/// Key prefixes of the rows that stored dropped-generation entries give up.
+///
+/// The lifecycle model runs no compactor, so these rows stay in the store;
+/// every entry must pass its cross-check for the prefixes to be trusted.
+async fn given_up(db: &crate::HelixDB) -> Vec<bytes::Bytes> {
+    let HelixStorage::Writer(writer) = db.storage() else {
+        panic!("text row contracts require writer storage");
+    };
+    writer
+        .dropped()
+        .refresh(writer.db())
+        .await
+        .expect("every stored dropped-generation entry passes its cross-check");
+    writer
+        .dropped()
+        .armed()
+        .iter()
+        .flat_map(|(_, armed)| armed.owners.iter())
+        .flat_map(|owner| owner.prefixes())
+        .collect()
+}
+
 /// Decodes one Active text generation and either reports queued finalization or
 /// proves the complete steady-state manifest and entity graph.
+///
+/// Rows of earlier generations that a dropped-generation entry gives up are
+/// not part of the Active generation and are skipped.
 async fn observe_steady_state(
     db: &crate::HelixDB,
     expected_live_entities: usize,
@@ -124,6 +158,7 @@ async fn observe_steady_state(
         panic!("text row contracts require writer storage");
     };
     let scope = DataScope::LegacyUnscoped;
+    let given_up = given_up(db).await;
     let mut transient_rows = Vec::new();
     for kind in [
         index_keys::RecordKind::BuildDelta,
@@ -140,12 +175,10 @@ async fn observe_steady_state(
             .await
             .expect("transient text row lane remains readable");
         let mut count = 0_usize;
-        while rows
-            .next()
-            .await
-            .expect("transient text row scan succeeds")
-            .is_some()
-        {
+        while let Some(row) = rows.next().await.expect("transient text row scan succeeds") {
+            if given_up.iter().any(|prefix| row.key.starts_with(prefix)) {
+                continue;
+            }
             count = count
                 .checked_add(1)
                 .expect("bounded transient row count does not overflow");
@@ -203,6 +236,9 @@ async fn observe_steady_state(
         .await
         .expect("text manifest root scan succeeds")
     {
+        if given_up.iter().any(|prefix| row.key.starts_with(prefix)) {
+            continue;
+        }
         let ManagedIndexKey::Data {
             kind: index_keys::ScopedKey::TextManifestRoot(root_key),
             ..
@@ -244,6 +280,9 @@ async fn observe_steady_state(
         .await
         .expect("text manifest page scan succeeds")
     {
+        if given_up.iter().any(|prefix| row.key.starts_with(prefix)) {
+            continue;
+        }
         let ManagedIndexKey::Data {
             kind: index_keys::ScopedKey::TextManifestPage(page_key),
             ..
@@ -303,6 +342,9 @@ async fn observe_steady_state(
         .await
         .expect("text entity-state scan succeeds")
     {
+        if given_up.iter().any(|prefix| row.key.starts_with(prefix)) {
+            continue;
+        }
         let ManagedIndexKey::Data {
             kind: index_keys::ScopedKey::TextEntityState(state_key),
             ..
@@ -349,6 +391,9 @@ async fn observe_steady_state(
         .await
         .expect("builder-applied text-state scan succeeds")
     {
+        if given_up.iter().any(|prefix| row.key.starts_with(prefix)) {
+            continue;
+        }
         let ManagedIndexKey::Data {
             kind: index_keys::ScopedKey::AppliedState(applied_key),
             ..

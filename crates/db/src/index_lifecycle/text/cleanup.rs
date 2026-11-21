@@ -1,7 +1,10 @@
 //! Bounded metadata-only cleanup for text-index generations.
 //!
-//! DROP and aborted BUILD operations delete every generation-qualified SlateDB
-//! row. Immutable content-addressed split objects are deliberately retained.
+//! Aborted BUILD operations delete every generation-qualified SlateDB row. A
+//! DROP deletes them too, unless the store admits dropped-generation entries:
+//! then it deletes nothing and leaves an entry, and compactions discard the
+//! rows (see [`dropped`]). Immutable content-addressed split objects are
+//! deliberately retained.
 
 use std::ops::Bound;
 
@@ -14,9 +17,9 @@ use crate::encoding::v2::keys::ManagedIndexKey;
 use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::outbox::IndexOperationStepResult;
 use crate::index_lifecycle::{
-    BuildOperationOutcome, IndexCursor, IndexOperationOutcome, IndexOperationProgress,
-    IndexOperationRecord, NoCursorProgress, OperationCounters, PrefixScanProgress,
-    TextBuildProgress, TextCleanupProgress,
+    dropped, BuildOperationOutcome, DroppedGenerationRows, DroppedGenerationValue, IndexCursor,
+    IndexOperationOutcome, IndexOperationProgress, IndexOperationRecord, NoCursorProgress,
+    OperationCounters, PrefixScanProgress, TextBuildProgress, TextCleanupProgress,
 };
 
 /// Runs one bounded metadata cleanup transition.
@@ -29,14 +32,50 @@ pub(super) async fn step_cleanup(
     limits: SearchIndexBatchLimits,
 ) -> Result<IndexOperationStepResult> {
     match progress {
+        // Every row this cleanup deletes is keyed by generation, so a drop
+        // that will leave a dropped-generation entry at `Finalize` deletes
+        // nothing. One that already deleted rows one by one, on an older
+        // store, finishes one by one: it has a cursor or counted a row.
+        TextCleanupProgress::DeleteMetadata(progress)
+            if !aborting
+                && progress.cursor.is_none()
+                && progress.counters == OperationCounters::default()
+                && dropped::admitted(transaction).await? =>
+        {
+            Ok(progressed_cleanup(
+                aborting,
+                TextCleanupProgress::Finalize(NoCursorProgress {
+                    counters: progress.counters,
+                }),
+            ))
+        }
         TextCleanupProgress::DeleteMetadata(progress) => {
             delete_metadata(transaction, scope, operation, progress, aborting, limits).await
         }
-        TextCleanupProgress::Finalize(_) => Ok(IndexOperationStepResult::Completed(if aborting {
-            IndexOperationOutcome::Build(BuildOperationOutcome::Aborted)
-        } else {
-            IndexOperationOutcome::DropSucceeded
-        })),
+        TextCleanupProgress::Finalize(_) => {
+            // Staged here, the entry commits in the transaction that moves
+            // the record to `Dropped`. The outbox holds the generation's
+            // publication permit across that commit, so no active text
+            // compaction writes a row of the generation after the entry.
+            if !aborting && dropped::admitted(transaction).await? {
+                dropped::stage_entry(
+                    transaction,
+                    dropped::DroppedGeneration {
+                        index_id: operation.index_id(),
+                        generation: operation.generation(),
+                    },
+                    DroppedGenerationValue {
+                        scope,
+                        rows: DroppedGenerationRows::Text,
+                    },
+                )?;
+            }
+            Ok(IndexOperationStepResult::Completed(if aborting {
+                IndexOperationOutcome::Build(BuildOperationOutcome::Aborted)
+            } else {
+                IndexOperationOutcome::DropSucceeded
+            }))
+        }
     }
 }
 
@@ -351,9 +390,14 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_walks_typed_lanes_and_preserves_build_drop_terminal_shapes() {
+        // A store that admits no dropped-generation entries: every cleanup
+        // deletes its rows itself.
         let db = Db::open("text-cleanup-contracts", Arc::new(InMemory::new()))
             .await
             .expect("text cleanup test database opens");
+        crate::migrations::startup::bootstrap_writer(&db)
+            .await
+            .expect("text cleanup test database bootstraps V2 metadata");
         let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
         let operation = test_support::operation();
         let scope = DataScope::LegacyUnscoped;
@@ -467,6 +511,167 @@ mod tests {
                 TextBuildProgress::Aborting(TextCleanupProgress::Finalize(_))
             ))
         ));
+    }
+
+    /// Reads the dropped-generation entries `transaction` has staged or sees.
+    async fn entries(
+        transaction: &slatedb::DbTransaction,
+    ) -> Vec<(dropped::DroppedGeneration, DroppedGenerationValue)> {
+        dropped::load_entries(transaction).await.unwrap()
+    }
+
+    /// Proves a drop on an admitted store deletes no row and stages its entry
+    /// with the outcome, that a drop which already deleted rows finishes row
+    /// by row, and that an abort deletes every row and stages nothing.
+    #[tokio::test]
+    async fn an_admitted_drop_leaves_its_rows_to_compactions_and_stages_one_entry() {
+        let db = Db::open("text-cleanup-admitted", Arc::new(InMemory::new()))
+            .await
+            .expect("text cleanup test database opens");
+        crate::migrations::startup::bootstrap_writer(&db)
+            .await
+            .expect("text cleanup test database bootstraps V2 metadata");
+        dropped::admit_fixture(&db).await;
+        let operation = test_support::operation();
+        let scope = DataScope::LegacyUnscoped;
+        let limits = test_support::batch_limits(u64::MAX, u64::MAX, u64::MAX);
+        let partition = crate::index_lifecycle::work::TextPartition::Unpartitioned;
+        let artifacts = [0, 1].map(|ordinal| {
+            test_support::artifact_row(scope, &operation, partition.clone(), ordinal, 1)
+        });
+        let entry = dropped::DroppedGeneration {
+            index_id: operation.index_id(),
+            generation: operation.generation(),
+        };
+
+        // A drop that has deleted nothing goes straight to its last step.
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        for (key, value) in &artifacts {
+            transaction.put(key.clone(), value.clone()).unwrap();
+        }
+        let IndexOperationStepResult::Progressed(IndexOperationProgress::TextCleanup(
+            finalize @ TextCleanupProgress::Finalize(_),
+        )) = step_cleanup(
+            &transaction,
+            scope,
+            &operation,
+            &initial_progress(),
+            false,
+            limits,
+        )
+        .await
+        .unwrap()
+        else {
+            panic!("an admitted drop skips the row deletes")
+        };
+        assert_eq!(entries(&transaction).await, vec![]);
+        assert!(matches!(
+            step_cleanup(&transaction, scope, &operation, &finalize, false, limits)
+                .await
+                .unwrap(),
+            IndexOperationStepResult::Completed(IndexOperationOutcome::DropSucceeded)
+        ));
+        assert_eq!(
+            entries(&transaction).await,
+            vec![(
+                entry,
+                DroppedGenerationValue {
+                    scope,
+                    rows: DroppedGenerationRows::Text,
+                }
+            )]
+        );
+        for (key, _) in &artifacts {
+            assert!(transaction.get(key).await.unwrap().is_some());
+        }
+        drop(transaction);
+
+        // A drop that counted a deleted row, or holds a cursor, deletes the
+        // rest row by row, and its last step stages the entry all the same.
+        let (first, second) = (&artifacts[0].0, &artifacts[1].0);
+        for half_way in [
+            PrefixScanProgress {
+                cursor: None,
+                counters: OperationCounters {
+                    entities: 1,
+                    ..OperationCounters::default()
+                },
+            },
+            PrefixScanProgress {
+                cursor: Some(IndexCursor::try_new(first.clone()).unwrap()),
+                counters: OperationCounters::default(),
+            },
+        ] {
+            let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+            transaction
+                .put(second.clone(), artifacts[1].1.clone())
+                .unwrap();
+            let IndexOperationStepResult::Progressed(IndexOperationProgress::TextCleanup(
+                TextCleanupProgress::DeleteMetadata(progress),
+            )) = step_cleanup(
+                &transaction,
+                scope,
+                &operation,
+                &TextCleanupProgress::DeleteMetadata(half_way.clone()),
+                false,
+                limits,
+            )
+            .await
+            .unwrap()
+            else {
+                panic!("a drop half-way through its rows keeps deleting them: {half_way:?}")
+            };
+            assert_eq!(
+                progress.counters.entities,
+                half_way.counters.entities + 1,
+                "{half_way:?}"
+            );
+            assert!(transaction.get(second).await.unwrap().is_none());
+            assert_eq!(entries(&transaction).await, vec![]);
+        }
+
+        // An abort deletes its rows itself and leaves no entry.
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        transaction
+            .put(first.clone(), artifacts[0].1.clone())
+            .unwrap();
+        let IndexOperationStepResult::Progressed(IndexOperationProgress::TextBuild(
+            TextBuildProgress::Aborting(TextCleanupProgress::DeleteMetadata(progress)),
+        )) = step_cleanup(
+            &transaction,
+            scope,
+            &operation,
+            &initial_progress(),
+            true,
+            limits,
+        )
+        .await
+        .unwrap()
+        else {
+            panic!("an abort deletes its rows")
+        };
+        assert_eq!(progress.counters.entities, 1);
+        assert!(transaction.get(first).await.unwrap().is_none());
+        assert!(matches!(
+            step_cleanup(
+                &transaction,
+                scope,
+                &operation,
+                &TextCleanupProgress::Finalize(NoCursorProgress {
+                    counters: progress.counters,
+                }),
+                true,
+                limits,
+            )
+            .await
+            .unwrap(),
+            IndexOperationStepResult::Completed(IndexOperationOutcome::Build(
+                BuildOperationOutcome::Aborted
+            ))
+        ));
+        assert_eq!(entries(&transaction).await, vec![]);
+        drop(transaction);
+        db.close().await.expect("text cleanup test database closes");
     }
 
     #[test]

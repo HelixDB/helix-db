@@ -1896,10 +1896,20 @@ fn narrow_cleanup_config() -> DbConfig {
     )
 }
 
-/// Asserts no physical vector row and no mapping, applied-state, or
-/// build-delta row is left in the default scope.
+/// Reclaims the storage of every dropped generation, then asserts no physical
+/// vector row and no mapping, applied-state, or build-delta row is left in
+/// the default scope.
 async fn assert_no_vector_generation_rows(db: &HelixDB) {
-    assert!(rows(db, is_vector_row).await.is_empty());
+    crate::index_lifecycle::dropped::reclaim_fixture(db).await;
+    // The writer stops reading the discarded rows at its next manifest poll.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !rows(db, is_vector_row).await.is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "the reclaim left physical vector rows"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     for kind in [
         keys::RecordKind::VectorPartitionMapping,
         keys::RecordKind::AppliedState,
@@ -1934,8 +1944,9 @@ fn is_vector_row(key: &[u8]) -> bool {
 /// The first delete step is held after staging, with every permit it took.
 /// Writes to indexed documents then commit without waiting for it and stage
 /// nothing for the retired generation. More writes run while the remaining
-/// steps, bounded to a few rows each, delete the rest. The drop leaves no row
-/// of the generation, and a rebuilt index serves the final documents.
+/// steps finish the drop, one delete step for each partition however many
+/// rows it holds: the rows are left to compactions. A reclaim then leaves no
+/// row of the generation, and a rebuilt index serves the final documents.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn graph_writes_run_through_a_vector_drop_and_never_reach_its_generation() {
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -1951,7 +1962,7 @@ async fn graph_writes_run_through_a_vector_drop_and_never_reach_its_generation()
 
     assert!(
         physical_rows > 8 * CLEANUP_ROWS,
-        "the drop takes many steps"
+        "deleting the rows one by one would take many steps"
     );
     let db = open(name, Arc::clone(&store), narrow_cleanup_config()).await;
     let pause = StepPause::arm(db.inner_db().as_ref(), |progress| {
@@ -1975,9 +1986,16 @@ async fn graph_writes_run_through_a_vector_drop_and_never_reach_its_generation()
         concurrent_vector_writes(&db, &ids, &mut state, round).await;
     }
     assert_eq!(wait_terminal(&db, &drop_operation).await, "succeeded");
+    // Tenants "a" and "b" were indexed; a step whose commit lost a conflict
+    // stages again.
     assert!(
-        pause.stagings() > physical_rows / CLEANUP_ROWS,
-        "every batch of rows took its own delete step"
+        (2..8).contains(&pause.stagings()),
+        "each partition took one delete step, not one for every batch of rows: {}",
+        pause.stagings()
+    );
+    assert!(
+        rows(&db, is_vector_row).await.len() > 8 * CLEANUP_ROWS,
+        "the drop left its rows to compactions"
     );
 
     assert_no_vector_generation_rows(&db).await;
@@ -2000,8 +2018,12 @@ async fn graph_writes_run_through_a_vector_drop_and_never_reach_its_generation()
     db.close().await.unwrap();
 }
 
-/// A drop whose writer dies in any cleanup stage finishes after the restart
-/// and leaves no row.
+/// A drop whose writer dies in any cleanup stage finishes after the restart,
+/// and a reclaim then leaves no row.
+///
+/// The store admits dropped-generation entries, so the drop has no stage
+/// that deletes build deltas; the stages of a row-by-row cleanup resume in
+/// the vector driver contracts.
 ///
 /// The drop is held at a step of each stage in turn. Everything before that
 /// step is made durable, and nothing after it ever uploads: the steps that
@@ -2014,25 +2036,19 @@ async fn drops_finish_after_losing_their_wal_tail_in_every_cleanup_stage() {
     use crate::search::vector::gated_wal::{GatedWalStore, WalUploads};
     const BOUND: Duration = Duration::from_secs(60);
 
-    let crashes: [(&str, step_pause::StepMatcher); 4] = [
+    let crashes: [(&str, step_pause::StepMatcher); 3] = [
         ("retire-cache", |progress| {
             matches!(
                 progress,
                 IndexOperationProgress::VectorCleanup(VectorCleanupProgress::RetireCache(_))
             )
         }),
-        // Mid-stage: several delete steps are already durable.
+        // Mid-stage: the first partition's delete step is already durable.
         ("delete-physical", |progress| {
             matches!(
                 progress,
                 IndexOperationProgress::VectorCleanup(VectorCleanupProgress::DeletePhysical(scan))
-                    if scan.counters.entities >= 4 * CLEANUP_ROWS as u64
-            )
-        }),
-        ("delete-deltas", |progress| {
-            matches!(
-                progress,
-                IndexOperationProgress::VectorCleanup(VectorCleanupProgress::DeleteDeltas(_))
+                    if scan.cursor.is_some()
             )
         }),
         ("finalize", |progress| {

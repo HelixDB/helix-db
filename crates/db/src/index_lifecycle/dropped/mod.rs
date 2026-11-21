@@ -36,6 +36,25 @@
 //!   and discardable, has completed. A restart forgets that proof and
 //!   compacts again.
 //!
+//! # What a drop still deletes itself
+//!
+//! - **Unpartitioned vector.** The rows of its physical id that no filter
+//!   matches, in one bounded step. The entry records the physical id.
+//! - **Partitioned vector.** The same rows of each partition's physical id,
+//!   one cleanup step per partition. The partition mappings stay: they are
+//!   the only list of the generation's physical ids, so the cross-check and
+//!   every filter read them, and [`reclaim`] deletes them with the entry.
+//! - **Secondary and text.** Nothing: every row is keyed by the generation.
+//!   Text split blobs in object storage are not rows and are retained, as
+//!   they were before.
+//!
+//! Three kinds of cleanup still delete row by row: a build abort, which
+//! leaves no entry; a drop whose row-by-row cleanup had deleted rows before
+//! the store was admitted; and a vector drop whose first physical id has more
+//! unfiltered rows than one step deletes, which the persisted progress cannot
+//! tell from the second. Both drops finish on an admitted store, so each
+//! still leaves an entry, which then names rows that are already gone.
+//!
 //! A generation adopted from legacy vector storage is never given an entry:
 //! its physical id was not allocated by this catalog and its rows may be
 //! shared with a legacy index.
@@ -52,9 +71,11 @@
 //! refresh scans the entry prefix and, for each new entry, the index records
 //! of its scope; for a new vector entry it also scans the scope's partition
 //! mappings and reads one metadata key per physical id. Allocating a vector
-//! physical id scans every entry. Entries leave only through a reclaim, so
-//! one whose rows are a small share of the store stays until a larger drop
-//! or a request triggers one.
+//! physical id scans every entry. Dropping a partitioned vector generation
+//! still costs one cleanup commit per partition, and its mappings stay until
+//! the reclaim. Entries leave only through a reclaim, so one whose rows are a
+//! small share of the store stays until a larger drop or a request triggers
+//! one.
 
 pub(crate) mod filter;
 pub(crate) mod ownership;
@@ -174,6 +195,72 @@ pub(crate) async fn admitted(read: &(impl DbReadOps + Sync)) -> Result<bool> {
         >= IndexStorageVersion::DROPPED_GENERATIONS)
 }
 
+/// Moves a bootstrapped fixture store to
+/// [`IndexStorageVersion::DROPPED_GENERATIONS`], as an open does.
+#[cfg(test)]
+pub(crate) async fn admit_fixture(db: &Db) {
+    db.put(
+        ManagedIndexKey::Global {
+            kind: GlobalKey::StorageVersion,
+        }
+        .to_bytes(),
+        encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
+            IndexStorageVersion::LABEL_IDENTITY,
+        )),
+    )
+    .await
+    .expect("fixture storage version is written");
+    admit(db)
+        .await
+        .expect("fixture store admits dropped-generation entries");
+    assert!(admitted(db).await.expect("storage version reads"));
+}
+
+/// Reclaims on request until `db` holds no dropped-generation entry, for
+/// tests that count the rows drops leave behind.
+///
+/// SlateDB publishes its oldest open reader only when it flushes a memtable
+/// that holds rows, so a pass that finds the rows retained is followed by
+/// the write of one node no index covers. The writer stops reading the
+/// discarded rows at its next manifest poll, which may be after this returns.
+#[cfg(test)]
+pub(crate) async fn reclaim_fixture(db: &crate::HelixDB) {
+    use helix_ast::value::PropertyInput;
+    use helix_ast::{batch::write_batch, query::QueryRequest, traversal::g};
+
+    use self::reclaim::DroppedStorageReclaim;
+
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            match db
+                .reclaim_dropped_index_storage()
+                .await
+                .expect("the reclaim pass runs")
+            {
+                DroppedStorageReclaim::Idle => break,
+                // Lost its compaction to one the scheduler picked, or done:
+                // the next pass tells.
+                DroppedStorageReclaim::Unproven { .. }
+                | DroppedStorageReclaim::Reclaimed { .. } => {}
+                DroppedStorageReclaim::Retained { .. } => {
+                    Box::pin(db.query(QueryRequest::write(write_batch().var_as(
+                        "flushed",
+                        g().add_n("DroppedReclaimFixture", Vec::<(&str, PropertyInput)>::new()),
+                    ))))
+                    .await
+                    .expect("the fixture node is written");
+                }
+                outcome @ DroppedStorageReclaim::BelowShare { .. } => {
+                    panic!("a requested pass ignores the share: {outcome:?}")
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("every dropped generation is reclaimed in time");
+}
+
 /// Stages the entry of a generation whose record `transaction` moves to
 /// `Dropped`.
 ///
@@ -185,6 +272,7 @@ pub(crate) fn stage_entry(
     entry: DroppedGeneration,
     value: DroppedGenerationValue,
 ) -> Result<()> {
+    failpoints::trip(IndexOutboxFailpoint::DroppedEntryStagingBefore)?;
     transaction.put(
         entry.key(),
         encode_metadata_value(&IndexV2MetadataValue::DroppedGeneration(value)),
