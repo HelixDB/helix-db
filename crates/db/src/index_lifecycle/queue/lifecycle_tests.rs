@@ -2142,6 +2142,90 @@ async fn drops_finish_after_losing_their_wal_tail_in_every_cleanup_stage() {
     }
 }
 
+/// Proves a refresh arms no entry whose commit is not durable.
+///
+/// The drop's last step, which writes the `Dropped` record and the entry,
+/// commits while no WAL upload can land. A refresh that reads the entry does
+/// not arm it: its flush waits for that WAL tail, so no compaction discards
+/// rows on the strength of a commit a crash takes back. The writer is then
+/// abandoned, and the one that restarts without the tail finishes the drop
+/// and writes the same entry again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_entry_whose_commit_is_not_durable_is_not_armed() {
+    use crate::index_lifecycle::dropped;
+    use crate::search::vector::gated_wal::{GatedWalStore, WalUploads};
+    const BOUND: Duration = Duration::from_secs(60);
+
+    let name = "unarmed-entry-lost-wal-tail";
+    let store = Arc::new(GatedWalStore::new());
+    let db = open(name, Arc::clone(&store) as Arc<dyn ObjectStore>, config()).await;
+    seed_vectors(&db, 16).await;
+    let operation = create(&db, vector_spec()).await;
+    assert_eq!(wait_terminal(&db, &operation).await, "succeeded");
+    drain(&db, target(&db, QueueFamily::Vector).await).await;
+
+    let pause = StepPause::arm(db.inner_db().as_ref(), |progress| {
+        matches!(
+            progress,
+            IndexOperationProgress::VectorCleanup(VectorCleanupProgress::Finalize(_))
+        )
+    });
+    let drop_operation = drop_index(&db, vector_spec()).await.unwrap();
+    tokio::time::timeout(BOUND, pause.reached())
+        .await
+        .expect("the drop reaches its last step");
+    // Everything before the last step is durable; nothing after it uploads.
+    tokio::time::timeout(BOUND, db.inner_db().flush())
+        .await
+        .expect("the held drop flushes")
+        .unwrap();
+    store.uploads.send_replace(WalUploads::Held);
+    pause.release();
+    let entries = tokio::time::timeout(BOUND, async {
+        loop {
+            let entries = dropped::load_entries(db.inner_db().as_ref()).await.unwrap();
+            if !entries.is_empty() {
+                break entries;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the last step commits its entry");
+    assert_eq!(entries.len(), 1);
+
+    let crate::HelixStorage::Writer(writer) = db.storage() else {
+        panic!("the contract opens a writer");
+    };
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            writer.dropped().refresh(writer.db())
+        )
+        .await
+        .is_err(),
+        "a refresh returned while the entry it read was not durable"
+    );
+    assert_eq!(writer.dropped().armed(), vec![]);
+    // The crash: the old writer never uploads again.
+    drop(pause);
+    drop(db);
+
+    let restarted = Arc::new(store.restarted());
+    let db = tokio::time::timeout(
+        BOUND,
+        open(name, restarted as Arc<dyn ObjectStore>, config()),
+    )
+    .await
+    .expect("a new writer opens over the crashed one");
+    assert_eq!(wait_terminal(&db, &drop_operation).await, "succeeded");
+    assert_eq!(
+        dropped::load_entries(db.inner_db().as_ref()).await.unwrap(),
+        entries
+    );
+    db.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn a_queue_retained_before_its_index_drops_is_discarded_and_never_published() {
     let db = open("drop-retained", Arc::new(InMemory::new()), config()).await;
