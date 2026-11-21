@@ -70,6 +70,8 @@ const CACHE_INDEX_BYTES_PER_KIB: u64 = 9;
 const PUBLICATION_LAG_WARNING: Duration = Duration::from_secs(60);
 /// Most insights one query check lists.
 const LISTED_INSIGHTS: usize = 10;
+/// Most quarantined dropped-index entries the storage check lists.
+const LISTED_QUARANTINED: usize = 10;
 /// Docs page on index operations the server holds back.
 const INDEX_TROUBLESHOOTING: &str =
     "https://docs.helix-db.com/database/helix-db/query-guides/troubleshooting";
@@ -141,6 +143,8 @@ pub(crate) enum CheckId {
     IndexPublication,
     #[serde(rename = "indexes.label_bitmaps")]
     LabelBitmaps,
+    #[serde(rename = "indexes.dropped_storage")]
+    DroppedIndexStorage,
     #[serde(rename = "queries.missing_indexes")]
     MissingIndexes,
     #[serde(rename = "queries.unbounded_scans")]
@@ -155,7 +159,9 @@ impl CheckId {
             }
             Self::CacheDevice | Self::CacheSpace | Self::CacheWarm => Category::Cache,
             Self::Memory => Category::Resources,
-            Self::IndexPublication | Self::LabelBitmaps => Category::Indexes,
+            Self::IndexPublication | Self::LabelBitmaps | Self::DroppedIndexStorage => {
+                Category::Indexes
+            }
             Self::MissingIndexes | Self::UnboundedScans => Category::Queries,
         }
     }
@@ -350,6 +356,8 @@ pub(crate) async fn report(state: &ServerState, audit: Option<Audit>) -> Report 
         )),
         db.is_writer_mode()
             .then(|| index_publication(&db.index_operation_queue_stats())),
+        db.is_writer_mode()
+            .then(|| dropped_index_storage(&db.dropped_index_storage())),
         Some(missing_indexes(&insights)),
         Some(unbounded_scans(&insights)),
         match audit {
@@ -1042,6 +1050,77 @@ fn index_publication(stats: &db::IndexOperationQueueStats) -> Check {
                     plural(pending, "operation is", "operations are"),
                     elapsed(oldest)
                 ),
+            },
+        },
+    )
+}
+
+fn dropped_index_storage(storage: &db::DroppedIndexStorage) -> Check {
+    let waiting = storage.unproven + storage.draining + storage.tracking;
+    let progress = format!(
+        "{waiting} dropped index {} compaction: {} not yet tracked ({} kept for a reader older \
+         than the drop), {} waiting for compactions in flight, {} with rows in {} {}.",
+        plural(waiting as u64, "generation awaits", "generations await"),
+        storage.unproven,
+        storage.retained,
+        storage.draining,
+        storage.tracking,
+        storage.tracked_tables,
+        plural(storage.tracked_tables as u64, "table", "tables"),
+    );
+    if !storage.quarantined.is_empty() {
+        let listed = storage
+            .quarantined
+            .iter()
+            .take(LISTED_QUARANTINED)
+            .map(|entry| {
+                format!(
+                    "index {} generation {} {}",
+                    entry.index_id, entry.generation, entry.contradiction
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        let more = storage.quarantined.len().saturating_sub(LISTED_QUARANTINED);
+        return Check::new(
+            CheckId::DroppedIndexStorage,
+            format!(
+                "{} dropped index {} quarantined",
+                storage.quarantined.len(),
+                plural(storage.quarantined.len() as u64, "entry is", "entries are")
+            ),
+            Outcome::Warn {
+                detail: format!(
+                    "The catalog contradicts {}: {listed}{}. Compactions keep their rows, so \
+                     no index loses data and the storage is not reclaimed. {progress}",
+                    plural(
+                        storage.quarantined.len() as u64,
+                        "this entry",
+                        "these entries"
+                    ),
+                    match more {
+                        0 => String::new(),
+                        more => format!("; and {more} more"),
+                    }
+                ),
+                fix: "An entry is quarantined when it names an index generation that is still \
+                      in use or was never built. It is armed again by itself once the catalog \
+                      agrees with it, for instance after that index is dropped. Report an entry \
+                      that stays, with the server log line that quarantined it."
+                    .into(),
+            },
+        );
+    }
+    Check::new(
+        CheckId::DroppedIndexStorage,
+        match waiting {
+            0 => "No dropped index storage awaits compaction",
+            _ => "Compactions are reclaiming dropped index storage",
+        },
+        Outcome::Pass {
+            detail: match waiting {
+                0 => "Every dropped index has given its storage back.".into(),
+                _ => progress,
             },
         },
     )

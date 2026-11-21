@@ -200,6 +200,11 @@ fn checks_serialize_their_stable_id_category_and_status() {
         (CheckId::Memory, "resources.memory", "resources"),
         (CheckId::IndexPublication, "indexes.publication", "indexes"),
         (
+            CheckId::DroppedIndexStorage,
+            "indexes.dropped_storage",
+            "indexes",
+        ),
+        (
             CheckId::MissingIndexes,
             "queries.missing_indexes",
             "queries",
@@ -617,6 +622,72 @@ fn memory_warns_when_cache_budgets_take_most_of_the_limit() {
 }
 
 #[test]
+fn dropped_index_storage_reports_progress_and_warns_on_quarantined_entries() {
+    let idle = dropped_index_storage(&db::DroppedIndexStorage::default());
+    assert_eq!(idle.summary, "No dropped index storage awaits compaction");
+    assert!(matches!(&idle.outcome, Outcome::Pass { .. }));
+
+    let waiting = db::DroppedIndexStorage {
+        unproven: 2,
+        retained: 1,
+        draining: 3,
+        tracking: 4,
+        tracked_tables: 1,
+        quarantined: Vec::new(),
+    };
+    let reclaiming = dropped_index_storage(&waiting);
+    assert_eq!(
+        reclaiming.summary,
+        "Compactions are reclaiming dropped index storage"
+    );
+    assert_eq!(
+        reclaiming.outcome,
+        Outcome::Pass {
+            detail: "9 dropped index generations await compaction: 2 not yet tracked (1 kept \
+                     for a reader older than the drop), 3 waiting for compactions in flight, 4 \
+                     with rows in 1 table."
+                .into()
+        }
+    );
+
+    let quarantined = |count: u64| {
+        dropped_index_storage(&db::DroppedIndexStorage {
+            quarantined: (1..=count)
+                .map(|index_id| db::QuarantinedDroppedGeneration {
+                    index_id,
+                    generation: 7,
+                    contradiction: "names a generation its index record still owns",
+                })
+                .collect(),
+            ..waiting.clone()
+        })
+    };
+    let one = quarantined(1);
+    assert_eq!(one.summary, "1 dropped index entry is quarantined");
+    let Outcome::Warn { detail, fix } = &one.outcome else {
+        panic!("a quarantined entry warns: {one:?}");
+    };
+    assert!(
+        detail.starts_with(
+            "The catalog contradicts this entry: index 1 generation 7 names a generation its \
+             index record still owns. Compactions keep their rows"
+        ),
+        "{detail}"
+    );
+    assert!(detail.ends_with("with rows in 1 table."), "{detail}");
+    assert!(fix.contains("armed again by itself"));
+
+    let many = quarantined(12);
+    assert_eq!(many.summary, "12 dropped index entries are quarantined");
+    let Outcome::Warn { detail, .. } = &many.outcome else {
+        panic!("quarantined entries warn: {many:?}");
+    };
+    assert!(detail.contains("index 10 generation 7"), "{detail}");
+    assert!(!detail.contains("index 11 generation 7"), "{detail}");
+    assert!(detail.contains("; and 2 more. Compactions"), "{detail}");
+}
+
+#[test]
 fn index_publication_warns_on_held_back_entities_or_a_late_backlog() {
     let caught_up = index_publication(&db::IndexOperationQueueStats::default());
     assert_eq!(status(&caught_up), "pass");
@@ -1023,6 +1094,7 @@ async fn memory_storage_reports_its_checks_and_recent_missing_indexes() {
             "storage.durability",
             "resources.memory",
             "indexes.publication",
+            "indexes.dropped_storage",
             "queries.missing_indexes",
             "queries.unbounded_scans",
         ]
@@ -1211,6 +1283,7 @@ async fn s3_storage_reports_cache_checks_without_contacting_aws() {
             "cache.warm",
             "resources.memory",
             "indexes.publication",
+            "indexes.dropped_storage",
             "queries.missing_indexes",
             "queries.unbounded_scans",
         ]
@@ -1262,6 +1335,7 @@ async fn gcs_and_azure_storage_report_cache_checks_without_s3_checks() {
                 "cache.warm",
                 "resources.memory",
                 "indexes.publication",
+                "indexes.dropped_storage",
                 "queries.missing_indexes",
                 "queries.unbounded_scans",
             ],

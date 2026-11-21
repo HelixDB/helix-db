@@ -1956,6 +1956,7 @@
               "resources.memory",
               "indexes.publication",
               "indexes.label_bitmaps",
+              "indexes.dropped_storage",
               "queries.missing_indexes",
               "queries.unbounded_scans"
             ]
