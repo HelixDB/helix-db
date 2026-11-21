@@ -4890,8 +4890,43 @@ enum Contradiction {
     PhysicalIndexAboveWatermark,
     MetadataRowPresent,
     MappedByAnotherGeneration,
+    MappingOfAnotherGeneration,
+    PartitionsShareAPhysicalIndex,
     GenerationStillLive,
     PhysicalIndexStillLive,
+}
+
+/// Writes one partition mapping of `tenant` under `keyed`'s generation
+/// prefix whose value names `valued`'s generation and `physical_index_id`.
+async fn put_mapping(
+    db: &Db,
+    scope: DataScope,
+    keyed: dropped::DroppedGeneration,
+    valued: dropped::DroppedGeneration,
+    tenant: &'static [u8],
+    physical_index_id: VectorPhysicalIndexId,
+) {
+    let partition = VectorTenantPartition::try_new(Bytes::from_static(tenant)).unwrap();
+    db.put(
+        scoped_index_key(
+            scope,
+            ScopedKey::VectorPartitionMapping(
+                crate::encoding::v2::keys::VectorPartitionMappingKey {
+                    index_id: keyed.index_id,
+                    generation: keyed.generation,
+                    partition: partition.fingerprint(),
+                },
+            ),
+        ),
+        encode_partition_mapping(&crate::index_lifecycle::work::VectorPartitionMappingValue {
+            index_id: valued.index_id,
+            generation: valued.generation,
+            partition,
+            physical_index_id,
+        }),
+    )
+    .await
+    .expect("fixture mapping is written");
 }
 
 /// Proves an entry that names rows a live generation owns, or ids that were
@@ -4945,6 +4980,18 @@ pub(super) async fn a_refresh_fails_and_halts_on_an_entry_the_catalog_contradict
             "mapped-by-another-generation",
             Contradiction::MappedByAnotherGeneration,
             "names a vector physical index another generation's partition maps to",
+            false,
+        ),
+        (
+            "mapping-of-another-generation",
+            Contradiction::MappingOfAnotherGeneration,
+            "has a partition mapping of another generation",
+            false,
+        ),
+        (
+            "partitions-share-a-physical-index",
+            Contradiction::PartitionsShareAPhysicalIndex,
+            "has two partitions mapped to one vector physical index",
             false,
         ),
         (
@@ -5040,30 +5087,43 @@ pub(super) async fn a_refresh_fails_and_halts_on_an_entry_the_catalog_contradict
                     .unwrap();
             }
             Contradiction::MappedByAnotherGeneration => {
-                let tenant = VectorTenantPartition::try_new(Bytes::from_static(b"tenant")).unwrap();
-                let generation = entry.generation.checked_next().unwrap();
-                db.put(
-                    scoped_index_key(
-                        scope,
-                        ScopedKey::VectorPartitionMapping(
-                            crate::encoding::v2::keys::VectorPartitionMappingKey {
-                                index_id: entry.index_id,
-                                generation,
-                                partition: tenant.fingerprint(),
-                            },
-                        ),
-                    ),
-                    encode_partition_mapping(
-                        &crate::index_lifecycle::work::VectorPartitionMappingValue {
-                            index_id: entry.index_id,
-                            generation,
-                            partition: tenant,
-                            physical_index_id,
-                        },
-                    ),
+                let later = dropped::DroppedGeneration {
+                    generation: entry.generation.checked_next().unwrap(),
+                    ..entry
+                };
+                put_mapping(&db, scope, later, later, b"tenant", physical_index_id).await;
+            }
+            // The two below list the entry's physical ids through mappings,
+            // as a partitioned generation's entry does.
+            Contradiction::MappingOfAnotherGeneration => {
+                let later = dropped::DroppedGeneration {
+                    generation: entry.generation.checked_next().unwrap(),
+                    ..entry
+                };
+                put_mapping(&db, scope, entry, later, b"tenant", physical_index_id).await;
+                put_entry(
+                    &db,
+                    entry,
+                    DroppedGenerationValue {
+                        rows: DroppedGenerationRows::PartitionedVector,
+                        ..value
+                    },
                 )
-                .await
-                .unwrap();
+                .await;
+            }
+            Contradiction::PartitionsShareAPhysicalIndex => {
+                for tenant in [&b"one"[..], &b"two"[..]] {
+                    put_mapping(&db, scope, entry, entry, tenant, physical_index_id).await;
+                }
+                put_entry(
+                    &db,
+                    entry,
+                    DroppedGenerationValue {
+                        rows: DroppedGenerationRows::PartitionedVector,
+                        ..value
+                    },
+                )
+                .await;
             }
             Contradiction::GenerationStillLive => {
                 let (generation, _) = recreated(&db, &driver, &mut claim_sequence).await;
