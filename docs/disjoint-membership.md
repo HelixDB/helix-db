@@ -97,10 +97,12 @@ most version 5 refuse a version-6 store, which they would not keep exact, so a
 rollback after the first open needs a backup taken before the upgrade. Labels
 longer than the label index bound are rejected as invalid queries.
 
-A writer open moves a version-7 store to version 8 in one commit that writes only
-the marker, so new databases end their first open at version 8. From version 8 a
-completed index drop or build abort leaves a dropped-generation entry and
-compactions discard the generation's rows. Binaries that support at most version
+An embedded or controlled-migration writer open moves a version-7 store to
+version 8 in one commit that writes only the marker, so new databases end their
+first open at version 8. A managed failover writer serves a version-7 store as it
+is, and its drops delete their rows one by one. From version 8 a completed index
+drop or build abort leaves a dropped-generation entry and compactions discard
+the generation's rows. Binaries that support at most version
 7 refuse a version-8 store, whose entries they would neither decode nor honour, so
 a rollback after the first open needs a backup taken before the upgrade. Versions
 after 8 return the existing unsupported-version error on reader, embedded-writer,

@@ -232,10 +232,13 @@ impl Reclaimer {
                     .map(|run| SourceId::SortedRun(run.id)),
             )
             .collect::<Vec<_>>();
-        assert!(
-            !sources.is_empty(),
-            "a flushed database that stores a dropped-generation entry has a table"
-        );
+        // An error, not a panic: a panic would end the reclaim task unseen.
+        if sources.is_empty() {
+            return Err(HelixDbError::InvariantViolation(
+                "a flushed database that stores a dropped-generation entry has no table"
+                    .to_string(),
+            ));
+        }
         let destination = manifest
             .compacted()
             .iter()

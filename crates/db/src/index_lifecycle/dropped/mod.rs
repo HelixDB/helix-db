@@ -717,9 +717,15 @@ impl Registry {
             })
             .collect::<Vec<_>>();
         match watch {
-            Some(watch) if watch.destination == context.destination => watch
-                .filters
-                .push(discardable.iter().map(|(entry, _)| **entry).collect()),
+            // A job whose destination is not the oldest run leaves older
+            // tables unread, so it proves nothing gone.
+            Some(watch) if watch.destination == context.destination => watch.filters.push(
+                discardable
+                    .iter()
+                    .filter(|_| context.is_dest_last_run)
+                    .map(|(entry, _)| **entry)
+                    .collect(),
+            ),
             Some(_) | None => {}
         }
         discardable

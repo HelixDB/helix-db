@@ -228,9 +228,9 @@ pub(crate) fn owned_row(key: &[u8]) -> Option<OwnedRow<'_>> {
             VECTOR_L0_KEYSPACE_PREFIX => VectorStorageLane::Layer0,
             _ => {
                 // A graph row, a global row, or no row this database writes.
-                // Their classification is constant, so this compiles to
-                // nothing for graph rows; it is consulted so that a kind
-                // classified as owned cannot reach a filter unparsed.
+                // Their classification is consulted in debug builds only, so
+                // that a kind classified as owned cannot reach a filter
+                // unparsed; a release compaction pays nothing per graph row.
                 let owner = match key.strip_prefix(&GLOBAL_SENTINEL[..]) {
                     Some([kind, ..]) => GlobalKind::try_from_u8(*kind)
                         .map_or(RowOwner::Never, RowOwner::of_global_kind),
@@ -238,7 +238,7 @@ pub(crate) fn owned_row(key: &[u8]) -> Option<OwnedRow<'_>> {
                         KeyPrefix::from_u8(first).map_or(RowOwner::Never, RowOwner::of_key_prefix)
                     }
                 };
-                assert_eq!(
+                debug_assert_eq!(
                     owner,
                     RowOwner::Never,
                     "no graph or global key names an owner in its key"

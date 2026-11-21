@@ -143,6 +143,19 @@ fn a_watch_proves_only_what_every_filter_of_its_destination_discarded() {
     registry.discardable(&job(3, None));
     assert_eq!(watching.proven(COMPLETED), HashSet::new());
 
+    // A job that does not write the oldest run withdraws every proof, though
+    // its filter still discards.
+    let watching = registry.watch(3);
+    registry.discardable(&job(3, Some(30)));
+    assert_eq!(
+        registry.discardable(&CompactionJobContext {
+            is_dest_last_run: false,
+            ..job(3, Some(30))
+        }),
+        HashSet::from([owner(1), owner(2)])
+    );
+    assert_eq!(watching.proven(COMPLETED), HashSet::new());
+
     // A new watch forgets the filters of the one it replaces.
     let replaced = registry.watch(3);
     registry.discardable(&job(3, Some(30)));
