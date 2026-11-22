@@ -1667,8 +1667,6 @@
       "keywords": "HelixDB, graph database, open source graph database, vector database, vector search, filtered vector search, full-text search, BM25, hybrid search, knowledge graph, GraphRAG, RAG, AI agent memory, long-term memory for LLMs, memory infrastructure, object storage database, property graph, SDK, CLI",
       "robots": "all",
       "googlebot": "index, follow",
-      "og:title": "HelixDB Docs",
-      "og:description": "Documentation and learning center for HelixDB, the open-source graph database with native vector and full-text search.",
       "og:type": "website",
       "og:site_name": "HelixDB Documentation",
       "category": "Technology",

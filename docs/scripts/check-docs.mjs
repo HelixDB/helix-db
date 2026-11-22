@@ -179,6 +179,21 @@ function lineNumber(content, offset) {
 }
 
 const config = JSON.parse(fs.readFileSync(DOCS_JSON, "utf8"));
+// Global metatags go on every page and win over what Mintlify derives from
+// each page's frontmatter: a global og:title made every page's <title>,
+// og:title and twitter:title the site's name.
+for (const tag of [
+  "og:title",
+  "og:description",
+  "twitter:title",
+  "twitter:description",
+]) {
+  if (config.seo?.metatags?.[tag] !== undefined) {
+    errors.push(
+      `docs.json: seo.metatags must not set ${tag}; it overrides every page's own`,
+    );
+  }
+}
 const tabNames = (config.navigation?.tabs ?? []).map((tab) => tab.tab);
 const expectedTabs = [
   "HelixDB",
