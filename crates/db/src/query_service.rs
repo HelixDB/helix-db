@@ -594,11 +594,19 @@ fn query_param_bindings(
 /// .unwrap();
 /// assert_eq!(response.json_bytes(), br#"{"count":2,"users":[]}"#);
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct QueryResponse<B = Vec<u8>> {
     body: B,
     diagnostics: PlannerDiagnostics,
     commit_timings: CommitTimings,
+}
+
+/// Equality compares what the response says, not how long it took: two
+/// identical writes compare equal whatever their commit timings.
+impl<B: PartialEq> PartialEq for QueryResponse<B> {
+    fn eq(&self, other: &Self) -> bool {
+        self.body == other.body && self.diagnostics == other.diagnostics
+    }
 }
 
 impl QueryResponse {
@@ -2566,6 +2574,31 @@ mod tests {
             .commit_timings();
         assert_eq!(ddl.commit, None);
         assert!(ddl.durable.is_some());
+    }
+
+    /// Timings never make two otherwise identical responses unequal, while a
+    /// different body still does.
+    #[test]
+    fn query_response_equality_ignores_commit_timings() {
+        let untimed = QueryResponse::<Vec<u8>>::encode(
+            &ReturnedValues::default(),
+            PlannerDiagnostics::default(),
+        )
+        .expect("empty returns encode");
+        let timed = QueryResponse {
+            commit_timings: CommitTimings {
+                commit: Some(std::time::Duration::from_millis(3)),
+                durable: Some(std::time::Duration::from_millis(40)),
+            },
+            ..untimed.clone()
+        };
+        assert_ne!(timed.commit_timings(), untimed.commit_timings());
+        assert_eq!(timed, untimed);
+        let other_body = QueryResponse {
+            body: b"{\"x\":1}".to_vec(),
+            ..untimed.clone()
+        };
+        assert_ne!(other_body, untimed);
     }
 
     #[tokio::test]

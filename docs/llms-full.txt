@@ -9119,7 +9119,7 @@ Server-Timing: exec;dur=1.204, commit;dur=0.310, durable;dur=41.870
 | Metric | Present on | Measures |
 | --- | --- | --- |
 | `exec` | Every request | Parsing, planning and execution: everything not counted below. |
-| `commit` | Graph writes | Applying the commit on the writer, including its turn behind other commits. |
+| `commit` | Graph writes | Preparing index maintenance and applying the commit until it is visible on the writer. |
 | `durable` | Graph writes that wait, and index creation or removal | Waiting for the WAL upload to object storage. A graph write sent with `X-Helix-Await-Durable: false` omits it. |
 
 The metrics never overlap, and the clock starts once the request body has fully

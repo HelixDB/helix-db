@@ -46,8 +46,8 @@ pub struct StorageReadUsage {
 /// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct CommitTimings {
-    /// Preparing and applying the commit until it is visible on the writer,
-    /// including its turn behind other commits.
+    /// Preparing index maintenance and applying the commit until it is
+    /// visible on the writer.
     pub commit: Option<std::time::Duration>,
     /// Waiting for the commit, or the writes the response rests on, to become
     /// durable in object storage.
