@@ -208,10 +208,12 @@ impl<'a, R: DbReadOps + Send + Sync> LabelSource<'a, R> {
             None => 0,
         };
         let layout = label_layout(reader).await?;
-        let members = label_members(reader, layout, kind, label, scope).await?;
-        let mut members = members.iter();
-        members.advance_to(first);
-        let mut in_bound = members.take_while(|id| *id <= upper);
+        let mut members = label_members(reader, layout, kind, label, scope).await?;
+        // Not `iter().advance_to(first)`: in roaring 0.11 it advances the
+        // next 2^32-id block to `first`'s low bits when `first`'s own block
+        // is empty, skipping that block's members below them.
+        members.remove_range(..first);
+        let mut in_bound = members.iter().take_while(|id| *id <= upper);
         let taken = in_bound
             .by_ref()
             .take(limits.max_entities().get())

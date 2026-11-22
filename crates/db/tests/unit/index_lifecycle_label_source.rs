@@ -214,6 +214,104 @@ async fn members_are_read_in_id_order_skipping_absent_rows_and_ids_above_the_bou
     assert_eq!(steps, 15);
 }
 
+/// A step after a cursor whose 2^32-id block holds no further member takes
+/// the next block's members from its first, not from the cursor's low bits,
+/// for nodes and edges; with a member left in the cursor's own block, that
+/// one comes first.
+#[tokio::test]
+async fn members_of_higher_id_blocks_are_read_from_their_first() {
+    const BLOCK: u64 = 1 << 32;
+    const AFTER: u64 = 4_000_000_000;
+    let scope = DataScope::LegacyUnscoped;
+    for kind in [IndexElementKind::Node, IndexElementKind::Edge] {
+        let db = test_db(&format!("label-source-high-blocks-{kind:?}")).await;
+        testing::put_source_row(&db, scope, kind, AFTER, &row("Other", 0)).await;
+        for id in [BLOCK + 7, BLOCK + 9] {
+            testing::put_source_row(&db, scope, kind, id, &row("User", 0)).await;
+        }
+        let upper = 3 * BLOCK;
+        let wide = limits(1024, 1 << 20);
+        // Two ids in a range of three: the step scans it.
+        let read = snapshot(&db).await;
+        assert!(
+            scans_range(
+                &read,
+                kind,
+                "User",
+                &progress(scope, kind, Some(AFTER), upper),
+                wide
+            )
+            .await
+        );
+        assert_eq!(
+            step(
+                &read,
+                kind,
+                "User",
+                &progress(scope, kind, Some(AFTER), upper),
+                wide
+            )
+            .await,
+            Some((vec![BLOCK + 7, BLOCK + 9], None)),
+            "{kind:?}"
+        );
+        // Spread across three blocks: the step reads by point.
+        for id in [AFTER + 5, BLOCK + 3_000, 2 * BLOCK + 1] {
+            testing::put_source_row(&db, scope, kind, id, &row("User", 0)).await;
+        }
+        let read = snapshot(&db).await;
+        let every = vec![
+            AFTER + 5,
+            BLOCK + 7,
+            BLOCK + 9,
+            BLOCK + 3_000,
+            2 * BLOCK + 1,
+        ];
+        assert!(
+            !scans_range(
+                &read,
+                kind,
+                "User",
+                &progress(scope, kind, Some(AFTER), upper),
+                wide
+            )
+            .await
+        );
+        assert_eq!(
+            step(
+                &read,
+                kind,
+                "User",
+                &progress(scope, kind, Some(AFTER), upper),
+                wide
+            )
+            .await,
+            Some((every.clone(), None)),
+            "{kind:?}"
+        );
+        // One member a step, each resuming after the last.
+        let mut after = Some(AFTER);
+        let mut taken = Vec::new();
+        while let Some((ids, paused)) = step(
+            &read,
+            kind,
+            "User",
+            &progress(scope, kind, after, upper),
+            limits(1, 1 << 20),
+        )
+        .await
+        {
+            taken.extend(ids);
+            let Some(paused) = paused else {
+                break;
+            };
+            after = Some(paused);
+        }
+        assert_eq!(taken, every, "{kind:?}");
+        db.close().await.expect("database closes");
+    }
+}
+
 /// What one step read, as [`admit`] drives it.
 struct Admitted {
     ids: Vec<u64>,

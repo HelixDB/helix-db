@@ -466,6 +466,59 @@ async fn an_oversized_row_of_the_label_still_blocks_the_build() {
     db.close().await.expect("database closes");
 }
 
+/// A build whose cursor ends up in a 2^32-id block that no longer holds a
+/// member (the member it stopped on left the label) still takes every
+/// member of the next block, those below the cursor's low bits included.
+#[tokio::test]
+async fn a_build_takes_every_member_above_two_to_the_thirty_second() {
+    const BLOCK: u64 = 1 << 32;
+    let db = test_db("label-source-high-ids").await;
+    let scope = DataScope::LegacyUnscoped;
+    let node = IndexElementKind::Node;
+    let mut sources = BTreeMap::new();
+    for (id, label) in [
+        (3, "Other"),
+        (4_000_000_000, "User"),
+        (BLOCK + 7, "User"),
+        (BLOCK + 9, "User"),
+        (BLOCK + 3_000, "User"),
+        (BLOCK + 4_000_000_000, "User"),
+        (2 * BLOCK + 1, "User"),
+    ] {
+        let properties = labelled(label, &format!("{id}@example.com"));
+        put_source(&db, scope, node, id, &properties).await;
+        sources.insert(id, properties);
+    }
+    let definition = email_index();
+    let (operation_id, index_id, generation) =
+        create_build(&db, scope, &definition, 3 * BLOCK).await;
+    let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+    let mut claim_sequence = 1;
+    let limits = batch_limits(1, 1 << 20, 1 << 20, 1 << 30);
+    drive_one_with_limits(&db, &driver, operation_id, &mut claim_sequence, limits).await;
+    let SecondaryBuildStage::Scan(progress) = build_stage(&db, operation_id).await else {
+        panic!("one of six members leaves more to scan");
+    };
+    assert_eq!(
+        progress.cursor,
+        Some(source_cursor(scope, node, 4_000_000_000))
+    );
+    // The member the cursor names leaves the label, emptying its block.
+    let before = sources[&4_000_000_000].clone();
+    let after = labelled("Other", "left@example.com");
+    mutate_source(&db, &driver, scope, node, 4_000_000_000, &before, &after)
+        .await
+        .expect("the write records its delta");
+    sources.insert(4_000_000_000, after);
+    let (scan_steps, end) =
+        drive_build(&db, &driver, operation_id, &mut claim_sequence, limits).await;
+    assert_eq!(end, CommittedOperationStep::Completed);
+    // One member a step: the second block's four and the third's one.
+    assert_eq!(scan_steps, 5);
+    assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources).await;
+    db.close().await.expect("database closes");
+}
+
 /// How a label's members lie among other labels' rows, and so how a step of
 /// 25 reads them ([`crate::index_lifecycle::label_source`]): two ids in
 /// three fill more than half a step's key range, which it scans; one in
