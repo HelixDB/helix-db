@@ -269,7 +269,8 @@
           {
             "group": "Agents",
             "pages": [
-              "foundry/agents/helix-mcp"
+              "foundry/agents/helix-mcp",
+              "foundry/agents/agent-memory"
             ]
           },
           {

@@ -111,6 +111,7 @@ Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickst
 
 ## Agents
 - [Use Foundry from your agent](https://docs.helix-db.com/foundry/agents/helix-mcp): Connect Claude Code, Codex or another MCP client to the Helix MCP to read and ask Helix Foundry ontologies, and to set them up with a confirmation for every change — Page type: Guide
+- [Give your agent a memory](https://docs.helix-db.com/foundry/agents/agent-memory): Use a Helix Foundry API source as your agent's memory: it sends notes through the Helix MCP, reads them back by keyword with helix_foundry_recall, and your ontologies turn them into entities and facts — Page type: Guide
 
 ## Workspace
 - [Members and roles](https://docs.helix-db.com/foundry/workspace/members-and-roles): See who is in a Helix Foundry workspace, invite people, and what owners, admins and members can do — Page type: Guide
