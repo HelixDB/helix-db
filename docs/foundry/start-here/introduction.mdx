@@ -1,11 +1,33 @@
 ---
 title: "What is Helix Foundry?"
-description: "Helix Foundry connects your company's data, drafts an ontology across it, and loads it into a Helix database you can explore"
+description: "Helix Foundry connects every system your company runs into one ontology, so your people and agents answer questions across them, with every answer cited to its source"
 sidebarTitle: "Introduction"
 pageType: "Concept"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="purple" size="sm">Concept</Badge></div>
+
+What your company knows is split across the systems it runs on: the database, billing,
+support, contracts and call notes. People spend their time hunting across them. Agents
+draft answers they can't finish. And revenue slips between the tools: a renewal at risk
+shows only when you read the invoice, the usage, the tickets and the last call together.
+
+Foundry connects every system you run into one ontology, so your people and agents make
+better calls, move faster and catch the revenue that slips between tools, with every
+answer cited to its source. It's open source, under Apache 2.0.
+
+- **Connected.** One graph across every system, with the same customer matched across
+  them.
+- **Cited.** Every answer traces to the row or quote it came from.
+- **Yours.** Open source. Run it on your own computer with the AI provider you choose,
+  or a local model.
+- **Fast.** Your agent sets it up with you through the
+  [Helix MCP](/foundry/agents/helix-mcp).
+
+Search finds what looks relevant. Foundry follows what's connected; see
+[Why an ontology instead of RAG](/foundry/start-here/ontology-vs-rag).
+
+## How it works
 
 Helix Foundry turns the tools your company runs on into one connected graph. Connect
 sources such as Stripe or your PostgreSQL database, send it your app's or agent's own
@@ -16,7 +38,9 @@ ontologies refresh when their data changes.
 
 Foundry runs at [foundry.helix-db.com](https://foundry.helix-db.com), and your agents
 reach it through the [Helix MCP](/foundry/agents/helix-mcp). Sign in with the account
-you use for Helix Cloud; your workspaces come with it.
+you use for Helix Cloud; your workspaces come with it. To run it on your own computer
+instead, start it from its
+[repository](https://github.com/helixdb/helix-foundry) with Docker Compose.
 
 <Frame caption="The whole path in two minutes: synced data, a generated draft, a load, the Explorer and a first answer.">
   <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/start-here/tour-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/start-here/tour.webm"></video>
@@ -108,5 +132,8 @@ generation attempt has a spending cap of its own.
   </Card>
   <Card title="Send data from your app" icon="code" href="/foundry/data/api-sources">
     Push pieces of data to an API source.
+  </Card>
+  <Card title="Run a pilot" icon="flag-checkered" href="/foundry/use-cases/run-a-pilot">
+    Answer five business questions on your own data.
   </Card>
 </CardGroup>
