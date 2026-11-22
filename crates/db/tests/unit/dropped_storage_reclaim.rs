@@ -2142,6 +2142,36 @@ async fn an_idle_store_reclaims_a_drop_by_itself() {
     db.close().await.expect("the writer closes");
 }
 
+/// Proves a writer that opens onto a stored entry needs no one to tell it:
+/// the open arms the entry, the background task looks at the store at once,
+/// and, the store staying idle, reclaims and retires it.
+#[tokio::test]
+async fn a_writer_that_opens_onto_an_entry_retires_it_by_itself() {
+    let token = ProcessLocalDatabaseToken::new("dropped-background-reopen").unwrap();
+    let db = open_quiet(token.clone()).await;
+    db.wait_for_background_migrations().await;
+    for seed in 0..48 {
+        add(&db, "Gone", seed).await;
+    }
+    create_index(&db, "Gone").await;
+    drop_index(&db, "Gone").await;
+    let entries = stored_entries(&db).await;
+    assert_eq!(entries.len(), 1);
+    db.close().await.expect("the writer closes");
+
+    let db = open_quiet(token).await;
+    assert_eq!(db.dropped_index_storage().unproven, 1);
+    assert!(owned_rows(&db).await > 0);
+    // Nothing happens in this process that the task could be told of.
+    retirer(&db)
+        .await
+        .run_in_background(GAP, Duration::from_millis(200));
+    retired(&db).await;
+    assert_eq!(db.dropped_index_storage(), DroppedIndexStorage::default());
+    assert_eq!(owned_rows(&db).await, 0);
+    db.close().await.expect("the writer closes");
+}
+
 /// Proves the background task reads object storage only when it is told of
 /// a change: with an entry whose proof tracks tables, or one that is
 /// quarantined, a store where nothing happens costs no request, and the
