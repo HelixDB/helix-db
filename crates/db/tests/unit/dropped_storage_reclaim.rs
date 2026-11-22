@@ -2264,9 +2264,20 @@ async fn a_store_whose_compactor_has_work_is_not_reclaimed() {
         retention_min_seq: Some(u64::MAX),
     };
     assert!(!registry.discardable(&job).is_empty());
+    // A reclaim shows in `.compactions` the moment it submits a compaction,
+    // seconds before a worker claims it and a row goes.
+    let submitted = || async {
+        admin(&db)
+            .read_compactions(None)
+            .await
+            .expect("the compactions read")
+            .map_or(0, |compactions| compactions.recent_compactions().count())
+    };
+    let before = submitted().await;
     let idle_after = Duration::from_millis(300);
     retirer(&db).await.run_in_background(GAP, idle_after);
     tokio::time::sleep(idle_after * 5).await;
+    assert_eq!(submitted().await, before);
     assert_eq!(stored_entries(&db).await.len(), 1);
     assert_eq!(owned_rows(&db).await, held);
 
@@ -2279,6 +2290,7 @@ async fn a_store_whose_compactor_has_work_is_not_reclaimed() {
         registry.filter_dropped();
         tokio::time::sleep(idle_after / 4).await;
     }
+    assert_eq!(submitted().await, before);
     assert_eq!(stored_entries(&db).await.len(), 1);
     assert_eq!(db.dropped_index_storage().tracking, 1);
     assert_eq!(owned_rows(&db).await, held);
