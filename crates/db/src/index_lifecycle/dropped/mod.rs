@@ -90,6 +90,8 @@
 //! reads, once for each scope they name, that scope's index records and, for
 //! vector entries, its partition mappings, and one metadata key per physical
 //! id. Every entry is new to a writer that opens, so an open pays that once.
+//! A quarantined entry is not armed, so every refresh pays it again for the
+//! scopes quarantined entries name, for as long as one is stored.
 //! Dropping a partitioned vector generation still costs one cleanup commit
 //! per partition, and its mappings stay until the entry retires. An entry
 //! lives as long as a table that held its rows when the proof started: the
