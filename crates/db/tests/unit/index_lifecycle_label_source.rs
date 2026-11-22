@@ -217,7 +217,7 @@ async fn members_are_read_in_id_order_skipping_absent_rows_and_ids_above_the_bou
 /// A step after a cursor whose 2^32-id block holds no further member takes
 /// the next block's members from its first, not from the cursor's low bits,
 /// for nodes and edges; with a member left in the cursor's own block, that
-/// one comes first.
+/// one comes first. Cursors at the blocks' edges take what follows them.
 #[tokio::test]
 async fn members_of_higher_id_blocks_are_read_from_their_first() {
     const BLOCK: u64 = 1 << 32;
@@ -289,6 +289,40 @@ async fn members_of_higher_id_blocks_are_read_from_their_first() {
             Some((every.clone(), None)),
             "{kind:?}"
         );
+        // Cursors at the blocks' edges.
+        for (after, members) in [
+            (None, every.clone()),
+            (Some(BLOCK - 1), every[1..].to_vec()),
+            (Some(BLOCK + 9), every[3..].to_vec()),
+            (Some(2 * BLOCK - 1), every[4..].to_vec()),
+        ] {
+            assert_eq!(
+                step(
+                    &read,
+                    kind,
+                    "User",
+                    &progress(scope, kind, after, upper),
+                    wide
+                )
+                .await,
+                Some((members, None)),
+                "{kind:?} after {after:?}"
+            );
+        }
+        for after in [2 * BLOCK + 1, upper] {
+            assert_eq!(
+                step(
+                    &read,
+                    kind,
+                    "User",
+                    &progress(scope, kind, Some(after), upper),
+                    wide
+                )
+                .await,
+                None,
+                "{kind:?} after {after}"
+            );
+        }
         // One member a step, each resuming after the last.
         let mut after = Some(AFTER);
         let mut taken = Vec::new();

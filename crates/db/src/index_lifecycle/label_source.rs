@@ -65,9 +65,10 @@ use crate::index_lifecycle::{IndexCursor, IndexElementKind, IndexEntityId, Sourc
 
 /// The most ids one `multi_get` reads. A step reads no chunk once it has
 /// read its input-byte limit, so it reads at most this many rows past that
-/// limit, whatever their sizes. The bound costs calls: a 50k-member label
-/// among 1M small rows built by point in 4.0 s, against 2.8 s at 64 ids and
-/// 2.45 s at 256, whose chunks read up to 256 rows past the limit.
+/// limit, whatever their sizes. The bound costs calls: a 50k-member label at
+/// every 20th of 1M rows of about 140 B, built by point on an m6id.16xlarge
+/// with local NVMe, took 4.0 s, against 2.8 s at 64 ids and 2.45 s at 256,
+/// whose chunks read up to 256 rows past the limit.
 const POINT_CHUNK_IDS: usize = 16;
 
 /// The ids a step reads before it knows how large the label's rows are: one
