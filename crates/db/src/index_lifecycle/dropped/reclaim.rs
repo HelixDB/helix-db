@@ -16,14 +16,17 @@
 //! the lowest id among them. So the smallest rewrite that covers a tracked
 //! table is:
 //!
-//! - for a table of a sorted run, that run alone, into itself;
+//! - for a table of a sorted run, that run, into itself;
 //! - for an L0 table, that table and every older L0 table, into a new run
 //!   above every other. The older tables go with it because rows in L0 must
 //!   stay newer than rows in any run.
 //!
 //! A reclaim plans exactly those ([`Plan`]) and submits them one at a time,
-//! planning again after each from what is then stored. It never reads or
-//! rewrites a run that holds no tracked table.
+//! planning again after each from what is then stored. Runs to rewrite that
+//! follow one another go in one compaction, into the oldest of them: the
+//! same bytes as rewriting each alone, and one run instead of several that
+//! the scheduler would merge right after. It never reads or rewrites a run
+//! that holds no tracked table.
 //!
 //! # When a run is worth rewriting
 //!
@@ -46,10 +49,9 @@
 //!
 //! # What a reclaim holds up
 //!
-//! A compaction of one sorted run takes one of the compactor's slots and
-//! that run. While it runs the scheduler cannot merge that run with others;
-//! a merge it has to wait for rewrites the same run, so it takes at least as
-//! long as what is left of the reclaim. Every other compaction goes on,
+//! A compaction of sorted runs takes one of the compactor's slots and those
+//! runs. While it runs the scheduler cannot merge them with others; a merge
+//! it has to wait for rewrites one of the same runs. Every other compaction goes on,
 //! those of L0 tables included, as long as a slot is free.
 //!
 //! Writes depend on one compaction only: the one that empties L0, since a
@@ -311,10 +313,10 @@ impl Layout {
                 .filter(|(source, _)| sources.contains(source))
                 .map(|(_, laid)| laid.table)
                 .collect(),
-            Rewrite::Run { id, .. } => self
+            Rewrite::Runs { ids, .. } => self
                 .runs
                 .iter()
-                .filter(|(run, _)| run == id)
+                .filter(|(run, _)| ids.contains(run))
                 .flat_map(|(_, tables)| tables.iter().map(|laid| laid.table))
                 .collect(),
         }
@@ -359,9 +361,11 @@ pub(crate) enum Rewrite {
         bytes: u64,
         dropped_bytes: u64,
     },
-    /// This sorted run into itself.
-    Run {
-        id: u32,
+    /// These sorted runs, which follow one another, newest first, into the
+    /// one of them with the lowest id. One run is rewritten into itself.
+    Runs {
+        ids: Vec<u32>,
+        into: u32,
         bytes: u64,
         dropped_bytes: u64,
     },
@@ -377,7 +381,7 @@ impl Rewrite {
                 dropped_bytes,
                 ..
             }
-            | Self::Run {
+            | Self::Runs {
                 bytes,
                 dropped_bytes,
                 ..
@@ -389,25 +393,43 @@ impl Rewrite {
     fn sources(&self) -> Vec<SourceId> {
         match self {
             Self::L0 { sources, .. } => sources.clone(),
-            Self::Run { id, .. } => vec![SourceId::SortedRun(*id)],
+            Self::Runs { ids, .. } => ids.iter().copied().map(SourceId::SortedRun).collect(),
         }
     }
+}
+
+/// What a reclaimer does with one sorted run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// It holds no tracked table.
+    Clean,
+    /// It holds dropped rows and is rewritten.
+    Rewritten,
+    /// It holds dropped rows and is not worth rewriting for them.
+    Left,
 }
 
 /// What a reclaim would compact, and what it would leave.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct Plan {
     /// The compactions, in the order they are submitted: L0 first, then the
-    /// sorted runs, the one with the most dropped bytes first.
+    /// sorted runs, those with the most dropped bytes first.
     pub(crate) rewrites: Vec<Rewrite>,
     /// Dropped rows in sorted runs the reclaimer does not rewrite.
     pub(crate) left: Option<LeftInPlace>,
 }
 
 impl Plan {
-    /// The smallest set of compactions that rewrites every table of `layout`
-    /// among `tracked`, less the sorted runs `reclaimer` does not rewrite.
-    /// `tracked` gives the estimated bytes of dropped rows in each table.
+    /// The compactions that rewrite every table of `layout` among `tracked`
+    /// and no sorted run without one, less the sorted runs `reclaimer` does
+    /// not rewrite. `tracked` gives the estimated bytes of dropped rows in
+    /// each table.
+    ///
+    /// Runs to rewrite that follow one another go in one compaction. That
+    /// reads and writes the same bytes as rewriting each by itself, and
+    /// leaves the scheduler nothing to merge among them: a run rewritten
+    /// alone shrinks into the size of its neighbours, and the scheduler
+    /// would rewrite them all once more.
     pub(crate) fn of(
         layout: &Layout,
         tracked: &HashMap<TableId, u64>,
@@ -429,37 +451,53 @@ impl Plan {
                 bytes: tables.iter().map(|(_, laid)| laid.bytes).sum(),
                 dropped_bytes: dropped(&mut tables.iter().map(|(_, laid)| laid)),
             });
-        let (mut worth, left): (Vec<_>, Vec<_>) = layout
+        let runs = layout
             .runs
             .iter()
-            .filter(|(_, tables)| tables.iter().any(|laid| tracked.contains_key(&laid.table)))
             .map(|(id, tables)| {
-                (
-                    *id,
-                    tables.iter().map(|laid| laid.bytes).sum::<u64>(),
-                    dropped(&mut tables.iter()),
-                )
+                let bytes = tables.iter().map(|laid| laid.bytes).sum::<u64>();
+                let dropped_bytes = dropped(&mut tables.iter());
+                let verdict = match tables.iter().any(|laid| tracked.contains_key(&laid.table)) {
+                    false => Verdict::Clean,
+                    true if reclaimer.rewrites(bytes, dropped_bytes) => Verdict::Rewritten,
+                    true => Verdict::Left,
+                };
+                (*id, bytes, dropped_bytes, verdict)
             })
-            .partition(|(_, bytes, dropped_bytes)| reclaimer.rewrites(*bytes, *dropped_bytes));
-        worth.sort_unstable_by_key(|(id, _, dropped_bytes)| {
-            (std::cmp::Reverse(*dropped_bytes), *id)
-        });
+            .collect::<Vec<_>>();
+        let mut together = runs
+            .chunk_by(|(.., newer), (.., older)| {
+                *newer == Verdict::Rewritten && *older == Verdict::Rewritten
+            })
+            .filter(|runs| {
+                runs.iter()
+                    .all(|(.., verdict)| *verdict == Verdict::Rewritten)
+            })
+            .filter_map(|runs| {
+                Some(Rewrite::Runs {
+                    ids: runs.iter().map(|(id, ..)| *id).collect(),
+                    into: runs.iter().map(|(id, ..)| *id).min()?,
+                    bytes: runs.iter().map(|(_, bytes, ..)| bytes).sum(),
+                    dropped_bytes: runs
+                        .iter()
+                        .map(|(_, _, dropped_bytes, _)| dropped_bytes)
+                        .sum(),
+                })
+            })
+            .collect::<Vec<_>>();
+        together.sort_by_key(|rewrite| std::cmp::Reverse(rewrite.bytes().1));
+        let left = runs
+            .iter()
+            .filter(|(.., verdict)| *verdict == Verdict::Left)
+            .collect::<Vec<_>>();
         Self {
-            rewrites: l0
-                .into_iter()
-                .chain(
-                    worth
-                        .into_iter()
-                        .map(|(id, bytes, dropped_bytes)| Rewrite::Run {
-                            id,
-                            bytes,
-                            dropped_bytes,
-                        }),
-                )
-                .collect(),
+            rewrites: l0.into_iter().chain(together).collect(),
             left: (!left.is_empty()).then(|| LeftInPlace {
-                dropped_bytes: left.iter().map(|(_, _, dropped_bytes)| dropped_bytes).sum(),
-                run_bytes: left.iter().map(|(_, bytes, _)| bytes).sum(),
+                dropped_bytes: left
+                    .iter()
+                    .map(|(_, _, dropped_bytes, _)| dropped_bytes)
+                    .sum(),
+                run_bytes: left.iter().map(|(_, bytes, ..)| bytes).sum(),
                 runs: left.len(),
             }),
         }
@@ -606,10 +644,10 @@ impl Retirer {
                     .chain(active.iter().filter_map(|c| c.spec().destination()))
                     .max()
                     .map_or(0, |id| id + 1),
-                Rewrite::Run { .. } if sources.iter().any(in_use) => {
+                Rewrite::Runs { .. } if sources.iter().any(in_use) => {
                     return Ok(incomplete(ReclaimObstacle::Busy));
                 }
-                Rewrite::Run { id, .. } => *id,
+                Rewrite::Runs { into, .. } => *into,
             };
             let (bytes, dropped) = rewrite.bytes();
             tracing::info!(

@@ -29,12 +29,18 @@ fn tracked(tables: &[(u128, u64)]) -> HashMap<TableId, u64> {
         .collect()
 }
 
-fn run(id: u32, bytes: u64, dropped_bytes: u64) -> Rewrite {
-    Rewrite::Run {
-        id,
+/// A rewrite of `ids`, newest first, into the lowest of them.
+fn runs(ids: &[u32], bytes: u64, dropped_bytes: u64) -> Rewrite {
+    Rewrite::Runs {
+        ids: ids.to_vec(),
+        into: *ids.iter().min().expect("a rewrite reads a run"),
         bytes,
         dropped_bytes,
     }
+}
+
+fn run(id: u32, bytes: u64, dropped_bytes: u64) -> Rewrite {
+    runs(&[id], bytes, dropped_bytes)
 }
 
 const IDLE: Reclaimer = Reclaimer::IdleStore(Worth::WRITER);
@@ -251,11 +257,63 @@ fn a_plan_leaves_a_run_that_is_not_worth_rewriting_unless_a_caller_asks() {
     assert_eq!(
         Plan::of(&layout, &tracked, Reclaimer::Caller),
         Plan {
-            // Most dropped bytes first.
+            // A caller is refused none of them, and they follow one
+            // another: one compaction.
+            rewrites: vec![runs(&[7, 3, 0], 50 * GIB, GIB + 4 * MIB)],
+            left: None,
+        }
+    );
+}
+
+#[test]
+fn a_plan_rewrites_runs_that_follow_one_another_in_one_compaction() {
+    // Newest first. Runs 9 and 8 hold dropped rows and follow one another;
+    // run 7 holds none; runs 5, 4 and 2 hold some, but 4 is not worth its
+    // rewrite; run 0 holds none.
+    let layout = Layout {
+        l0: vec![],
+        runs: vec![
+            (9, vec![laid(90, 100 * MIB)]),
+            (8, vec![laid(80, 300 * MIB), laid(81, 300 * MIB)]),
+            (7, vec![laid(70, GIB)]),
+            (5, vec![laid(50, 2 * GIB)]),
+            (4, vec![laid(40, 20 * GIB)]),
+            (2, vec![laid(20, 4 * GIB)]),
+            (0, vec![laid(1, 30 * GIB)]),
+        ],
+    };
+    let tracked = tracked(&[
+        (90, 10 * MIB),
+        (81, 20 * MIB),
+        (50, GIB),
+        (40, GIB),
+        (20, 3 * GIB),
+    ]);
+    assert_eq!(
+        Plan::of(&layout, &tracked, IDLE),
+        Plan {
             rewrites: vec![
-                run(3, 8 * GIB, GIB),
-                run(0, 40 * GIB, 3 * MIB),
-                run(7, 2 * GIB, MIB)
+                // A run left in place stands between 5 and 2 as a run with
+                // no dropped row would: each is rewritten into itself.
+                run(2, 4 * GIB, 3 * GIB),
+                run(5, 2 * GIB, GIB),
+                // Into the lowest id of the two.
+                runs(&[9, 8], 700 * MIB, 30 * MIB),
+            ],
+            left: Some(LeftInPlace {
+                dropped_bytes: GIB,
+                run_bytes: 20 * GIB,
+                runs: 1,
+            }),
+        }
+    );
+    // A caller rewrites run 4 too, which joins its neighbours.
+    assert_eq!(
+        Plan::of(&layout, &tracked, Reclaimer::Caller),
+        Plan {
+            rewrites: vec![
+                runs(&[5, 4, 2], 26 * GIB, 5 * GIB),
+                runs(&[9, 8], 700 * MIB, 30 * MIB),
             ],
             left: None,
         }
@@ -263,13 +321,17 @@ fn a_plan_leaves_a_run_that_is_not_worth_rewriting_unless_a_caller_asks() {
 }
 
 #[test]
-fn a_plan_orders_runs_by_the_bytes_they_give_back() {
+fn a_plan_orders_its_compactions_of_runs_by_the_bytes_they_give_back() {
+    // Four runs with dropped rows, kept apart by runs with none.
     let layout = Layout {
         l0: vec![],
         runs: vec![
             (9, vec![laid(90, GIB)]),
+            (8, vec![laid(80, GIB)]),
             (6, vec![laid(60, GIB)]),
+            (5, vec![laid(50, GIB)]),
             (4, vec![laid(40, GIB)]),
+            (3, vec![laid(30, GIB)]),
             (2, vec![laid(20, GIB)]),
         ],
     };
@@ -280,10 +342,10 @@ fn a_plan_orders_runs_by_the_bytes_they_give_back() {
             IDLE
         )
         .rewrites,
-        // The two that give back the same go by id.
+        // The two that give back the same stay in the order of the runs.
         vec![
-            run(4, GIB, 9),
             run(6, GIB, 9),
+            run(4, GIB, 9),
             run(2, GIB, 7),
             run(9, GIB, 5)
         ]
@@ -366,6 +428,15 @@ fn a_rewrite_reads_what_it_names() {
     assert_eq!(l0.bytes(), (30, 4));
     assert_eq!(run(7, 50, 6).sources(), vec![SourceId::SortedRun(7)]);
     assert_eq!(run(7, 50, 6).bytes(), (50, 6));
+    assert_eq!(
+        runs(&[7, 5, 4], 90, 8).sources(),
+        vec![
+            SourceId::SortedRun(7),
+            SourceId::SortedRun(5),
+            SourceId::SortedRun(4)
+        ]
+    );
+    assert_eq!(runs(&[7, 5, 4], 90, 8).bytes(), (90, 8));
 }
 
 #[test]
@@ -380,6 +451,10 @@ fn a_layout_knows_the_tables_a_rewrite_reads_and_whether_any_is_stored() {
     let tables = |ids: &[u128]| ids.iter().copied().map(TableId).collect::<HashSet<_>>();
     assert_eq!(layout.tables_of(&run(4, 2 * GIB, 0)), tables(&[40, 41]));
     assert_eq!(layout.tables_of(&run(0, GIB, 0)), tables(&[1]));
+    assert_eq!(
+        layout.tables_of(&runs(&[4, 0], 3 * GIB, 0)),
+        tables(&[40, 41, 1])
+    );
     // A run the layout does not have reads nothing.
     assert_eq!(layout.tables_of(&run(9, GIB, 0)), tables(&[]));
     assert_eq!(

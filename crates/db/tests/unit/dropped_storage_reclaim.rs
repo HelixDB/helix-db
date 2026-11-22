@@ -3127,7 +3127,8 @@ async fn a_reclaim_starts_nothing_that_a_compaction_in_flight_is_rewriting() {
 }
 
 /// Proves a caller's reclaim goes on beside a compaction that reads none of
-/// its tables.
+/// its tables, and keeps its slot while that compaction is the one of the
+/// L0 tables: with every slot taken it has nothing to give way to.
 #[tokio::test]
 async fn a_callers_reclaim_runs_beside_a_compaction_of_other_tables() {
     let (db, prefixes) = two_runs_and_a_drop("dropped-reclaim-beside").await;
@@ -3155,11 +3156,20 @@ async fn a_callers_reclaim_runs_beside_a_compaction_of_other_tables() {
         ))
         .await
         .expect("the compaction is submitted");
-    let outcome = retirer(&db)
-        .await
-        .reclaim(tokio::time::Instant::now() + WAIT, Reclaimer::Caller)
-        .await
-        .expect("the reclaim runs");
+    // Two slots, both taken once the reclaim submits its own compaction,
+    // and L0 holds tables: but they are the ones being compacted.
+    let HelixStorage::Writer(shared) = db.storage() else {
+        panic!("the contract opens a writer");
+    };
+    let outcome = Retirer::new(
+        Arc::clone(shared),
+        db.inner.storage.path(),
+        Arc::clone(db.inner.storage.object_store()),
+        2,
+    )
+    .reclaim(tokio::time::Instant::now() + WAIT, Reclaimer::Caller)
+    .await
+    .expect("the reclaim runs");
     assert!(
         matches!(
             outcome,
