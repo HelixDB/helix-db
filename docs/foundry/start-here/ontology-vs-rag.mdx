@@ -9,17 +9,18 @@ pageType: "Concept"
 
 Search finds what looks relevant. Foundry follows what's connected.
 
-[Retrieval-augmented generation](/learn/ai-memory/what-is-rag) (RAG) answers a question by finding the passages that
-look most like it and handing them to a model. That works when the answer sits in a
-passage. Most business questions don't: their answer is spread across systems, and
-only the links between records hold it. This page explains what Foundry's ontology adds.
+[Retrieval-augmented generation](/learn/ai-memory/what-is-rag) (RAG) answers a question
+by finding the passages that look most like it and handing them to a model. That works
+when the answer sits in a passage. Most business questions don't: their answer is
+spread across tables and documents, and only the links between records hold it. This
+page explains what Foundry's ontology adds.
 
 ## Questions that span systems
 
 Take "Which renewals are at risk in the next 90 days, and why?" on the
 [sample company](/foundry/use-cases/sample-company#renewal-risk). The answer needs a
-subscription's term end from the database, its unpaid invoice from billing, a fall in
-usage, two open tickets, and a call note that says the champion is leaving. Few of
+subscription's term end, its unpaid invoice, a fall in usage and two open tickets, from
+four tables, and a call note that says the champion is leaving. Few of
 those rows contain the word "renewal", and none of them says "at risk".
 
 Search ranks passages by how close they are to the question, so it returns the ones
@@ -30,10 +31,9 @@ its calls. It reads what is connected, whether or not it looks like the question
 | | Search over passages | Foundry's ontology |
 | --- | --- | --- |
 | What it reads | The passages most like the question | The records the question's types and links reach |
-| Counts and totals | What the passages it found happen to mention | Queries over every record of a type |
+| Counts and totals | What the passages it found happen to mention | Queries over the records of a type, within read limits |
 | The same customer in two systems | Two unrelated passages | One entity, matched by its key, email or ID |
 | Where an answer came from | The passages it was given | The row or quote behind each value and link |
-| Two sources that disagree | Whichever passage ranks higher | A review for a person to settle |
 
 ## One entity across sources
 
@@ -57,8 +57,8 @@ Each value and link a load writes keeps where it came from: a table row, or a qu
 a document. An entity's page shows each property with the row or quote that states it.
 The [Analyst](/foundry/ask/ask-questions) cites each record, row, quote and rule it
 used, and your agents get the same citations through the
-[Helix MCP](/foundry/agents/query-from-agents). A person can check any claim in one
-click, and an agent can show its work.
+[Helix MCP](/foundry/agents/query-from-agents). A person can open the source of a
+claim from the answer, and an agent can show its work.
 
 A version's rules derive facts, such as the sample's `renewal_due`, and an entity's
 **Derived** tab says why each one holds.
