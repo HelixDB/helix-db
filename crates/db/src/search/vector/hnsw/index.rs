@@ -1011,11 +1011,11 @@ impl<D: Distance> VectorIndex<D> {
 
     /// Batch-loads layer-specific items without overwriting staged cache state.
     ///
-    /// Clears `batch`, then fills it with the requested nodes that have an
-    /// item, omitting absent nodes and deduplicating physical reads. Upper
-    /// layers may use validated hot rows, while layer zero resolves opaque
-    /// canonical payload tokens through typed storage. A caller reusing one
-    /// batch across lookups allocates only when a lookup outgrows it.
+    /// Clears `batch`, then fills it with the item of each requested node in
+    /// request order, none for an absent node, deduplicating physical reads.
+    /// Upper layers may use validated hot rows, while layer zero resolves
+    /// opaque canonical payload tokens through typed storage. A caller reusing
+    /// one batch across lookups allocates only when a lookup outgrows it.
     pub(in crate::search::vector) async fn get_items_for_layer_cached_batch(
         &self,
         txn: &(impl DbReadOps + Send + Sync),
@@ -1038,25 +1038,34 @@ impl<D: Distance> VectorIndex<D> {
 
         for &node_id in node_ids {
             match mutation_cache.item(layer, node_id) {
-                Some(Some(item)) => {
-                    batch.found.insert(node_id, item);
-                }
-                Some(None) => {}
+                Some(item) => batch.found.push(item),
                 None => {
+                    batch.found.push(None);
                     if batch.seen_missing.insert(node_id) {
                         batch.missing.push(node_id);
                     }
                 }
             }
         }
+        if batch.missing.is_empty() {
+            return Ok(());
+        }
         self.load_uncached_items_for_layer(
             txn,
             layer,
             &batch.missing,
             mutation_cache,
-            &mut batch.found,
+            &mut batch.loaded,
         )
-        .await
+        .await?;
+        // Only a cache miss can have been read, and a cached item is never
+        // none where its node was read.
+        for (found, node_id) in batch.found.iter_mut().zip(node_ids) {
+            if found.is_none() {
+                *found = batch.loaded.get(node_id).cloned();
+            }
+        }
+        Ok(())
     }
 
     /// Reads unique cache-missed items with one bounded I/O chain and caches them.
@@ -3125,7 +3134,8 @@ mod tests {
             .unwrap();
 
         let mut single_cache = MutationOpCache::<Cosine>::default();
-        for node_id in node_ids {
+        assert_eq!(batch_items.found.len(), node_ids.len());
+        for (node_id, batch_item) in node_ids.into_iter().zip(&batch_items.found) {
             let single = index
                 .get_item_for_layer_cached(&txn, 0, node_id, &mut single_cache)
                 .await
@@ -3133,14 +3143,14 @@ mod tests {
 
             match single {
                 Some(single_item) => {
-                    let batch_item = batch_items
-                        .get(node_id)
+                    let batch_item = batch_item
+                        .as_deref()
                         .expect("batch fetch should return every item returned by single fetch");
                     assert_cosine_items_match(single_item.as_ref(), batch_item);
                 }
                 None => {
                     assert!(
-                        !batch_items.contains(node_id),
+                        batch_item.is_none(),
                         "batch fetch should omit missing node {node_id}"
                     );
                     assert!(
@@ -3312,7 +3322,8 @@ mod tests {
             .unwrap();
 
         let mut single_cache = MutationOpCache::<Cosine>::default();
-        for node_id in node_ids {
+        assert_eq!(batch_items.found.len(), node_ids.len());
+        for (node_id, batch_item) in node_ids.into_iter().zip(&batch_items.found) {
             let single = index
                 .get_item_for_layer_cached(&txn, 2, node_id, &mut single_cache)
                 .await
@@ -3320,14 +3331,14 @@ mod tests {
 
             match single {
                 Some(single_item) => {
-                    let batch_item = batch_items.get(node_id).expect(
+                    let batch_item = batch_item.as_deref().expect(
                         "batch fetch should return every upper item returned by single fetch",
                     );
                     assert_cosine_items_match(single_item.as_ref(), batch_item);
                 }
                 None => {
                     assert!(
-                        !batch_items.contains(node_id),
+                        batch_item.is_none(),
                         "batch fetch should omit missing upper node {node_id}"
                     );
                     assert!(
@@ -3338,8 +3349,9 @@ mod tests {
             }
         }
 
-        assert_cosine_items_match(&cached_item, batch_items.get(11).unwrap());
-        assert_cosine_items_match(&pending_item, batch_items.get(12).unwrap());
+        // Requested as `[11, 12, 13, 12, 11]`.
+        assert_cosine_items_match(&cached_item, batch_items.found[0].as_deref().unwrap());
+        assert_cosine_items_match(&pending_item, batch_items.found[1].as_deref().unwrap());
     }
 
     #[test]

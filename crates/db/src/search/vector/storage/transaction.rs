@@ -420,9 +420,12 @@ impl FinalVectorWriteKind {
 }
 
 /// Last-write-wins map plus final-key order and cached exact byte accounting.
+///
+/// The map is hashed rather than ordered: every staged write looks its key
+/// up, a plan sorts the keys it takes, and nothing reads the map in key order.
 #[derive(Default)]
 struct VectorWriteState {
-    writes: BTreeMap<Bytes, FinalVectorWrite>,
+    writes: foldhash::HashMap<Bytes, FinalVectorWrite>,
     writes_by_revision: BTreeMap<u64, Bytes>,
     encoded_bytes: u128,
     revision: u64,

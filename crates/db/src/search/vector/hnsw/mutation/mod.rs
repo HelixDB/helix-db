@@ -1085,12 +1085,17 @@ impl<D: Distance> VectorIndex<D> {
                 neighbor_items,
             )
             .await?;
+            // The batch holds the unscored neighbors in frontier order.
+            let mut unscored_items = neighbor_items.found.iter();
             newly_admitted_neighbors.clear();
             for &neighbor_id in frontier.iter() {
                 let score = match beam_distances.memoized(layer, neighbor_id) {
                     Some(score) => score,
                     None => {
-                        let Some(neighbor_item) = neighbor_items.get(neighbor_id) else {
+                        let Some(neighbor_item) = unscored_items
+                            .next()
+                            .expect("one batched lookup per unscored neighbor")
+                        else {
                             continue;
                         };
                         let score = D::distance(query, neighbor_item);
@@ -1193,8 +1198,8 @@ impl<D: Distance> VectorIndex<D> {
             self.get_items_for_layer_cached_batch(txn, layer, frontier, mutation_cache, items)
                 .await?;
             let mut changed = false;
-            for &neighbor_id in frontier.iter() {
-                let Some(item) = items.get(neighbor_id) else {
+            for (&neighbor_id, item) in frontier.iter().zip(&items.found) {
+                let Some(item) = item else {
                     continue;
                 };
                 let distance = Candidate::try_new(neighbor_id, D::distance(query, item))?.score();
@@ -1241,10 +1246,13 @@ impl<D: Distance> VectorIndex<D> {
         );
         self.get_items_for_layer_cached_batch(txn, layer, candidate_ids, mutation_cache, items)
             .await?;
+        // Zipping stops at the last hydrated candidate.
         select_diverse(
             query,
-            candidates,
-            &|node_id| items.get(node_id),
+            candidates
+                .iter()
+                .copied()
+                .zip(items.found.iter().map(Option::as_deref)),
             maximum_neighbors,
         )
     }
@@ -1652,7 +1660,7 @@ impl<D: Distance> VectorIndex<D> {
             node_ids: candidate_neighbors,
             frontier: hydrate,
             items,
-            ranked: distances,
+            link_ranked: distances,
             rejected,
             ..
         } = scratch;
@@ -1676,36 +1684,42 @@ impl<D: Distance> VectorIndex<D> {
             hydrate.extend_from_slice(to_neighbors);
             self.get_items_for_layer_cached_batch(txn, layer, hydrate, mutation_cache, items)
                 .await?;
-            match items.get(to_node) {
-                Some(to_item) => {
+            // The batch holds the destination, then its neighbors in row
+            // order, so each candidate keeps its position to find its item
+            // once ranked.
+            match items.found.split_first() {
+                Some((Some(to_item), neighbor_items)) => {
                     distances.clear();
-                    for &neighbor_id in to_neighbors.iter() {
+                    for (position, (&neighbor_id, neighbor_item)) in
+                        to_neighbors.iter().zip(neighbor_items).enumerate()
+                    {
                         if neighbor_id == from_node {
-                            distances.push(Candidate::try_new(
-                                neighbor_id,
-                                D::distance(to_item, from_item),
-                            )?);
+                            distances.push((
+                                Candidate::try_new(neighbor_id, D::distance(to_item, from_item))?,
+                                position,
+                            ));
                             continue;
                         }
-                        let Some(neighbor_item) = items.get(neighbor_id) else {
+                        let Some(neighbor_item) = neighbor_item else {
                             continue;
                         };
-                        distances.push(Candidate::try_new(
-                            neighbor_id,
-                            D::distance(to_item, neighbor_item),
-                        )?);
+                        distances.push((
+                            Candidate::try_new(neighbor_id, D::distance(to_item, neighbor_item))?,
+                            position,
+                        ));
                     }
                     // Neighbors are unique, so an unstable sort orders them
-                    // exactly as a stable one would.
+                    // exactly as a stable one would, and never by position.
                     distances.sort_unstable();
                     selected = Some(select_diverse(
                         to_item,
-                        distances,
-                        &|node_id| items.get(node_id),
+                        distances.iter().map(|&(candidate, position)| {
+                            (candidate, neighbor_items[position].as_deref())
+                        }),
                         maximum_neighbors,
                     )?);
                 }
-                None => to_neighbors.truncate(maximum_neighbors),
+                Some((None, _)) | None => to_neighbors.truncate(maximum_neighbors),
             }
         }
 
@@ -2097,10 +2111,7 @@ impl<D: Distance> VectorIndex<D> {
             .await?;
         Ok(RelinkCandidates {
             layer,
-            items: node_ids
-                .into_iter()
-                .map(|node_id| (node_id, loaded.remove(node_id)))
-                .collect(),
+            items: node_ids.into_iter().zip(loaded.found).collect(),
         })
     }
 
@@ -2234,8 +2245,9 @@ impl<D: Distance> VectorIndex<D> {
             distances.sort_unstable();
             selected = Some(select_diverse(
                 neighbor_item.as_ref(),
-                distances,
-                &|node_id| items.get(&node_id).map(|item| item.as_ref()),
+                distances
+                    .iter()
+                    .map(|&candidate| (candidate, items.get(&candidate.node_id).map(Arc::as_ref))),
                 maximum_neighbors,
             )?);
         }
@@ -2288,8 +2300,9 @@ impl<D: Distance> VectorIndex<D> {
                 distances.sort_unstable();
                 reverse_selected = Some(select_diverse(
                     reverse_item.as_ref(),
-                    distances,
-                    &|node_id| items.get(&node_id).map(|item| item.as_ref()),
+                    distances.iter().map(|&candidate| {
+                        (candidate, items.get(&candidate.node_id).map(Arc::as_ref))
+                    }),
                     maximum_neighbors,
                 )?);
             }
@@ -2317,25 +2330,30 @@ pub(in crate::search::vector) struct RelinkCandidates<D: Distance> {
     items: HashMap<NodeId, Option<Arc<Item<'static, D>>>>,
 }
 
-/// Items of the nodes one batched lookup found, reused across lookups.
+/// Items one batched lookup found, reused across lookups.
 ///
 /// [`VectorIndex::get_items_for_layer_cached_batch`] clears and refills it,
-/// so it holds exactly the requested nodes that have an item at the layer.
-/// Absent nodes are omitted, and a node requested twice is held once.
+/// so `found` holds one entry per requested node, in request order: its item,
+/// or none when it has no item at the layer. A caller pairs a node with its
+/// item by position. That is deliberate: the lookup runs per scored node, and
+/// a map keyed by node would be filled, probed, and cleared for every one.
 #[derive(Debug)]
 pub(in crate::search::vector) struct ItemBatch<D: Distance> {
-    pub(super) found: foldhash::HashMap<NodeId, Arc<Item<'static, D>>>,
+    pub(super) found: Vec<Option<Arc<Item<'static, D>>>>,
     /// Unique cache misses of the current lookup, in request order.
     pub(super) missing: Vec<NodeId>,
     pub(super) seen_missing: foldhash::HashSet<NodeId>,
+    /// Items the current lookup read for its cache misses.
+    pub(super) loaded: foldhash::HashMap<NodeId, Arc<Item<'static, D>>>,
 }
 
 impl<D: Distance> Default for ItemBatch<D> {
     fn default() -> Self {
         Self {
-            found: foldhash::HashMap::default(),
+            found: Vec::new(),
             missing: Vec::new(),
             seen_missing: foldhash::HashSet::default(),
+            loaded: foldhash::HashMap::default(),
         }
     }
 }
@@ -2346,36 +2364,12 @@ impl<D: Distance> ItemBatch<D> {
         self.found.clear();
         self.missing.clear();
         self.seen_missing.clear();
-    }
-
-    /// Returns the item found for `node_id`.
-    pub(in crate::search::vector) fn get(&self, node_id: NodeId) -> Option<&Item<'static, D>> {
-        self.found.get(&node_id).map(Arc::as_ref)
-    }
-
-    /// Takes the item found for `node_id` out of the batch.
-    pub(in crate::search::vector) fn remove(
-        &mut self,
-        node_id: NodeId,
-    ) -> Option<Arc<Item<'static, D>>> {
-        self.found.remove(&node_id)
-    }
-
-    /// Returns whether an item was found for `node_id`.
-    #[cfg(test)]
-    pub(in crate::search::vector) fn contains(&self, node_id: NodeId) -> bool {
-        self.found.contains_key(&node_id)
-    }
-
-    /// Returns how many requested nodes have an item.
-    #[cfg(test)]
-    pub(in crate::search::vector) fn len(&self) -> usize {
-        self.found.len()
+        self.loaded.clear();
     }
 
     /// Returns whether no requested node has an item.
     pub(in crate::search::vector) fn is_empty(&self) -> bool {
-        self.found.is_empty()
+        self.found.iter().all(Option::is_none)
     }
 }
 
@@ -2414,6 +2408,9 @@ pub(in crate::search::vector) struct MutationScratch<D: Distance> {
     node_ids: Vec<NodeId>,
     /// Distance-ranked candidates of one selection.
     ranked: Vec<Candidate>,
+    /// Distance-ranked candidates of one link's pruning, each with its
+    /// position among the row's neighbors.
+    link_ranked: Vec<(Candidate, usize)>,
     /// Neighbors one link's pruning dropped.
     rejected: Vec<NodeId>,
     /// Items one relink selection scores.
@@ -2438,6 +2435,7 @@ impl<D: Distance> Default for MutationScratch<D> {
             neighbors: Vec::new(),
             node_ids: Vec::new(),
             ranked: Vec::new(),
+            link_ranked: Vec::new(),
             rejected: Vec::new(),
             scored: foldhash::HashMap::default(),
             unscored: Vec::new(),
@@ -2477,10 +2475,12 @@ impl<D: Distance> MutationScratch<D> {
                     found,
                     missing,
                     seen_missing,
+                    loaded,
                 },
             neighbors,
             node_ids,
             ranked,
+            link_ranked,
             rejected,
             scored,
             unscored,
@@ -2498,9 +2498,11 @@ impl<D: Distance> MutationScratch<D> {
             found,
             missing,
             seen_missing,
+            loaded,
             neighbors,
             node_ids,
             ranked,
+            link_ranked,
             rejected,
             scored,
             unscored,
@@ -2750,20 +2752,32 @@ impl Touched for CachedNeighbor {
 
 /// Cached values of one kind, ordered from least to most recently used.
 ///
-/// A touch appends `(touch, key)` to the order instead of moving the key's
-/// earlier entry, which goes stale: an entry is current exactly while its
-/// value still records `touch`. The order stays sorted by `(touch, key)`, its
-/// front stays current, and it holds at most two entries per value in an
-/// allocation of at most four per value (four while empty). So
-/// [`Self::oldest`] returns what the first element of an ordered set of
-/// current entries would, and a touch costs a hash update and an append,
-/// amortized, instead of an ordered-set removal and insertion. Stale entries
-/// leave the front as they reach it, and all at once when the order would
-/// outgrow either bound.
+/// The order is settled lazily. `order` lists `(touch, key)` sorted, as of
+/// the last time it was rebuilt from the values, and `horizon` is the newest
+/// entry it then held. A touch past the horizon, which is every touch unless
+/// another namespace renumbered the shared sequence, only stamps its value:
+/// the value's earlier entry goes stale, an entry being current exactly while
+/// its value still records `touch`, and its new place is implied, since every
+/// current entry outside `order` sorts after the horizon. The front of
+/// `order` stays current, so [`Self::oldest`] returns what the first element
+/// of an ordered set of current entries would. When the front goes stale,
+/// stale entries leave until a current one leads, and once none is left the
+/// order is rebuilt by sorting every value. A rebuild follows at least as
+/// many touches, insertions, and removals as it sorts values, so a touch
+/// costs one hash update and an amortized `O(log n)` share of that sort,
+/// instead of an ordered-set removal and insertion. `order` holds at most two
+/// entries per value in an allocation of at most four per value (four while
+/// empty).
+///
+/// This trades the plain ordered set for mutable bookkeeping on purpose: the
+/// serial vector build touches a value for every vector it reads.
 #[derive(Debug)]
 struct RecencyMap<K, V> {
     values: foldhash::HashMap<K, V>,
     order: VecDeque<(CacheSequence, K)>,
+    /// Newest entry `order` held when it was last rebuilt, none when it was
+    /// rebuilt of no value. Every current entry `order` lacks sorts after it.
+    horizon: Option<(CacheSequence, K)>,
 }
 
 impl<K, V> Default for RecencyMap<K, V> {
@@ -2771,6 +2785,7 @@ impl<K, V> Default for RecencyMap<K, V> {
         Self {
             values: foldhash::HashMap::default(),
             order: VecDeque::new(),
+            horizon: None,
         }
     }
 }
@@ -2802,23 +2817,48 @@ impl<K: Copy + Ord + core::hash::Hash, V: Touched> RecencyMap<K, V> {
     }
 
     /// Returns every cached value from least to most recently used.
+    ///
+    /// Values used past the horizon are sorted only once the iteration gets
+    /// to them, so reading the least recently used ones costs no sort.
     fn oldest_first(&self) -> impl Iterator<Item = (K, &V)> {
-        self.order.iter().filter_map(|&(touch, key)| {
+        let settled = self.order.iter().filter_map(|&(touch, key)| {
             self.values
                 .get(&key)
                 .filter(|value| value.last_touch() == touch)
                 .map(|value| (key, value))
-        })
+        });
+        let unsettled = core::iter::once(()).flat_map(|()| {
+            let mut unsettled = self
+                .values
+                .iter()
+                .filter(|(key, value)| {
+                    self.horizon
+                        .is_none_or(|horizon| (value.last_touch(), **key) > horizon)
+                })
+                .map(|(key, value)| (*key, value))
+                .collect::<Vec<_>>();
+            unsettled.sort_unstable_by_key(|&(key, value)| (value.last_touch(), key));
+            unsettled
+        });
+        settled.chain(unsettled)
     }
 
     /// Stamps the cached value of `key` with `touch` and returns it.
     fn touch(&mut self, key: K, touch: CacheSequence) -> Option<&V> {
-        let value = self.values.get_mut(&key)?;
-        if value.last_touch() != touch {
-            value.set_last_touch(touch);
-            self.record(touch, key);
+        let entry = (touch, key);
+        if self.unsettles(entry) {
+            let value = self.values.get_mut(&key)?;
+            if value.last_touch() != touch {
+                value.set_last_touch(touch);
+                self.record(entry);
+            }
+            return self.values.get(&key);
         }
-        self.values.get(&key)
+        // The common touch: `key` is not the least recently used and `touch`
+        // is past the horizon, so stamping the value is all there is to do.
+        let value = self.values.get_mut(&key)?;
+        value.set_last_touch(touch);
+        Some(value)
     }
 
     /// Caches `value` at the touch it records, returning the value it replaces.
@@ -2829,15 +2869,17 @@ impl<K: Copy + Ord + core::hash::Hash, V: Touched> RecencyMap<K, V> {
     /// fresh touch, and a change that keeps its place goes through
     /// [`Self::modify`].
     fn insert(&mut self, key: K, value: V) -> Option<V> {
-        let touch = value.last_touch();
+        let entry = (value.last_touch(), key);
         let replaced = self.values.insert(key, value);
         assert!(
             replaced
                 .as_ref()
-                .is_none_or(|replaced| replaced.last_touch() != touch),
+                .is_none_or(|replaced| replaced.last_touch() != entry.0),
             "a recency-map replacement records a fresh touch"
         );
-        self.record(touch, key);
+        if self.unsettles(entry) {
+            self.record(entry);
+        }
         replaced
     }
 
@@ -2850,7 +2892,7 @@ impl<K: Copy + Ord + core::hash::Hash, V: Touched> RecencyMap<K, V> {
 
     /// Changes the cached value of `key` in place.
     ///
-    /// A change that restamps the value records its new touch, as
+    /// A change that restamps the value orders it at its new touch, as
     /// [`Self::insert`] would; one that keeps its touch keeps its place.
     ///
     /// # Panics
@@ -2863,9 +2905,9 @@ impl<K: Copy + Ord + core::hash::Hash, V: Touched> RecencyMap<K, V> {
             .expect("a modified recency-map value is cached");
         let touch = value.last_touch();
         change(value);
-        let changed_touch = value.last_touch();
-        if changed_touch != touch {
-            self.record(changed_touch, *key);
+        let entry = (value.last_touch(), *key);
+        if entry.0 != touch && self.unsettles(entry) {
+            self.record(entry);
         }
     }
 
@@ -2874,28 +2916,32 @@ impl<K: Copy + Ord + core::hash::Hash, V: Touched> RecencyMap<K, V> {
         for (key, value) in &mut self.values {
             value.set_last_touch(renumbered(key));
         }
-        let mut order = self
-            .values
-            .iter()
-            .map(|(key, value)| (value.last_touch(), *key))
-            .collect::<Vec<_>>();
-        order.sort_unstable();
-        self.order = order.into();
+        self.rebuild();
     }
 
-    /// Orders `key` as last used at `touch`, which its value already records.
-    fn record(&mut self, touch: CacheSequence, key: K) {
-        let entry = (touch, key);
-        // Touches grow within a namespace unless another namespace of its
-        // session renumbered the shared sequence; the order then still sorts.
-        match self.order.back() {
-            Some(newest) if *newest > entry => {
-                let position = self.order.partition_point(|queued| *queued < entry);
+    /// Returns whether giving a value the recency `entry` leaves `order`
+    /// short of its invariants: the entry sorts within it, or the entry's key
+    /// leads it, or it lists nothing.
+    fn unsettles(&self, entry: (CacheSequence, K)) -> bool {
+        self.horizon.is_some_and(|horizon| entry <= horizon)
+            || self
+                .order
+                .front()
+                .is_none_or(|(_, oldest)| *oldest == entry.1)
+    }
+
+    /// Orders the value that now records `entry`, which unsettled the order.
+    fn record(&mut self, entry: (CacheSequence, K)) {
+        // Only after another namespace of the session renumbered the shared
+        // sequence does a touch sort within the settled entries.
+        if self.horizon.is_some_and(|horizon| entry <= horizon) {
+            let position = self.order.partition_point(|settled| *settled < entry);
+            // A stale entry of the same touch is current again as it stands.
+            if self.order.get(position) != Some(&entry) {
                 self.order.insert(position, entry);
             }
-            _ => self.order.push_back(entry),
         }
-        self.settle(key);
+        self.settle(entry.1);
     }
 
     /// Restores the order's invariants after `key` was touched or removed.
@@ -2904,9 +2950,9 @@ impl<K: Copy + Ord + core::hash::Hash, V: Touched> RecencyMap<K, V> {
     /// Compaction looks up each entry once, and only once stale entries
     /// outnumber current ones or removals left the allocation above four
     /// entries per value. It then shrinks an oversized allocation to twice the
-    /// values plus one, which the next compaction fits without growing. A
-    /// shrink needs about half the values removed, or a regrowth after as many
-    /// appends as values, so settling costs `O(1)` amortized.
+    /// values plus one. Either takes about half the values removed, or as
+    /// many touches within the horizon as values remain, so settling costs
+    /// `O(1)` amortized next to the rebuild.
     fn settle(&mut self, key: K) {
         let capacity_bound = self.values.len().max(1).saturating_mul(4);
         if self.order.len() > self.values.len().saturating_mul(2)
@@ -2922,21 +2968,33 @@ impl<K: Copy + Ord + core::hash::Hash, V: Touched> RecencyMap<K, V> {
                 self.order
                     .shrink_to(self.values.len().saturating_mul(2).saturating_add(1));
             }
-            return;
-        }
-        if self.order.front().is_none_or(|(_, oldest)| *oldest != key) {
-            return;
-        }
-        while let Some((touch, oldest)) = self.order.front() {
-            if self
-                .values
-                .get(oldest)
-                .is_some_and(|value| value.last_touch() == *touch)
-            {
-                return;
+        } else if self.order.front().is_some_and(|(_, oldest)| *oldest == key) {
+            while let Some((touch, oldest)) = self.order.front() {
+                if self
+                    .values
+                    .get(oldest)
+                    .is_some_and(|value| value.last_touch() == *touch)
+                {
+                    return;
+                }
+                self.order.pop_front();
             }
-            self.order.pop_front();
         }
+        if self.order.is_empty() && !self.values.is_empty() {
+            self.rebuild();
+        }
+    }
+
+    /// Lists every value in `order` and moves the horizon past them all.
+    fn rebuild(&mut self) {
+        self.order.clear();
+        self.order.extend(
+            self.values
+                .iter()
+                .map(|(key, value)| (value.last_touch(), *key)),
+        );
+        self.order.make_contiguous().sort_unstable();
+        self.horizon = self.order.back().copied();
     }
 }
 
@@ -4808,8 +4866,9 @@ mod tests {
     /// Asserts that every recency order of `cache` agrees with its values.
     ///
     /// Each order sorts, starts current, lists every value exactly once among
-    /// its current entries, and stays within its compaction and allocation
-    /// bounds; the dirty set holds exactly the dirty rows at their recency.
+    /// its current entries and the values past its horizon, and stays within
+    /// its compaction and allocation bounds; the dirty set holds exactly the
+    /// dirty rows at their recency.
     fn assert_recency_is_consistent<D: Distance>(cache: &MutationOpCache<D>) {
         fn check<K: Copy + Ord + core::hash::Hash + core::fmt::Debug, V: Touched>(
             map: &RecencyMap<K, V>,
@@ -4818,7 +4877,7 @@ mod tests {
                 .order
                 .iter()
                 .zip(map.order.iter().skip(1))
-                .all(|(older, newer)| older <= newer));
+                .all(|(older, newer)| older < newer));
             assert!(map.order.len() <= 2 * map.len());
             assert!(map.order.capacity() <= 4 * map.len().max(1));
             let current = map
@@ -6407,6 +6466,11 @@ mod tests {
         /// Caches a key at a touch older than every earlier one, as after
         /// another namespace renumbered the session's sequence.
         Older(NodeId),
+        /// Stamps a key, cached or not, with a touch of the small range that
+        /// renumbering also assigns, so that touches tie across keys, repeat
+        /// stale entries, sort anywhere among the settled ones, and equal the
+        /// horizon.
+        At(NodeId, u64),
         Remove(NodeId),
         Renumber,
         /// Changes a cached key's value in place, restamping it newer than
@@ -6440,6 +6504,7 @@ mod tests {
             (0_u64..24).prop_map(RecencyOp::Insert),
             (0_u64..24).prop_map(RecencyOp::Touch),
             (0_u64..24).prop_map(RecencyOp::Older),
+            (0_u64..24, 0_u64..32).prop_map(|(key, touch)| RecencyOp::At(key, touch)),
             (0_u64..24).prop_map(RecencyOp::Remove),
             Just(RecencyOp::Renumber),
             (0_u64..24).prop_map(RecencyOp::Restamp),
@@ -6448,8 +6513,9 @@ mod tests {
     }
 
     proptest! {
-        /// The append order reports exactly what the ordered set it replaced
-        /// reported, and stays within its compaction and allocation bounds.
+        /// The lazily settled order reports exactly what an ordered set of
+        /// `(touch, key)` reports, and stays within its compaction and
+        /// allocation bounds.
         #[test]
         fn recency_map_orders_values_like_an_ordered_set(
             ops in prop::collection::vec(recency_op(), 0..400),
@@ -6481,6 +6547,13 @@ mod tests {
                         older -= 1;
                         map.insert(key, simhash(touch));
                         model.insert(key, touch);
+                    }
+                    RecencyOp::At(key, touch) => {
+                        let touch = CacheSequence(touch);
+                        match model.insert(key, touch) {
+                            Some(_) => prop_assert!(map.touch(key, touch).is_some()),
+                            None => prop_assert!(map.insert(key, simhash(touch)).is_none()),
+                        }
                     }
                     RecencyOp::Remove(key) => {
                         prop_assert_eq!(map.remove(&key).is_some(), model.remove(&key).is_some());
@@ -6539,8 +6612,110 @@ mod tests {
         }
     }
 
+    /// Touches past the horizon record nothing until the settled entries run
+    /// out, when the order rebuilds from the values. A touch within the
+    /// horizon, as after another namespace renumbered the shared sequence,
+    /// sorts among the settled entries, and one that repeats a stale entry
+    /// revives that entry instead of doubling it.
+    #[test]
+    fn recency_order_settles_lazily() {
+        let simhash = |touch| CachedSimHash {
+            value: None,
+            last_touch: CacheSequence(touch),
+        };
+        let entries = |map: &RecencyMap<NodeId, CachedSimHash>| {
+            map.oldest_first()
+                .map(|(key, cached)| (cached.last_touch, key))
+                .collect::<VecDeque<_>>()
+        };
+        let settled = |entries: &[(u64, NodeId)]| {
+            entries
+                .iter()
+                .map(|&(touch, key)| (CacheSequence(touch), key))
+                .collect::<VecDeque<_>>()
+        };
+        let mut map = RecencyMap::<NodeId, CachedSimHash>::default();
+        for (key, touch) in [(1, 10), (2, 20), (3, 30)] {
+            map.insert(key, simhash(touch));
+        }
+        assert_eq!(map.order, settled(&[(10, 1)]));
+        assert!(map.touch(3, CacheSequence(40)).is_some());
+        assert!(map.touch(2, CacheSequence(50)).is_some());
+        assert_eq!(map.order, settled(&[(10, 1)]));
+        assert_eq!(entries(&map), settled(&[(10, 1), (40, 3), (50, 2)]));
+
+        assert!(map.touch(1, CacheSequence(60)).is_some());
+        assert_eq!(map.order, settled(&[(40, 3), (50, 2), (60, 1)]));
+        assert_eq!(map.horizon, Some((CacheSequence(60), 1)));
+        assert_eq!(map.oldest(), Some((CacheSequence(40), 3)));
+
+        assert!(map.touch(2, CacheSequence(70)).is_some());
+        assert_eq!(map.order, settled(&[(40, 3), (50, 2), (60, 1)]));
+        assert_eq!(entries(&map), settled(&[(40, 3), (60, 1), (70, 2)]));
+        assert!(map.touch(2, CacheSequence(50)).is_some());
+        assert_eq!(map.order, settled(&[(40, 3), (50, 2), (60, 1)]));
+        assert_eq!(entries(&map), settled(&[(40, 3), (50, 2), (60, 1)]));
+
+        assert!(map.touch(1, CacheSequence(45)).is_some());
+        assert_eq!(map.order, settled(&[(40, 3), (45, 1), (50, 2), (60, 1)]));
+        assert_eq!(entries(&map), settled(&[(40, 3), (45, 1), (50, 2)]));
+        assert!(map.touch(3, CacheSequence(80)).is_some());
+        assert_eq!(map.order, settled(&[(45, 1), (50, 2), (60, 1)]));
+        assert!(map.remove(&1).is_some());
+        assert_eq!(map.order, settled(&[(50, 2), (60, 1)]));
+        assert_eq!(entries(&map), settled(&[(50, 2), (80, 3)]));
+        assert!(map.remove(&2).is_some());
+        assert_eq!(map.order, settled(&[(80, 3)]));
+        assert_eq!(map.horizon, Some((CacheSequence(80), 3)));
+        assert!(map.remove(&3).is_some());
+        assert!(map.order.is_empty() && map.oldest().is_none());
+    }
+
+    /// A value stamped again with the horizon's touch, after compaction took
+    /// its stale horizon entry out of the order, is listed there again: it
+    /// does not sort after the horizon, so nothing else would order it.
+    #[test]
+    fn recency_order_lists_a_touch_at_its_horizon() {
+        let entries = |map: &RecencyMap<NodeId, CachedSimHash>| {
+            map.oldest_first()
+                .map(|(key, cached)| (cached.last_touch.0, key))
+                .collect::<Vec<_>>()
+        };
+        let mut map = RecencyMap::<NodeId, CachedSimHash>::default();
+        for (key, touch) in [(1, 10), (2, 20), (3, 30), (4, 40)] {
+            map.insert(
+                key,
+                CachedSimHash {
+                    value: None,
+                    last_touch: CacheSequence(touch),
+                },
+            );
+        }
+        assert!(map.touch(1, CacheSequence(50)).is_some());
+        assert_eq!(map.horizon, Some((CacheSequence(50), 1)));
+        assert_eq!(map.order.len(), 4);
+
+        // The horizon entry goes stale, and compaction then drops it.
+        assert!(map.touch(1, CacheSequence(60)).is_some());
+        assert!(map.remove(&3).is_some() && map.remove(&4).is_some());
+        assert!(map.touch(2, CacheSequence(25)).is_some());
+        assert_eq!(map.order, VecDeque::from([(CacheSequence(25), 2)]));
+        assert_eq!(map.horizon, Some((CacheSequence(50), 1)));
+        assert_eq!(entries(&map), [(25, 2), (60, 1)]);
+
+        assert!(map.touch(1, CacheSequence(50)).is_some());
+        assert_eq!(
+            map.order,
+            VecDeque::from([(CacheSequence(25), 2), (CacheSequence(50), 1)])
+        );
+        assert_eq!(entries(&map), [(25, 2), (50, 1)]);
+        assert!(map.touch(2, CacheSequence(70)).is_some());
+        assert_eq!(map.oldest(), Some((CacheSequence(50), 1)));
+        assert_eq!(entries(&map), [(50, 1), (70, 2)]);
+    }
+
     /// Random touches keep the order's allocation within four entries per
-    /// value without reallocating each compaction, and evicting to a tenth,
+    /// value without reallocating each rebuild, and evicting to a tenth,
     /// then to empty, shrinks it with the values while it keeps LRU order.
     #[test]
     fn recency_order_allocation_follows_its_values() {
