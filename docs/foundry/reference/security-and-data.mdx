@@ -1,0 +1,149 @@
+---
+title: "Security and data handling"
+description: "What Helix Foundry stores, how it seals credentials, why connectors only read, what reaches AI model providers and how to keep it local, who can read what, and how the local install stays on 127.0.0.1"
+sidebarTitle: "Security and data"
+pageType: "Reference"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
+
+This page says what Foundry keeps, where your credentials live, what leaves it and who
+can read what. It covers both Foundry at foundry.helix-db.com and the open-source install
+on your own computer; where they differ, it says so. For Helix Cloud databases, see
+[Helix Cloud security](/database/helix-cloud/operate/security).
+
+## What Foundry stores
+
+| What | Where it's kept |
+| --- | --- |
+| Workspaces, connections and their sealed credentials, ontologies, versions, loads, questions and review decisions | Foundry's database (MySQL) |
+| Each sync's snapshot of a connection's tables, and the documents you upload | Foundry's object store |
+| What each load writes: entities, facts, and where each came from | The ontology's Helix database |
+
+A sync's snapshot replaces the one before it. A load is a complete copy written beside
+earlier loads, so you can compare them; see [Load data](/foundry/ontologies/load-data).
+Deleting an ontology removes what its loads wrote and leaves the database's other data
+in place. Foundry never deletes a Helix database.
+
+On your own computer, these are Docker Compose volumes: `mysql`, `storage` (the object
+store, SeaweedFS), `helix` (HelixDB), `work` (the workers' working files) and `secrets`.
+`docker compose down` keeps them; `docker compose down -v` deletes them all. See the
+install's [backup and restore](https://github.com/helixdb/helix-foundry/blob/main/local/README.md#back-up-and-restore).
+
+## Credentials
+
+- **Entered in Foundry, never through an agent.** Database passwords and API keys are
+  entered in Foundry's **Add data** form. An agent on the
+  [Helix MCP](/foundry/agents/helix-mcp#connectors-stay-on-the-website) gets a link to
+  that form, never the credential, and Foundry's tools never return one.
+- **Sealed at rest.** Foundry seals each connector credential, and each AI provider key
+  entered under [AI models](/foundry/workspace/ai-models), with AES-256-GCM under the
+  deployment's connector key. Each sealed value is bound to the row it belongs to, so a
+  copy moved to another connection or workspace doesn't open. New values use the current
+  key; values sealed under the previous key still open, so the key can be rotated.
+- **Not shown again.** Foundry keeps a key encrypted and never shows it again.
+- **On your own computer**, the first start writes the install's secrets, the connector
+  key among them, into the `secrets` volume. Nothing is printed or written to the
+  checkout. Whoever holds that volume and the data can open every credential, so keep a
+  backup of it encrypted, or apart from the rest. Losing it makes the credentials
+  unreadable. An `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` passed from your shell is never
+  stored or logged.
+
+## Connectors only read
+
+Foundry never writes to your sources:
+
+- **Databases.** Create a user with `SELECT` only; each connector's form gives the SQL.
+  PostgreSQL and MySQL reads run in read-only transactions. With PostgreSQL change
+  capture, Foundry keeps a replication slot named `helix_foundry_<connection>` on the
+  database, which it creates and drops itself; it changes no table.
+- **Apps.** Each connector asks for read access only, such as a restricted Stripe key
+  or read-only Google scopes. See [Connectors](/foundry/data/connectors) for each one's
+  scopes.
+- **API sources** take what your apps and agents send; Foundry reads nothing from them.
+
+## What reaches AI model providers
+
+| Task | What is sent |
+| --- | --- |
+| Generating a draft | Your synced tables, and up to five of the newest documents of each set the generation picks |
+| Reading documents in a load | Their text, to find and check the names and facts they hold |
+| Reading tables in a load | Nothing: tables load without AI models |
+| Answering a question | The question, and what each step reads from the load |
+
+Hosted, these run on Anthropic's Claude models through Helix by default. On Pro or Max,
+an owner can run them on the workspace's own Anthropic key instead; see
+[AI models](/foundry/workspace/ai-models).
+
+On your own computer, they run on the provider you choose: Claude, OpenAI, Azure OpenAI,
+Amazon Bedrock, Cohere, an OpenAI-compatible server, or a local model in Ollama or LM
+Studio. To keep everything on the machine, run Ollama beside Foundry:
+
+```bash
+docker compose --profile ollama up -d --wait
+```
+
+Nothing sent to the bundled Ollama leaves the machine, and it listens on the ontology
+agent's loopback only. Small local models may stop drafts early. See the install's
+[AI settings](https://github.com/helixdb/helix-foundry/blob/main/local/README.md#ai).
+
+The install's Assistant can also run on the Claude Code or Codex you're signed in to.
+Each CLI then keeps a thread's session on your computer, holding what Foundry's tools
+answered in that thread; the helper deletes them when the thread is deleted or the
+helper is revoked.
+
+## Other outbound traffic
+
+- **Usage analytics.** The open-source install's site and its HelixDB tell Helix,
+  anonymously, how Foundry is used: page paths with ids taken out, steps such as a load
+  being ready, and each query's shape with values taken out. They send no data,
+  documents, questions, answers, names or emails. Set `FOUNDRY_TELEMETRY=off` (or
+  `DO_NOT_TRACK=1`) in `local/.env` to turn it off.
+- **People enrichment** looks up the people a load holds with an outside provider. Only
+  an owner can allow it. The open-source install has none.
+
+## Who can read what
+
+Hosted, a workspace has owners, admins and members; see
+[Members and roles](/foundry/workspace/members-and-roles).
+
+- Reading what a load wrote, in the Analyst, the Explorer or through an agent, needs
+  **Query read** on the database's Helix project, or sources shared under
+  [Access](/foundry/workspace/access). New members have neither.
+- Shared sources limit a member, team or agent key to the part of each ontology those
+  sources fill.
+- An agent acts with its person's role and rights. Every change it makes needs a
+  [confirmation](/foundry/agents/helix-mcp#changes-with-a-confirmation): one-time, valid
+  for five minutes, and bound to that operation, its target and its exact payload.
+- Tool results are marked as untrusted data, so agents treat what your sources say as
+  data, never as instructions.
+
+The open-source install has one owner and no sign-in: no team, no roles and no source
+sharing. Anyone who can reach it controls it.
+
+## The local install stays on 127.0.0.1
+
+The open-source install is for one person on their own computer.
+
+| Service | Listens on |
+| --- | --- |
+| Foundry's site | `127.0.0.1:3000`, and answers only `localhost:3000` |
+| Object store, for the uploads Foundry signs | `127.0.0.1:8333` |
+| MCP and HTTP Ask | `127.0.0.1:8081` (or `FOUNDRY_MCP_PORT`), answering only `localhost`, `127.0.0.1`, `::1` and `host.docker.internal` |
+| Bundled Ollama | The ontology agent's loopback only |
+
+Never expose it through a reverse proxy, tunnel or port forward. The MCP's owner token
+acts as the owner of every local workspace; keep it in your agent's environment, out of
+prompts. See
+[Query from your agents](/foundry/agents/query-from-agents#on-your-own-computer).
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="AI models" icon="microchip" href="/foundry/workspace/ai-models">
+    Choose where a hosted workspace's AI runs.
+  </Card>
+  <Card title="Share sources" icon="lock" href="/foundry/workspace/access">
+    Limit what each member, team or agent key reads.
+  </Card>
+</CardGroup>

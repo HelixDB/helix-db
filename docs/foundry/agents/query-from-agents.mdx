@@ -1,0 +1,188 @@
+---
+title: "Query Foundry from your agents"
+description: "Have Claude Code, Cursor or your own agent answer questions from a loaded Helix Foundry ontology through the Helix MCP, with every claim cited to the record, row or quote it came from"
+sidebarTitle: "Query from your agents"
+pageType: "Guide"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
+
+Once an ontology is loaded, your agents can ask it what your people ask the
+[Analyst](/foundry/ask/ask-questions), through the Helix MCP. The answer cites each
+entity, fact, row and document quote it read, so the agent can show where it came from.
+This page covers connecting an agent and the read tools it uses. To have an agent set up
+an ontology, see [Use Foundry from your agent](/foundry/agents/helix-mcp).
+
+## Connect your agent
+
+The MCP is at `https://mcp.helix-db.com/mcp` for Foundry at foundry.helix-db.com, and
+at `http://localhost:8081/mcp` for Foundry
+[on your own computer](#on-your-own-computer). Hosted, it signs you in with OAuth in your
+browser, with the account you use for Foundry, and acts with your role and rights.
+
+<Tabs>
+  <Tab title="Claude Code">
+    ```bash
+    claude mcp add --transport http helix https://mcp.helix-db.com/mcp
+    ```
+
+    Then run `/mcp` in Claude Code and sign in.
+  </Tab>
+  <Tab title="Cursor">
+    Add the server to `.cursor/mcp.json` in your project, or `~/.cursor/mcp.json` for
+    every project:
+
+```json
+{
+  "mcpServers": {
+    "helix": {
+      "url": "https://mcp.helix-db.com/mcp"
+    }
+  }
+}
+```
+
+    Then open Cursor's MCP settings and complete the browser sign-in for `helix`.
+  </Tab>
+  <Tab title="Your own agent">
+    Any MCP client that speaks streamable HTTP works, including an agent built on the
+    [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk). Add
+    `https://mcp.helix-db.com/mcp` as a remote server. A client that discovers OAuth
+    finds it at `https://mcp.helix-db.com/.well-known/oauth-protected-resource/mcp`.
+
+    An agent that runs without a person, such as a service or a CI job, sends a Helix
+    [service credential](/foundry/agents/helix-mcp#service-credentials) as
+    `Authorization: Bearer hlxs_…` instead of signing in. Keep it in the agent's
+    environment or a secret store, never in a prompt or a repository.
+  </Tab>
+</Tabs>
+
+## Ask a question
+
+A typical agent makes four calls.
+
+<Steps>
+  <Step title="Find the ontology">
+    `helix_list_workspaces` lists your workspaces. `helix_foundry_list_ontologies` lists
+    a workspace's ontologies with their current version and load.
+  </Step>
+
+  <Step title="Learn what it holds">
+    `helix_foundry_get_context` returns the ontology's schema (each type's properties,
+    key and names, and its links, rules and constraints) and the questions Foundry
+    suggests for it. It describes the version of the current load.
+  </Step>
+
+  <Step title="Ask">
+    `helix_foundry_ask` takes `workspace_id`, `ontology_id`, the `question` in plain
+    language and a `client_token`: a new UUID per question, which the agent keeps. The
+    same token returns the same question instead of asking again, so a retry is safe.
+
+```json
+{
+  "workspace_id": "<workspace id>",
+  "ontology_id": "<ontology id>",
+  "question": "Which active subscriptions come up for renewal soon, and for which accounts?",
+  "client_token": "<a new UUID>"
+}
+```
+
+    It waits up to 25 seconds. Optional fields: `thread_id` to follow up in a thread,
+    `focus` for the entity the question is about, `load_id` to ask a load other than the
+    current one, and `valid_at` (`YYYY-MM-DD`) to answer as of a past day.
+  </Step>
+
+  <Step title="Follow it to the end">
+    A question's `status` is `queued`, `running`, `answered`, `cannot_answer`, `failed` or
+    `cancelled`. Until `done` is true, call `helix_foundry_get_question` with its
+    `question_id`; each call waits up to 25 seconds. `result` holds the answer and its
+    citations. `helix_foundry_cancel_question` stops one that no longer matters.
+  </Step>
+</Steps>
+
+`helix_foundry_list_questions` lists an ontology's questions, newest first, with the
+workspace's question budget. Questions asked through the MCP count against the same
+hourly limit and monthly budget as the Analyst's; see
+[Limits and spending](/foundry/ask/ask-questions#limits-and-spending).
+
+<Note>
+  An answer is built from your data, and your data can hold anything. The tools mark
+  what they return as untrusted content. Have your agent treat it as data, never as
+  instructions.
+</Note>
+
+## Read exact records
+
+For exact lookups, rather than a question in plain language, the agent reads the graph
+itself. `helix_foundry_read_guide` returns the reads it can make and their JSON Schema.
+`helix_foundry_read_graph` makes 1 to 20 of them per call: typed queries over entities
+and facts, the evidence and source behind a fact, why a derived fact holds, and rule
+breaks. An entity is named by its id, its key's values, such as
+`{"type": "Account", "key": "ACC-1023"}`, or a name.
+
+An answer's queries come without their rows. To see the rows behind one of its charts or
+tables, the agent reads that query again with `helix_foundry_read_graph`, on the
+question's `load_id`.
+
+## Who can query
+
+The agent can read only what you can read. Reading a load, through the graph or through
+questions, needs **Query read** on the database's Helix project, or sources shared with
+you under [Access](/foundry/workspace/access). A service credential needs
+**query-read** on the project, or sources given to its key. See
+[Members and roles](/foundry/workspace/members-and-roles#what-new-members-can-read).
+
+## On your own computer
+
+Foundry's open-source install serves the same tools at `http://localhost:8081/mcp`,
+on this computer's loopback only. It has no sign-in: the agent sends the install's
+owner token as a bearer. Load it into your environment without printing it, from the
+repository's root:
+
+```bash
+export FOUNDRY_LOCAL_TOKEN="$(docker compose exec -T foundry cat /secrets/site-token)"
+```
+
+Then point the client at the local MCP and have it read the token from the environment.
+For Claude Code, add it to the project's `.mcp.json`; Claude Code expands
+`${FOUNDRY_LOCAL_TOKEN}` as it starts the server, so the file holds no secret:
+
+```json
+{
+  "mcpServers": {
+    "foundry": {
+      "type": "http",
+      "url": "http://localhost:8081/mcp",
+      "headers": { "Authorization": "Bearer ${FOUNDRY_LOCAL_TOKEN}" }
+    }
+  }
+}
+```
+
+The token acts as the owner of every local workspace. Keep it in the client's
+environment, out of prompts and code a browser loads. If 8081 was taken and you set
+`FOUNDRY_MCP_PORT`, use that port.
+
+### Ask over HTTP
+
+An app without an MCP client can ask the local install over HTTP:
+`POST http://localhost:8081/v1/ontologies/<ontology-id>/ask` with the same bearer,
+`Content-Type: application/json`, an `Idempotency-Key` of at most 64 bytes, and
+`{"question": "…"}`. It waits up to 25 seconds, then answers 200 with the question
+done, or 202 with a `Location` to `GET` until `done` is true. Reuse the idempotency key
+after a lost response. The repository's
+[Python example](https://github.com/helixdb/helix-foundry/blob/main/examples/ask_tool.py)
+wraps this as one agent tool.
+
+Hosted Foundry doesn't serve these HTTP routes yet. Use the MCP.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Use cases on the sample company" icon="lightbulb" href="/foundry/use-cases/sample-company">
+    Three questions worth money or time, and how an agent asks them.
+  </Card>
+  <Card title="Security and data handling" icon="shield" href="/foundry/reference/security-and-data">
+    What Foundry stores, and what reaches AI models.
+  </Card>
+</CardGroup>
