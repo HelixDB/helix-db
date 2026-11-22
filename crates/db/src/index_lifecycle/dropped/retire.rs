@@ -678,9 +678,12 @@ enum Wake {
 /// - the registry: an index operation ended, which may have stored an entry
 ///   or moved the catalog a quarantined entry is checked against; a filter
 ///   kept an armed entry's rows; or a compaction of this process ended while
-///   an entry was armed ([`Registry::changed`](super::Registry::changed));
+///   a proof was not yet tracking tables
+///   ([`Registry::changed`](super::Registry::changed));
 /// - the manifest: the writer's own copy, which SlateDB keeps current, has
-///   lost a table some proof tracks.
+///   lost a table some proof tracks. While a proof tracks tables the task
+///   compares them with that copy each time the writer's status moves, which
+///   is every write: memory only, linear in the tables of the store.
 ///
 /// One thing it is not told of is the end of a compaction that was in flight
 /// when a proof started, so while a proof waits for one the task looks again
@@ -763,9 +766,9 @@ impl RetireSupervisor {
         };
         let registry = retirer.writer.dropped();
         let mut status = retirer.writer.db().subscribe();
-        // The tables of the manifest the writer holds. Its id is no guide:
-        // the writer changes its copy before it stores it under a new one.
-        let mut stored = table_ids(&status.borrow_and_update().current_manifest);
+        // The tables of the manifest the writer held when last compared
+        // with the tables the proofs track.
+        let mut stored = None::<HashSet<TableId>>;
         let mut looked = None::<Instant>;
         let mut drain_look = look_gap;
         let mut retry = RETRY;
@@ -797,13 +800,22 @@ impl RetireSupervisor {
                         if changed.is_err() {
                             return;
                         }
-                        let now_stored = table_ids(&status.borrow_and_update().current_manifest);
-                        if now_stored == stored {
+                        // The writer's status moves with every write. Its
+                        // manifest matters only while a proof tracks tables,
+                        // and its id is no guide to a change: the writer
+                        // changes its copy before it stores it under a new
+                        // one.
+                        if !registry.tracks_tables() {
                             continue;
                         }
-                        stored = now_stored;
+                        let now_stored = table_ids(&status.borrow_and_update().current_manifest);
+                        if stored.as_ref() == Some(&now_stored) {
+                            continue;
+                        }
+                        let left = registry.tracked_table_left(&now_stored);
+                        stored = Some(now_stored);
                         reclaimed = false;
-                        if registry.tracked_table_left(&stored) {
+                        if left {
                             drain_look = look_gap;
                             break Wake::Pass;
                         }

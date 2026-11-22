@@ -1149,6 +1149,22 @@ impl Registry {
         storage
     }
 
+    /// Whether some armed entry's proof tracks tables: only then does it
+    /// matter to a proof which tables the manifest holds.
+    pub(crate) fn tracks_tables(&self) -> bool {
+        self.state.lock().entries.values().any(|state| match state {
+            Entry::Armed(Armed {
+                proof: Proof::Tracking { .. },
+                ..
+            }) => true,
+            Entry::Armed(Armed {
+                proof: Proof::Unproven | Proof::Draining { .. },
+                ..
+            })
+            | Entry::Quarantined(_) => false,
+        })
+    }
+
     /// Whether a table some armed entry's proof tracks is missing from
     /// `stored`: only then can a look at the store retire a tracked entry.
     pub(crate) fn tracked_table_left(&self, stored: &HashSet<TableId>) -> bool {

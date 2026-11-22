@@ -16594,7 +16594,7 @@ failures print a fix.
 | `cache.warm` | S3 storage warms the disk cache after a restart. |
 | `resources.memory` | Cache budgets take at most 70% of the memory the server may use. |
 | `indexes.publication` | Vector and text index publication is caught up and holds back no entries. |
-| `indexes.dropped_storage` | How many dropped indexes still wait for compactions to give their storage back, and that none is quarantined. A quarantined entry keeps its rows. |
+| `indexes.dropped_storage` | How many dropped indexes still wait for compactions to give their storage back and for how long, and that none is quarantined. The server compacts for them itself once it has been idle for a few minutes. A quarantined entry keeps its rows and is listed with what contradicts it. |
 | `queries.missing_indexes` | Recent queries filtered without the secondary index the planner recommends. The fix is the `helix query` command that creates each index. |
 | `queries.unbounded_scans` | Recent queries read every element of a label that no index would bound. |
 

@@ -459,10 +459,13 @@ fn a_tracked_table_has_left_once_any_proof_misses_one_from_the_manifest() {
     let stored = |tables: &[u128]| tables.iter().copied().map(TableId).collect::<HashSet<_>>();
     // Proofs that track nothing yet are not waiting for the manifest.
     assert!(registry.advance(entry(3), 0, draining(&[5])));
+    assert!(!registry.tracks_tables());
     assert!(!registry.tracked_table_left(&stored(&[])));
 
     assert!(registry.advance(entry(1), 0, tracking(&[7, 8])));
+    assert!(registry.tracks_tables());
     assert!(registry.advance(entry(2), 0, tracking(&[8, 9])));
+    assert!(registry.tracks_tables());
     assert!(!registry.tracked_table_left(&stored(&[7, 8, 9])));
     assert!(!registry.tracked_table_left(&stored(&[6, 7, 8, 9, 10])));
     assert!(registry.tracked_table_left(&stored(&[7, 8])));
@@ -473,6 +476,7 @@ fn a_tracked_table_has_left_once_any_proof_misses_one_from_the_manifest() {
         entry(3),
         quarantined(Contradiction::AnotherFamily),
     )]));
+    assert!(!quarantined_only.tracks_tables());
     assert!(!quarantined_only.tracked_table_left(&stored(&[])));
 }
 
