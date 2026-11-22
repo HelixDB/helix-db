@@ -3729,7 +3729,10 @@ any other step, build the branch from a traversal's steps:
 Page type: Guide
 
 Secondary indexes narrow node or edge sources by property. Index creation is
-asynchronous and includes existing data through a durable backfill.
+asynchronous and includes existing data through a durable backfill. A backfill
+(of a secondary, text, or vector index) reads only the rows of its label, through
+the label's membership set, so its time follows the label's size rather than the
+graph's.
 
 ## Index families
 
@@ -8947,6 +8950,12 @@ not describe.
 the S3 bucket's region, the disk cache's device and room, memory, index
 publication, and recent queries' index use.
 [`helix doctor`](/cli/command-reference/doctor) renders it.
+`GET /v2/diagnostics?audit=labels` also audits stored data: its
+`indexes.label_bitmaps` check reads every node and edge row once and fails when
+a row is missing from its label's bitmap, which label scans and index builds
+read. The audit changes nothing and runs only when asked for, one at a time;
+requests that arrive while one runs share its result. Any other `audit` value
+fails with `invalid_request_option`.
 
 Local HelixDB accepts encoded request bodies up to 16 MiB. The Helix Cloud
 gateway accepts up to 2 MiB. Keep requests at or below 2 MiB when the same
@@ -15371,6 +15380,11 @@ failures print a fix.
 | `indexes.publication` | Vector and text index publication is caught up and holds back no entries. |
 | `queries.missing_indexes` | Recent queries filtered without the secondary index the planner recommends. The fix is the `helix query` command that creates each index. |
 | `queries.unbounded_scans` | Recent queries read every element of a label that no index would bound. |
+
+The server also offers `indexes.label_bitmaps`, which reads every node and edge row once to check
+that each is in its label's bitmap, the set label scans and index builds read. It reads stored
+data, so `helix doctor` does not run it; request
+[`GET /v2/diagnostics?audit=labels`](/database/helix-db/query-guides/http-api) to run it.
 
 The query checks cover queries from the last 24 hours since the server started. A missing index
 stops being reported once the index is active. Queries that only count matches are not analyzed

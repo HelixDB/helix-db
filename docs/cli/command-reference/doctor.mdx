@@ -61,6 +61,11 @@ failures print a fix.
 | `queries.missing_indexes` | Recent queries filtered without the secondary index the planner recommends. The fix is the `helix query` command that creates each index. |
 | `queries.unbounded_scans` | Recent queries read every element of a label that no index would bound. |
 
+The server also offers `indexes.label_bitmaps`, which reads every node and edge row once to check
+that each is in its label's bitmap, the set label scans and index builds read. It reads stored
+data, so `helix doctor` does not run it; request
+[`GET /v2/diagnostics?audit=labels`](/database/helix-db/query-guides/http-api) to run it.
+
 The query checks cover queries from the last 24 hours since the server started. A missing index
 stops being reported once the index is active. Queries that only count matches are not analyzed
 yet. Server checks need a server image with

@@ -2364,6 +2364,55 @@ impl HelixDB {
         ))
     }
 
+    /// Compares every label bitmap of `scope` with the rows carrying its
+    /// label, at one snapshot, and changes nothing.
+    ///
+    /// Label scans and index builds read a label's rows through its bitmap,
+    /// so a row the bitmap lacks is invisible to both; see
+    /// [`index_lifecycle::LabelBitmapAudit`]. This reads every node and edge
+    /// row of `scope` once.
+    ///
+    /// ```
+    /// # #![recursion_limit = "256"]
+    /// # tokio_test::block_on(async {
+    /// use db::encoding::v2::keys::scope::DataScope;
+    /// use db::{HelixDB, HelixDbSource};
+    /// use helix_ast::{batch, query::QueryRequest, traversal, value::PropertyInput};
+    ///
+    /// let db = HelixDB::open(HelixDbSource::InMemory {
+    ///     database: "label-bitmap-audit-example".to_string(),
+    /// }).await.unwrap();
+    /// db.query(QueryRequest::write(
+    ///     batch::write_batch()
+    ///         .var_as(
+    ///             "created",
+    ///             traversal::g().add_n("User", vec![("name", PropertyInput::from("Ada"))]),
+    ///         )
+    ///         .returning(["created"]),
+    /// )).await.unwrap();
+    /// let audit = db.audit_label_bitmaps(DataScope::LegacyUnscoped).await.unwrap();
+    /// assert!(audit.is_complete());
+    /// assert_eq!(audit.findings[0].label, "User");
+    /// assert_eq!(audit.findings[0].rows, 1);
+    /// db.close().await.unwrap();
+    /// # });
+    /// ```
+    pub async fn audit_label_bitmaps(
+        &self,
+        scope: DataScope,
+    ) -> Result<index_lifecycle::LabelBitmapAudit> {
+        match self.storage() {
+            HelixStorage::Reader(reader) => {
+                let snapshot = reader.snapshot().await?;
+                index_lifecycle::label_audit::audit(snapshot.as_ref(), scope).await
+            }
+            HelixStorage::Writer(writer) => {
+                let snapshot = writer.db().snapshot().await?;
+                index_lifecycle::label_audit::audit(snapshot.as_ref(), scope).await
+            }
+        }
+    }
+
     /// Advances at most one immediately eligible secondary lifecycle step.
     ///
     /// This writer-only surface is available only when secondary background
@@ -8005,6 +8054,106 @@ mod tests {
             "a cached catalog plans the activated text index"
         );
         db.close().await.expect("writer closes");
+    }
+
+    /// A reader audits one snapshot: while the writer adds and deletes
+    /// labelled nodes, and the reader follows it, no audit reports a row
+    /// missing from its label's bitmap.
+    #[tokio::test]
+    async fn a_reader_audits_one_snapshot_while_the_writer_moves_on() {
+        let token = ProcessLocalDatabaseToken::new("label-audit-reader").unwrap();
+        let writer = HelixDB::open(HelixDbSource::InMemoryToken {
+            token: token.clone(),
+        })
+        .await
+        .expect("writer opens");
+        let add = || {
+            QueryRequest::write(
+                write_batch()
+                    .var_as(
+                        "added",
+                        g().add_n("User", vec![("n", PropertyInput::from(1_i64))]),
+                    )
+                    .returning(["added"]),
+            )
+        };
+        for _ in 0..30 {
+            writer.query(add()).await.expect("node is added");
+        }
+        writer
+            .inner_db()
+            .flush()
+            .await
+            .expect("writes become visible");
+        let reader = HelixDB::open_reader_with_object_store_for_tests(
+            token.database().to_string(),
+            token.object_store(),
+        )
+        .await
+        .expect("reader opens");
+        let scope = DataScope::LegacyUnscoped;
+        let users = |audit: &index_lifecycle::LabelBitmapAudit| {
+            audit
+                .findings
+                .iter()
+                .find(|finding| finding.label == "User")
+                .map_or(0, |finding| finding.rows)
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while users(
+                &reader
+                    .audit_label_bitmaps(scope)
+                    .await
+                    .expect("reader audits"),
+            ) < 30
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the reader sees the writer's nodes");
+
+        let writes = async {
+            for _ in 0..10 {
+                for _ in 0..3 {
+                    writer.query(add()).await.expect("node is added");
+                }
+                writer
+                    .query(QueryRequest::write(
+                        write_batch()
+                            .var_as(
+                                "gone",
+                                g().n_with_label("User").limit(2_usize).drop().count(),
+                            )
+                            .returning(["gone"]),
+                    ))
+                    .await
+                    .expect("nodes are deleted");
+                writer
+                    .inner_db()
+                    .flush()
+                    .await
+                    .expect("writes become visible");
+            }
+        };
+        let audits = async {
+            for _ in 0..20 {
+                let audit = reader
+                    .audit_label_bitmaps(scope)
+                    .await
+                    .expect("reader audits");
+                assert!(audit.is_complete(), "{audit:?}");
+                tokio::task::yield_now().await;
+            }
+        };
+        tokio::join!(writes, audits);
+        assert!(writer
+            .audit_label_bitmaps(scope)
+            .await
+            .expect("writer audits")
+            .is_complete());
+        reader.close().await.expect("reader closes");
+        writer.close().await.expect("writer closes");
     }
 
     /// A reader reuses a catalog only for the snapshot sequence it was loaded

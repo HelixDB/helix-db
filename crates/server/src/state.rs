@@ -18,6 +18,8 @@ pub struct ServerState {
     storage: Arc<StorageConfig>,
     /// Diagnostic facts that take I/O, shared between requests.
     diagnostic_facts: Arc<crate::diagnostics::FactCache>,
+    /// The label audit every clone of this state runs one at a time.
+    label_audits: Arc<crate::diagnostics::AuditFlight>,
     started: Instant,
 }
 
@@ -43,6 +45,7 @@ impl ServerState {
             index_readiness,
             storage: Arc::new(storage),
             diagnostic_facts: Arc::default(),
+            label_audits: Arc::default(),
             started: Instant::now(),
         }
     }
@@ -60,6 +63,11 @@ impl ServerState {
     /// The diagnostic facts every clone of this state shares.
     pub(crate) fn diagnostic_facts(&self) -> &crate::diagnostics::FactCache {
         &self.diagnostic_facts
+    }
+
+    /// The label audit every clone of this state shares.
+    pub(crate) fn label_audits(&self) -> &crate::diagnostics::AuditFlight {
+        &self.label_audits
     }
 
     /// Time since this state was built, as the server opened its database.

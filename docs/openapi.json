@@ -300,14 +300,28 @@
       "get": {
         "operationId": "getDiagnostics",
         "summary": "Diagnose the server's setup",
-        "description": "Runs read-only checks of how this server is set up and returns each verdict: storage durability, the S3 bucket's region and round-trip time, the disk cache's device, free space and startup warm, memory headroom, vector and text index publication, and the missing indexes and unbounded scans of recent queries. Checks that do not apply to the configured storage are left out. Nothing is changed; the only outbound requests are HEADs of a key that does not exist in the bucket, an unsigned HEAD of the bucket for its region, and the EC2 or ECS metadata endpoint, each bounded by a short timeout. `helix doctor` renders this report.",
+        "description": "Runs read-only checks of how this server is set up and returns each verdict: storage durability, the S3 bucket's region and round-trip time, the disk cache's device, free space and startup warm, memory headroom, vector and text index publication, and the missing indexes and unbounded scans of recent queries. Checks that do not apply to the configured storage are left out. Nothing is changed; the only outbound requests are HEADs of a key that does not exist in the bucket, an unsigned HEAD of the bucket for its region, and the EC2 or ECS metadata endpoint, each bounded by a short timeout. `?audit=labels` also audits stored data: `indexes.label_bitmaps` reads every node and edge row once and checks that each is in its label's bitmap, which label scans and index builds read. Audits run only when asked for, one at a time; requests that arrive while one runs share its result. `helix doctor` renders this report.",
         "tags": [
           "Health"
         ],
         "security": [],
+        "parameters": [
+          {
+            "name": "audit",
+            "in": "query",
+            "required": false,
+            "description": "An audit of stored data to run after the checks. `labels` adds the `indexes.label_bitmaps` check. Any other value is rejected with `invalid_request_option`.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "labels"
+              ]
+            }
+          }
+        ],
         "responses": {
           "200": {
-            "description": "Every applicable check, in report order.",
+            "description": "Every applicable check, in report order, then the requested audit's check.",
             "content": {
               "application/json": {
                 "schema": {
@@ -335,6 +349,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           }
         }
       }
@@ -1938,6 +1955,7 @@
               "cache.warm",
               "resources.memory",
               "indexes.publication",
+              "indexes.label_bitmaps",
               "queries.missing_indexes",
               "queries.unbounded_scans"
             ]

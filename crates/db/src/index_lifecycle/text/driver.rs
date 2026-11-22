@@ -40,7 +40,7 @@ use crate::config::{
 use crate::encoding::property;
 use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::ManagedIndexKey as IndexKey;
-use crate::encoding::v2::keys::{DataKey, DataKeyKind, KeyPrefix};
+use crate::encoding::v2::keys::{DataKey, DataKeyKind};
 use crate::encoding::v2::keys::{
     IndexEntity, IndexEntityStateKey, PartitionFingerprint, RecordKind, ScopedKey,
     TextBuildArtifactKey, TextEntityStateKey, TextManifestRootKey,
@@ -2508,44 +2508,21 @@ async fn scan_source(
     let ValidatedDynamicIndexDefinition::Text(definition) = record.definition() else {
         return Err(corruption("text source scan loaded another family"));
     };
-    let source_prefix = source_prefix(scope, definition.element_kind());
-    let start = cursor_suffix(&source_prefix, progress.cursor.as_ref())?;
-    let upper = cursor_suffix(&source_prefix, Some(&progress.inclusive_upper_bound))?
-        .ok_or_else(|| corruption("text source upper bound is absent"))?;
-    if source_entity(
+    let Some(mut rows) = crate::index_lifecycle::label_source::LabelSource::open(
+        source,
         scope,
         definition.element_kind(),
-        progress.inclusive_upper_bound.as_bytes(),
-    )?
-    .is_none()
-    {
-        return Err(corruption(
-            "text source upper bound is not an exact property-by-ID key",
-        ));
-    }
-    match start.as_ref().map(|start| start.cmp(&upper)) {
-        Some(std::cmp::Ordering::Greater) => {
-            return Err(corruption(
-                "text source cursor exceeds its inclusive upper bound",
-            ));
-        }
-        Some(std::cmp::Ordering::Equal) => {
-            return Ok(progressed_build(TextBuildStage::ScanPartitions(
-                initial_partition_scan(operation, scope, progress.counters)?,
-            )));
-        }
-        Some(std::cmp::Ordering::Less) | None => {}
-    }
-
-    let start = start.map_or(Bound::Unbounded, Bound::Excluded);
-    let scan_options = scan_tuning.scan_options();
-    let mut rows = source
-        .scan_prefix_with_options(
-            &source_prefix,
-            (start, Bound::Included(upper)),
-            &scan_options,
-        )
-        .await?;
+        definition.label().as_str(),
+        progress,
+        limits,
+        scan_tuning,
+    )
+    .await?
+    else {
+        return Ok(progressed_build(TextBuildStage::ScanPartitions(
+            initial_partition_scan(operation, scope, progress.counters)?,
+        )));
+    };
     let mut batch_entities = 0_usize;
     let mut batch_input_bytes = 0_u64;
     let mut batch_output_operations = 0_u64;
@@ -2556,15 +2533,22 @@ async fn scan_source(
     let mut exhausted = true;
     let mut scratch = property::view::Scratch::new();
 
-    'scan_rows: while batch_entities < limits.max_entities().get() {
-        let Some(row) = rows.next().await? else {
-            break;
+    // The label source takes at most `max_entities` ids, so its end ends
+    // the step.
+    'scan_rows: loop {
+        let row = match rows.next().await? {
+            crate::index_lifecycle::label_source::LabelRead::Row(row) => row,
+            crate::index_lifecycle::label_source::LabelRead::Exhausted => break,
+            crate::index_lifecycle::label_source::LabelRead::Paused(paused) => {
+                cursor = Some(paused);
+                exhausted = false;
+                break;
+            }
         };
+        let entity_id = row.entity_id;
         let graph_input_bytes = row.key.len().saturating_add(row.value.len()) as u64;
         if batch_input_bytes.saturating_add(graph_input_bytes) > limits.max_input_bytes().get() {
             if batch_entities == 0 {
-                let entity_id = source_entity(scope, definition.element_kind(), &row.key)?
-                    .unwrap_or(IndexEntityId::initial());
                 transaction.get(&row.key).await?;
                 return Ok(IndexOperationStepResult::Blocked(
                     IndexOperationBlocker::OversizedEntity {
@@ -2580,12 +2564,8 @@ async fn scan_source(
         }
 
         let complete_cursor = IndexCursor::try_new(row.key.clone()).map_err(operation_error)?;
-        let entity_id = source_entity(scope, definition.element_kind(), &row.key)?;
         let mut staged = None;
         'stage_entity: {
-            let Some(entity_id) = entity_id else {
-                break 'stage_entity;
-            };
             let projection = decode_source(definition, &row.value, &mut scratch)
                 .ok()
                 .and_then(|properties| super::projection::project(definition, &properties).ok());
@@ -2834,10 +2814,6 @@ async fn scan_source(
         statistics_batch.push(statistics)?;
         cursor = Some(complete_cursor);
     }
-    if batch_entities == limits.max_entities().get() {
-        exhausted = false;
-    }
-
     let counters = OperationCounters {
         entities: checked_add(
             progress.counters.entities,
@@ -2938,44 +2914,6 @@ async fn generation_has_rows(
     );
     let mut rows = transaction.scan_prefix(prefix, ..).await?;
     Ok(rows.next().await?.is_some())
-}
-
-/// Returns the physical source prefix for the definition's entity kind.
-fn source_prefix(scope: DataScope, kind: IndexElementKind) -> Bytes {
-    let prefix = match kind {
-        IndexElementKind::Node => KeyPrefix::NodeProperty,
-        IndexElementKind::Edge => KeyPrefix::EdgePropertyById,
-    };
-    DataKey::data_prefix(scope, Bytes::copy_from_slice(prefix.as_slice()))
-}
-
-/// Parses one source row and rejects a keyspace/entity-kind mismatch.
-fn source_entity(
-    scope: DataScope,
-    expected: IndexElementKind,
-    key: &[u8],
-) -> Result<Option<IndexEntityId>> {
-    let parsed = DataKey::parse_from_slice(scope, key)?;
-    Ok(match (expected, parsed) {
-        (
-            IndexElementKind::Node,
-            DataKey::Data {
-                kind: DataKeyKind::NodeProperty(key),
-                ..
-            },
-        ) => Some(IndexEntityId::new(key.node_id())),
-        (
-            IndexElementKind::Edge,
-            DataKey::Data {
-                kind: DataKeyKind::EdgePropertyById(key),
-                ..
-            },
-        ) => Some(IndexEntityId::new(key.edge_id())),
-        (IndexElementKind::Edge, DataKey::Data { .. }) => None,
-        (IndexElementKind::Node, DataKey::Data { .. }) | (_, DataKey::Global { .. }) => {
-            return Err(corruption("text source prefix yielded another key kind"));
-        }
-    })
 }
 
 /// Removes an exact physical prefix from a complete persisted cursor.

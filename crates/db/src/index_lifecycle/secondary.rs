@@ -1918,49 +1918,36 @@ async fn activate(
 struct SourceScanCandidate {
     cursor: IndexCursor,
     input_bytes: u64,
-    kind: SourceScanCandidateKind,
-}
-
-enum SourceScanCandidateKind {
-    NonEntity,
-    Entity {
-        entity: IndexEntity,
-        next_value: Option<CanonicalSecondaryValue>,
-        applied_key: Bytes,
-    },
+    entity: IndexEntity,
+    next_value: Option<CanonicalSecondaryValue>,
+    applied_key: Bytes,
 }
 
 struct ObservedSourceScanCandidate {
     cursor: IndexCursor,
     input_bytes: u64,
-    kind: ObservedSourceScanCandidateKind,
+    entity: IndexEntity,
+    held: HeldValue,
+    next_value: Option<CanonicalSecondaryValue>,
 }
 
-enum ObservedSourceScanCandidateKind {
-    NonEntity,
-    Entity {
-        entity: IndexEntity,
-        held: HeldValue,
-        next_value: Option<CanonicalSecondaryValue>,
-    },
-}
-
-/// Reconciles one bounded batch of source rows at or below the build's
-/// source upper bound.
+/// Reconciles one bounded batch of the label's source rows at or below the
+/// build's source upper bound.
 ///
-/// The batch is read from a snapshot outside the step's serializable
-/// transaction, so a write inside the scanned range does not abort the step.
-/// Every write that commits after the build was created records a delta for
-/// its entity (a write whose catalog read predates the creation conflicts
-/// with it), and catch-up reconciles that delta from what this step leaves
-/// the generation holding (see [`HeldValue`]), so the generation converges
-/// whichever snapshot the step read. Rows the build owns (canonical record,
-/// applied state, unique entries) stay in the transaction's read set. A
-/// blocker is durable, so a step that blocks on a source row first reads
-/// that row through the transaction: a write that repairs it before the step
-/// commits makes the step retry. A unique entry an earlier batch gave an
-/// entity that has since moved off the value is taken over rather than
-/// reported as a duplicate (see [`decide_reconciliation`]).
+/// The batch is the label's members after the cursor, read with the label
+/// bitmap from one snapshot outside the step's serializable transaction (see
+/// [`super::label_source`]), so a write inside the scanned range does not
+/// abort the step. Every write that commits after the build was created
+/// records a delta for its entity (a write whose catalog read predates the
+/// creation conflicts with it), and catch-up reconciles that delta from what
+/// this step leaves the generation holding (see [`HeldValue`]), so the
+/// generation converges whichever snapshot the step read. Rows the build owns
+/// (canonical record, applied state, unique entries) stay in the
+/// transaction's read set. A blocker is durable, so a step that blocks on a
+/// source row first reads that row through the transaction: a write that
+/// repairs it before the step commits makes the step retry. A unique entry an
+/// earlier batch gave an entity that has since moved off the value is taken
+/// over rather than reported as a duplicate (see [`decide_reconciliation`]).
 #[allow(
     clippy::too_many_arguments,
     reason = "one source batch needs its storage, transaction, exact operation, definition, progress, limits, and scan tuning"
@@ -1975,72 +1962,63 @@ async fn scan_source(
     limits: SearchIndexBatchLimits,
     scan_tuning: IndexLifecycleScanTuning,
 ) -> Result<IndexOperationStepResult> {
-    let source_prefix = source_prefix(scope, definition.element_kind());
-    let start = cursor_suffix(&source_prefix, progress.cursor.as_ref())?;
-    let upper = cursor_suffix(&source_prefix, Some(&progress.inclusive_upper_bound))?
-        .ok_or_else(|| corruption("secondary source upper bound is absent"))?;
-    match start.as_ref().map(|start| start.cmp(&upper)) {
-        Some(std::cmp::Ordering::Greater) => {
-            return Err(corruption(
-                "secondary source cursor exceeds its inclusive upper bound",
-            ));
-        }
-        Some(std::cmp::Ordering::Equal) => {
-            return Ok(progressed_build(SecondaryBuildStage::CatchUp(
-                PrefixScanProgress {
-                    cursor: None,
-                    counters: progress.counters,
-                },
-            )));
-        }
-        Some(std::cmp::Ordering::Less) | None => {}
-    }
-    let start = start.map_or(Bound::Unbounded, Bound::Excluded);
-    let scan_options = scan_tuning.scan_options();
     let source = db.begin(slatedb::IsolationLevel::Snapshot).await?;
-    let mut rows = source
-        .scan_prefix_with_options(
-            &source_prefix,
-            (start, Bound::Included(upper)),
-            &scan_options,
-        )
-        .await?;
+    let Some(mut rows) = super::label_source::LabelSource::open(
+        &source,
+        scope,
+        definition.element_kind(),
+        definition.label().as_str(),
+        progress,
+        limits,
+        scan_tuning,
+    )
+    .await?
+    else {
+        return Ok(progressed_build(SecondaryBuildStage::CatchUp(
+            PrefixScanProgress {
+                cursor: None,
+                counters: progress.counters,
+            },
+        )));
+    };
     let mut candidates = Vec::with_capacity(limits.max_entities().get());
     let mut candidate_input_bytes = 0_u64;
-    let mut exhausted = true;
+    // Where the scan resumes once every candidate is reconciled: `None`
+    // once the label has no member left.
+    let mut resume = None;
     let mut scratch = view::Scratch::new();
-    while candidates.len() < limits.max_entities().get() {
-        let Some(row) = rows.next().await? else {
-            break;
+    loop {
+        let row = match rows.next().await? {
+            super::label_source::LabelRead::Row(row) => row,
+            super::label_source::LabelRead::Exhausted => break,
+            super::label_source::LabelRead::Paused(cursor) => {
+                resume = Some(cursor);
+                break;
+            }
         };
         let input_bytes = row.key.len().saturating_add(row.value.len()) as u64;
+        let complete_cursor = IndexCursor::try_new(row.key.clone()).map_err(operation_error)?;
         if candidate_input_bytes.saturating_add(input_bytes) > limits.max_input_bytes().get() {
             if candidates.is_empty() {
-                let entity_id = source_entity(scope, definition.element_kind(), &row.key)?
-                    .unwrap_or(IndexEntityId::initial());
                 transaction.get(&row.key).await?;
                 return Ok(IndexOperationStepResult::Blocked(
                     IndexOperationBlocker::OversizedEntity {
                         entity_kind: definition.element_kind(),
-                        entity_id,
+                        entity_id: row.entity_id,
                         observed: input_bytes,
                         limit: limits.max_input_bytes().get(),
                     },
                 ));
             }
-            exhausted = false;
+            resume = Some(
+                candidates
+                    .last()
+                    .map(|candidate: &SourceScanCandidate| candidate.cursor.clone())
+                    .expect("a batch stopped by its input bytes holds a candidate"),
+            );
             break;
         }
-        let complete_cursor = IndexCursor::try_new(row.key.clone()).map_err(operation_error)?;
-        let Some(entity_id) = source_entity(scope, definition.element_kind(), &row.key)? else {
-            candidates.push(SourceScanCandidate {
-                cursor: complete_cursor,
-                input_bytes,
-                kind: SourceScanCandidateKind::NonEntity,
-            });
-            candidate_input_bytes = candidate_input_bytes.saturating_add(input_bytes);
-            continue;
-        };
+        let entity_id = row.entity_id;
         let properties = match decode_indexed_source(definition, &row.value, &mut scratch) {
             Ok(properties) => properties,
             Err(_) => {
@@ -2087,24 +2065,16 @@ async fn scan_source(
         candidates.push(SourceScanCandidate {
             cursor: complete_cursor,
             input_bytes,
-            kind: SourceScanCandidateKind::Entity {
-                entity,
-                next_value: value,
-                applied_key,
-            },
+            entity,
+            next_value: value,
+            applied_key,
         });
         candidate_input_bytes = candidate_input_bytes.saturating_add(input_bytes);
-    }
-    if candidates.len() == limits.max_entities().get() {
-        exhausted = false;
     }
 
     let applied_keys = candidates
         .iter()
-        .filter_map(|candidate| match &candidate.kind {
-            SourceScanCandidateKind::NonEntity => None,
-            SourceScanCandidateKind::Entity { applied_key, .. } => Some(applied_key.clone()),
-        })
+        .map(|candidate| candidate.applied_key.clone())
         .collect::<Vec<_>>();
     let applied_values = if applied_keys.is_empty() {
         Vec::new()
@@ -2115,51 +2085,39 @@ async fn scan_source(
     let mut observed = Vec::with_capacity(candidates.len());
     let mut unique_keys = Vec::new();
     for candidate in candidates {
-        let kind = match candidate.kind {
-            SourceScanCandidateKind::NonEntity => ObservedSourceScanCandidateKind::NonEntity,
-            SourceScanCandidateKind::Entity {
-                entity,
-                next_value,
-                applied_key,
-            } => {
-                let applied_value = applied_values
-                    .next()
-                    .expect("each secondary source entity has one applied-state observation");
-                // The scan reaches each entity once: without an applied row
-                // the generation holds nothing for it yet.
-                let held = match decode_previous_applied(
-                    scope,
-                    operation.index_id(),
-                    operation.generation(),
-                    entity,
-                    &applied_key,
-                    applied_value.as_deref(),
-                )? {
-                    Some(value) => HeldValue::Applied(value),
-                    None => HeldValue::Unconfirmed(None),
-                };
-                if definition.unique() {
-                    unique_keys.extend(unique_observation_keys(
-                        scope,
-                        operation.index_id(),
-                        operation.generation(),
-                        definition,
-                        entity.id,
-                        held.candidate(),
-                        next_value.as_ref(),
-                    )?);
-                }
-                ObservedSourceScanCandidateKind::Entity {
-                    entity,
-                    held,
-                    next_value,
-                }
-            }
+        let applied_value = applied_values
+            .next()
+            .expect("each secondary source entity has one applied-state observation");
+        // The scan reaches each entity once: without an applied row the
+        // generation holds nothing for it yet.
+        let held = match decode_previous_applied(
+            scope,
+            operation.index_id(),
+            operation.generation(),
+            candidate.entity,
+            &candidate.applied_key,
+            applied_value.as_deref(),
+        )? {
+            Some(value) => HeldValue::Applied(value),
+            None => HeldValue::Unconfirmed(None),
         };
+        if definition.unique() {
+            unique_keys.extend(unique_observation_keys(
+                scope,
+                operation.index_id(),
+                operation.generation(),
+                definition,
+                candidate.entity.id,
+                held.candidate(),
+                candidate.next_value.as_ref(),
+            )?);
+        }
         observed.push(ObservedSourceScanCandidate {
             cursor: candidate.cursor,
             input_bytes: candidate.input_bytes,
-            kind,
+            entity: candidate.entity,
+            held,
+            next_value: candidate.next_value,
         });
     }
     assert!(applied_values.next().is_none());
@@ -2178,102 +2136,92 @@ async fn scan_source(
     let mut accounting = BatchAccounting::new(progress.counters, limits);
     let mut cursor = progress.cursor.clone();
     for candidate in observed {
-        match candidate.kind {
-            ObservedSourceScanCandidateKind::NonEntity => {
-                accounting.admit_scan(candidate.input_bytes, None)?;
-            }
-            ObservedSourceScanCandidateKind::Entity {
+        let entity = candidate.entity;
+        let plan = match decide_reconciliation(
+            transaction,
+            scope,
+            IndexEntityStateKey {
+                index_id: operation.index_id(),
+                generation: operation.generation(),
                 entity,
-                held,
-                next_value,
-            } => {
-                let plan = match decide_reconciliation(
-                    transaction,
-                    scope,
-                    IndexEntityStateKey {
-                        index_id: operation.index_id(),
-                        generation: operation.generation(),
-                        entity,
-                    },
-                    definition,
-                    &held,
-                    next_value.as_ref(),
-                    &mut unique_entries,
-                    AppliedStateDisposition::Retain,
-                )
-                .await?
-                {
-                    EntityReconciliation::Writes { plan, .. } => plan,
-                    EntityReconciliation::Blocked(blocker) => {
-                        transaction.get(candidate.cursor.as_bytes()).await?;
-                        // The duplicate's owner joins the read set too, so a
-                        // write that moves either entity before this step
-                        // commits makes it retry.
-                        let IndexOperationBlocker::UniquenessViolation {
-                            first_entity_id, ..
-                        } = blocker
-                        else {
-                            return Ok(IndexOperationStepResult::Blocked(blocker));
-                        };
-                        transaction
-                            .get(authoritative_property_key(
-                                scope,
-                                IndexEntity {
-                                    kind: entity.kind,
-                                    id: first_entity_id,
-                                },
-                            ))
-                            .await?;
-                        return Ok(IndexOperationStepResult::Blocked(blocker));
-                    }
+            },
+            definition,
+            &candidate.held,
+            candidate.next_value.as_ref(),
+            &mut unique_entries,
+            AppliedStateDisposition::Retain,
+        )
+        .await?
+        {
+            EntityReconciliation::Writes { plan, .. } => plan,
+            EntityReconciliation::Blocked(blocker) => {
+                transaction.get(candidate.cursor.as_bytes()).await?;
+                // The duplicate's owner joins the read set too, so a write
+                // that moves either entity before this step commits makes it
+                // retry.
+                let IndexOperationBlocker::UniquenessViolation {
+                    first_entity_id, ..
+                } = blocker
+                else {
+                    return Ok(IndexOperationStepResult::Blocked(blocker));
                 };
-                if !accounting.can_admit_output(&plan) {
-                    if accounting.is_empty() {
-                        transaction.get(candidate.cursor.as_bytes()).await?;
-                        return Ok(IndexOperationStepResult::Blocked(
-                            IndexOperationBlocker::OversizedEntity {
-                                entity_kind: entity.kind,
-                                entity_id: entity.id,
-                                observed: plan.output_bytes,
-                                limit: limits.max_output_bytes().get(),
-                            },
-                        ));
-                    }
-                    exhausted = false;
-                    break;
+                transaction
+                    .get(authoritative_property_key(
+                        scope,
+                        IndexEntity {
+                            kind: entity.kind,
+                            id: first_entity_id,
+                        },
+                    ))
+                    .await?;
+                return Ok(IndexOperationStepResult::Blocked(blocker));
+            }
+        };
+        if !accounting.can_admit_output(&plan) {
+            if accounting.is_empty() {
+                transaction.get(candidate.cursor.as_bytes()).await?;
+                return Ok(IndexOperationStepResult::Blocked(
+                    IndexOperationBlocker::OversizedEntity {
+                        entity_kind: entity.kind,
+                        entity_id: entity.id,
+                        observed: plan.output_bytes,
+                        limit: limits.max_output_bytes().get(),
+                    },
+                ));
+            }
+            resume = Some(
+                cursor
+                    .clone()
+                    .expect("a batch with an admitted entity has its cursor"),
+            );
+            break;
+        }
+        plan.stage(transaction)?;
+        for write in &plan.writes {
+            match write {
+                EntityWrite::Put { key, value } if unique_entries.contains_key(key) => {
+                    unique_entries.insert(key.clone(), UniqueEntry::Staged(Some(value.clone())));
                 }
-                plan.stage(transaction)?;
-                for write in &plan.writes {
-                    match write {
-                        EntityWrite::Put { key, value } if unique_entries.contains_key(key) => {
-                            unique_entries
-                                .insert(key.clone(), UniqueEntry::Staged(Some(value.clone())));
-                        }
-                        EntityWrite::Delete(key) if unique_entries.contains_key(key) => {
-                            unique_entries.insert(key.clone(), UniqueEntry::Staged(None));
-                        }
-                        EntityWrite::Put { .. }
-                        | EntityWrite::Delete(_)
-                        | EntityWrite::Bitmap { .. } => {}
-                    }
+                EntityWrite::Delete(key) if unique_entries.contains_key(key) => {
+                    unique_entries.insert(key.clone(), UniqueEntry::Staged(None));
                 }
-                accounting.admit_scan(candidate.input_bytes, Some(&plan))?;
+                EntityWrite::Put { .. } | EntityWrite::Delete(_) | EntityWrite::Bitmap { .. } => {}
             }
         }
+        accounting.admit_scan(candidate.input_bytes, Some(&plan))?;
         cursor = Some(candidate.cursor);
     }
     let counters = accounting.finish()?;
-    let next = if exhausted {
-        SecondaryBuildStage::CatchUp(PrefixScanProgress {
+    let next = match resume {
+        None => SecondaryBuildStage::CatchUp(PrefixScanProgress {
             cursor: None,
             counters,
-        })
-    } else {
-        SecondaryBuildStage::Scan(SourceScanProgress {
+        }),
+        Some(cursor) => SecondaryBuildStage::Scan(SourceScanProgress {
             inclusive_upper_bound: progress.inclusive_upper_bound.clone(),
-            cursor,
+            cursor: Some(cursor),
             counters,
-        })
+        }),
     };
     Ok(progressed_build(next))
 }
@@ -5458,6 +5406,7 @@ mod tests {
     use slatedb::{ByteRangeBounds, Db, DbIterator, DbReadOps, IsolationLevel, KeyValue};
 
     use super::*;
+
     use crate::config::{
         SearchIndexBackfillLimits, SecondaryIndexDefinition, VectorIndexDefinition,
     };
@@ -5476,6 +5425,10 @@ mod tests {
         VectorGenerationDescriptor, VectorPhysicalIndexId, VectorPhysicalLayout, WriterEpoch,
     };
     use crate::migrations::startup::bootstrap_writer;
+
+    /// Builds that read their label's rows through its bitmap.
+    #[path = "label_source_tests.rs"]
+    mod label_source_tests;
 
     const NOW_MILLIS: u64 = 1;
 
@@ -7146,12 +7099,10 @@ mod tests {
         entity_id: u64,
         properties: &[Property],
     ) {
-        db.put(
-            source_key(scope, kind, entity_id),
-            encode_properties(properties),
+        crate::index_lifecycle::label_source::testing::put_source_row(
+            db, scope, kind, entity_id, properties,
         )
-        .await
-        .expect("authoritative source row is written");
+        .await;
     }
 
     async fn create_build(
@@ -7377,6 +7328,15 @@ mod tests {
             after,
         )
         .await?;
+        crate::index_lifecycle::label_source::testing::stage_labels(
+            &transaction,
+            scope,
+            kind,
+            entity_id,
+            before,
+            after,
+        )
+        .await;
         let key = source_key(scope, kind, entity_id);
         if after.is_empty() {
             transaction.delete(key)?;
@@ -7448,6 +7408,15 @@ mod tests {
                 )
                 .expect("legacy delta stages");
         }
+        crate::index_lifecycle::label_source::testing::stage_labels(
+            &transaction,
+            scope,
+            IndexElementKind::Node,
+            entity_id,
+            before,
+            after,
+        )
+        .await;
         let key = source_key(scope, IndexElementKind::Node, entity_id);
         if after.is_empty() {
             transaction.delete(key).expect("legacy delete stages");
@@ -9059,14 +9028,26 @@ mod tests {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let mut seed = slatedb::WriteBatch::new();
+        let seed = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .expect("the seed begins");
         for (&entity_id, properties) in &sources {
             seed.put(
                 source_key(scope, IndexElementKind::Node, entity_id),
                 encode_properties(properties),
-            );
+            )
+            .expect("the source row stages");
+            crate::index_lifecycle::label_source::testing::stage_member(
+                &seed,
+                scope,
+                IndexElementKind::Node,
+                "User",
+                entity_id,
+            )
+            .await;
         }
-        db.write(seed).await.expect("sources are seeded");
+        seed.commit().await.expect("sources are seeded");
         let (operation_id, index_id, generation) =
             create_build(&db, scope, &definition, entities - 1).await;
         let ledger = delta_ledger::DeltaGeneration {
@@ -9913,9 +9894,16 @@ mod tests {
                         sources.insert(entity_id, properties);
                     }
                     Broken::Bytes(bytes) => {
-                        db.put(source_key(scope, IndexElementKind::Node, entity_id), bytes)
-                            .await
-                            .expect("malformed source row is written");
+                        // A row that no longer decodes keeps its membership.
+                        crate::index_lifecycle::label_source::testing::put_raw_source_row(
+                            &db,
+                            scope,
+                            IndexElementKind::Node,
+                            entity_id,
+                            "User",
+                            bytes,
+                        )
+                        .await;
                     }
                 }
                 upper = entity_id;
@@ -11306,7 +11294,9 @@ mod tests {
 
     /// The public `entities` progress counts each source entity once for
     /// equality, unique, and range builds: validation revisits every applied
-    /// row, which shows as bytes and operations, never as entities.
+    /// row, which shows as bytes and operations, never as entities. The
+    /// label's rows lie between rows of another label, which its scanning
+    /// steps read and never count.
     #[tokio::test]
     async fn progress_counts_each_source_entity_once() {
         const ENTITIES: u64 = 10;
@@ -11326,15 +11316,19 @@ mod tests {
             let definition = validated(definition.expect("test definition is valid"));
             let db = test_db("secondary-progress-entities").await;
             let scope = DataScope::LegacyUnscoped;
-            for entity_id in 0..ENTITIES {
+            for entity_id in 0..2 * ENTITIES {
                 let mut properties = user_properties(&format!("seed-{entity_id}@example.com"));
+                if entity_id % 2 == 1 {
+                    properties[0] = Property::string("$label", "Other");
+                }
                 properties.push(Property::i64(
                     "rank",
                     i64::try_from(entity_id).expect("rank fits"),
                 ));
                 put_source(&db, scope, IndexElementKind::Node, entity_id, &properties).await;
             }
-            let (operation_id, _, _) = create_build(&db, scope, &definition, ENTITIES - 1).await;
+            let (operation_id, _, _) =
+                create_build(&db, scope, &definition, 2 * ENTITIES - 1).await;
             let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
             let status = |record: IndexOperationRecord| {
                 let status = crate::index_lifecycle::IndexOperationStatus::from_record(&record);
