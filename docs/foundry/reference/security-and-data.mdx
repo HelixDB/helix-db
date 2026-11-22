@@ -1,6 +1,6 @@
 ---
 title: "Security and data handling"
-description: "What Helix Foundry stores, how it seals credentials, why connectors only read, what reaches AI model providers and how to keep it local, who can read what, and how the local install stays on 127.0.0.1"
+description: "What Helix Foundry stores, how it seals credentials, why connectors only read, what reaches AI model providers and how to keep it local, what else it sends, who can read what, and how the local install stays on 127.0.0.1"
 sidebarTitle: "Security and data"
 pageType: "Reference"
 ---
@@ -26,8 +26,9 @@ Deleting an ontology removes what its loads wrote and leaves the database's othe
 in place. Foundry never deletes a Helix database.
 
 On your own computer, these are Docker Compose volumes: `mysql`, `storage` (the object
-store, SeaweedFS), `helix` (HelixDB), `work` (the workers' working files) and `secrets`.
-`docker compose down` keeps them; `docker compose down -v` deletes them all. See the
+store, SeaweedFS), `helix` (HelixDB), `work` (the workers' working files), `secrets`,
+and `ollama` (the local models, with the `ollama` profile). `docker compose down` keeps
+them; `docker compose down -v` deletes them all. See the
 install's [backup and restore](https://github.com/helixdb/helix-foundry/blob/main/local/README.md#back-up-and-restore).
 
 ## Credentials
@@ -53,12 +54,16 @@ install's [backup and restore](https://github.com/helixdb/helix-foundry/blob/mai
 
 Foundry never writes to your sources:
 
-- **Databases.** Create a user with `SELECT` only; each connector's form gives the SQL.
-  PostgreSQL and MySQL reads run in read-only transactions. With PostgreSQL change
-  capture, Foundry keeps a replication slot named `helix_foundry_<connection>` on the
-  database, which it creates and drops itself; it changes no table.
-- **Apps.** Each connector asks for read access only, such as a restricted Stripe key
-  or read-only Google scopes. See [Connectors](/foundry/data/connectors) for each one's
+- **Databases.** Create a user with `SELECT` on the tables Foundry reads; each
+  connector's form gives the SQL. PostgreSQL and MySQL reads run in read-only
+  transactions. Change capture also needs the right to read the database's change log:
+  `REPLICATION` on PostgreSQL (`rds_replication` on Amazon RDS and Aurora), and
+  `REPLICATION SLAVE, REPLICATION CLIENT` on MySQL. With PostgreSQL change capture,
+  Foundry keeps a replication slot named `helix_foundry_<connection>` on the database,
+  which it creates and drops itself; it changes no table.
+- **Apps.** Foundry only calls their read endpoints, and each connector's setup asks for
+  read-only scopes where the provider offers them, such as a restricted Stripe key or
+  read-only Google scopes. See [Connectors](/foundry/data/connectors) for each one's
   scopes.
 - **API sources** take what your apps and agents send; Foundry reads nothing from them.
 
@@ -94,13 +99,18 @@ helper is revoked.
 
 ## Other outbound traffic
 
-- **Usage analytics.** The open-source install's site and its HelixDB tell Helix,
-  anonymously, how Foundry is used: page paths with ids taken out, steps such as a load
-  being ready, and each query's shape with values taken out. They send no data,
-  documents, questions, answers, names or emails. Set `FOUNDRY_TELEMETRY=off` (or
-  `DO_NOT_TRACK=1`) in `local/.env` to turn it off.
-- **People enrichment** looks up the people a load holds with an outside provider. Only
-  an owner can allow it. The open-source install has none.
+- **Usage analytics, hosted.** Foundry's site sends Databuddy (databuddy.cc) the pages
+  you open, the steps you take, errors and session replays, under your account's name
+  and email. Replays mask the page's text and what you type.
+- **Usage analytics, on your own computer.** The install's site and its HelixDB tell
+  Helix, anonymously, how Foundry is used: page paths with ids taken out, steps such as
+  a load being ready, and each query's shape with values taken out. The site sends its
+  part on to Databuddy. They send no data, documents, questions, answers, names or
+  emails. Set `FOUNDRY_TELEMETRY=off` (or `DO_NOT_TRACK=1`) in `local/.env` to turn it
+  off.
+- **People enrichment**, hosted, sends context.dev the email or LinkedIn profile of each
+  person a load holds, and adds the profile it finds. Only an owner can allow it. The
+  open-source install has none.
 
 ## Who can read what
 
@@ -117,6 +127,10 @@ Hosted, a workspace has owners, admins and members; see
   for five minutes, and bound to that operation, its target and its exact payload.
 - Tool results are marked as untrusted data, so agents treat what your sources say as
   data, never as instructions.
+- Owners and admins can publish a dashboard to a public link, which anyone with the
+  link can read without signing in. It holds a snapshot of the tile outputs, can end
+  after 7, 30 or 90 days, and can be unpublished. An owner can turn public links off for
+  the workspace. The open-source install never publishes.
 
 The open-source install has one owner and no sign-in: no team, no roles and no source
 sharing. Anyone who can reach it controls it.
@@ -129,7 +143,7 @@ The open-source install is for one person on their own computer.
 | --- | --- |
 | Foundry's site | `127.0.0.1:3000`, and answers only `localhost:3000` |
 | Object store, for the uploads Foundry signs | `127.0.0.1:8333` |
-| MCP and HTTP Ask | `127.0.0.1:8081` (or `FOUNDRY_MCP_PORT`), answering only `localhost`, `127.0.0.1`, `::1` and `host.docker.internal` |
+| MCP and HTTP Ask | `127.0.0.1:8081` (or `FOUNDRY_MCP_PORT`), answering only `localhost`, `127.0.0.1`, `::1`, `host.docker.internal` and the host of `HELIX_LOCAL__SITE_ORIGIN` |
 | Bundled Ollama | The ontology agent's loopback only |
 
 Never expose it through a reverse proxy, tunnel or port forward. The MCP's owner token
