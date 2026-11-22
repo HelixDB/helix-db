@@ -1,0 +1,403 @@
+//! Contracts of the reclaim's pure rules: which compactions a plan is made
+//! of, which sorted runs are worth rewriting, and when a reclaim gives way.
+
+use super::*;
+
+const GIB: u64 = 1 << 30;
+const MIB: u64 = 1 << 20;
+
+fn laid(table: u128, bytes: u64) -> LaidTable {
+    LaidTable {
+        table: TableId(table),
+        bytes,
+    }
+}
+
+/// An L0 table whose view is named by its table id.
+fn l0(table: u128, bytes: u64) -> (SourceId, LaidTable) {
+    (view(table), laid(table, bytes))
+}
+
+fn view(table: u128) -> SourceId {
+    SourceId::SstView(table.into())
+}
+
+fn tracked(tables: &[(u128, u64)]) -> HashMap<TableId, u64> {
+    tables
+        .iter()
+        .map(|(table, bytes)| (TableId(*table), *bytes))
+        .collect()
+}
+
+fn run(id: u32, bytes: u64, dropped_bytes: u64) -> Rewrite {
+    Rewrite::Run {
+        id,
+        bytes,
+        dropped_bytes,
+    }
+}
+
+const IDLE: Reclaimer = Reclaimer::IdleStore(Worth::WRITER);
+
+fn worth_rewriting(run_bytes: u64, dropped_bytes: u64) -> bool {
+    Worth::WRITER.rewriting(run_bytes, dropped_bytes)
+}
+
+#[test]
+fn a_small_run_is_always_worth_rewriting() {
+    for dropped in [0, 1, MIB, GIB] {
+        assert!(worth_rewriting(0, dropped), "{dropped}");
+        assert!(worth_rewriting(MIB, dropped), "{dropped}");
+        assert!(worth_rewriting(GIB, dropped), "{dropped}");
+    }
+}
+
+#[test]
+fn a_rule_is_made_of_its_two_bounds() {
+    let rule = Worth {
+        small_run_bytes: 100,
+        rewritten_per_dropped_byte: 3,
+    };
+    for (run_bytes, dropped_bytes, worth) in [
+        (100, 0, true),
+        (101, 0, false),
+        (300, 100, true),
+        (301, 100, false),
+        (300, 99, false),
+    ] {
+        assert_eq!(
+            rule.rewriting(run_bytes, dropped_bytes),
+            worth,
+            "{run_bytes} {dropped_bytes}"
+        );
+    }
+}
+
+#[test]
+fn a_large_run_is_worth_rewriting_when_an_eighth_of_it_is_dropped() {
+    assert_eq!(
+        Worth::WRITER,
+        Worth {
+            small_run_bytes: GIB,
+            rewritten_per_dropped_byte: 8,
+        }
+    );
+    for (run_bytes, dropped_bytes, worth) in [
+        // One byte past small, with nothing to speak of dropped.
+        (GIB + 1, 0, false),
+        (GIB + 1, MIB, false),
+        // Exactly an eighth, and a byte either side of it.
+        (8 * GIB, GIB, true),
+        (8 * GIB, GIB - 1, false),
+        (8 * GIB + 1, GIB, false),
+        (8 * GIB - 1, GIB, true),
+        // A large index in a larger run, and a small one.
+        (40 * GIB, 10 * GIB, true),
+        (40 * GIB, 5 * GIB, true),
+        (40 * GIB, 5 * GIB - 1, false),
+        (1024 * GIB, 10 * GIB, false),
+        // All of it dropped.
+        (40 * GIB, 40 * GIB, true),
+        // The product does not wrap.
+        (u64::MAX, u64::MAX / 4, true),
+        (u64::MAX, GIB, false),
+    ] {
+        assert_eq!(
+            worth_rewriting(run_bytes, dropped_bytes),
+            worth,
+            "{run_bytes} {dropped_bytes}"
+        );
+    }
+}
+
+#[test]
+fn a_caller_is_never_refused_and_the_idle_store_follows_the_rule() {
+    for (run_bytes, dropped_bytes) in [(MIB, 0), (40 * GIB, 0), (40 * GIB, MIB), (8 * GIB, GIB)] {
+        assert!(Reclaimer::Caller.rewrites(run_bytes, dropped_bytes));
+        for writer in [IDLE, BUSY] {
+            assert_eq!(
+                writer.rewrites(run_bytes, dropped_bytes),
+                worth_rewriting(run_bytes, dropped_bytes),
+                "{run_bytes} {dropped_bytes}"
+            );
+        }
+    }
+}
+
+const BUSY: Reclaimer = Reclaimer::BusyStore(Worth::WRITER);
+
+#[test]
+fn the_writer_starts_a_compaction_only_where_the_scheduler_keeps_room() {
+    for (others, slots, idle, busy) in [
+        // An idle store's reclaim starts beside nothing.
+        (0, 4, true, true),
+        (1, 4, false, true),
+        // A busy store's leaves the scheduler one slot after its own.
+        (2, 4, false, true),
+        (3, 4, false, false),
+        (4, 4, false, false),
+        (0, 2, true, true),
+        (1, 2, false, false),
+        // With one slot it would take the only one.
+        (0, 1, true, false),
+    ] {
+        assert!(Reclaimer::Caller.starts_beside(others, slots));
+        assert_eq!(IDLE.starts_beside(others, slots), idle, "{others} {slots}");
+        assert_eq!(BUSY.starts_beside(others, slots), busy, "{others} {slots}");
+    }
+}
+
+#[test]
+fn a_reclaim_gives_way_only_when_it_keeps_l0_from_being_compacted() {
+    for (slots, taken, l0_in_flight, l0_tables, starves) in [
+        // A slot is free: the scheduler can start what it likes.
+        (4, 1, false, 8, false),
+        (4, 3, false, 8, false),
+        // Every slot is taken and L0 tables wait with no compaction of
+        // theirs in flight.
+        (4, 4, false, 1, true),
+        (4, 4, false, 8, true),
+        (4, 5, false, 1, true),
+        (1, 1, false, 1, true),
+        // One is in flight: the scheduler starts no second beside it.
+        (4, 4, true, 8, false),
+        // L0 is empty: nothing waits.
+        (4, 4, false, 0, false),
+    ] {
+        assert_eq!(
+            starves_l0(slots, taken, l0_in_flight, l0_tables),
+            starves,
+            "{slots} {taken} {l0_in_flight} {l0_tables}"
+        );
+    }
+}
+
+#[test]
+fn a_plan_names_nothing_where_no_table_is_tracked() {
+    let layout = Layout {
+        l0: vec![l0(1, MIB)],
+        runs: vec![(3, vec![laid(2, GIB)]), (0, vec![laid(3, 40 * GIB)])],
+    };
+    for reclaimer in [Reclaimer::Caller, IDLE] {
+        assert_eq!(Plan::of(&layout, &tracked(&[]), reclaimer), Plan::default());
+        // A tracked table that is no longer stored names nothing either.
+        assert_eq!(
+            Plan::of(&layout, &tracked(&[(9, GIB)]), reclaimer),
+            Plan::default()
+        );
+        assert_eq!(
+            Plan::of(&Layout::default(), &tracked(&[(1, GIB)]), reclaimer),
+            Plan::default()
+        );
+    }
+}
+
+#[test]
+fn a_plan_rewrites_only_the_runs_that_hold_tracked_tables() {
+    // Runs 5, 4 and 0. Only run 4 holds tracked tables: two of its three.
+    let layout = Layout {
+        l0: vec![],
+        runs: vec![
+            (5, vec![laid(50, 100 * MIB)]),
+            (
+                4,
+                vec![
+                    laid(40, 200 * MIB),
+                    laid(41, 300 * MIB),
+                    laid(42, 100 * MIB),
+                ],
+            ),
+            (0, vec![laid(1, 30 * GIB), laid(2, 10 * GIB)]),
+        ],
+    };
+    let tracked = tracked(&[(40, 150 * MIB), (42, 20 * MIB)]);
+    for reclaimer in [Reclaimer::Caller, IDLE] {
+        assert_eq!(
+            Plan::of(&layout, &tracked, reclaimer),
+            Plan {
+                // The whole run is what a rewrite costs; the rows of the
+                // tracked tables are what it gives back.
+                rewrites: vec![run(4, 600 * MIB, 170 * MIB)],
+                left: None,
+            }
+        );
+    }
+}
+
+#[test]
+fn a_plan_leaves_a_run_that_is_not_worth_rewriting_unless_a_caller_asks() {
+    let layout = Layout {
+        l0: vec![],
+        runs: vec![
+            (7, vec![laid(70, 2 * GIB)]),
+            (3, vec![laid(30, 4 * GIB), laid(31, 4 * GIB)]),
+            (0, vec![laid(1, 30 * GIB), laid(2, 10 * GIB)]),
+        ],
+    };
+    // A sliver in run 7, exactly an eighth of run 3, and next to nothing of
+    // run 0.
+    let tracked = tracked(&[(70, MIB), (30, GIB), (2, 3 * MIB)]);
+    assert_eq!(
+        Plan::of(&layout, &tracked, IDLE),
+        Plan {
+            rewrites: vec![run(3, 8 * GIB, GIB)],
+            left: Some(LeftInPlace {
+                dropped_bytes: 4 * MIB,
+                run_bytes: 42 * GIB,
+                runs: 2,
+            }),
+        }
+    );
+    assert_eq!(
+        Plan::of(&layout, &tracked, Reclaimer::Caller),
+        Plan {
+            // Most dropped bytes first.
+            rewrites: vec![
+                run(3, 8 * GIB, GIB),
+                run(0, 40 * GIB, 3 * MIB),
+                run(7, 2 * GIB, MIB)
+            ],
+            left: None,
+        }
+    );
+}
+
+#[test]
+fn a_plan_orders_runs_by_the_bytes_they_give_back() {
+    let layout = Layout {
+        l0: vec![],
+        runs: vec![
+            (9, vec![laid(90, GIB)]),
+            (6, vec![laid(60, GIB)]),
+            (4, vec![laid(40, GIB)]),
+            (2, vec![laid(20, GIB)]),
+        ],
+    };
+    assert_eq!(
+        Plan::of(
+            &layout,
+            &tracked(&[(90, 5), (60, 9), (40, 9), (20, 7)]),
+            IDLE
+        )
+        .rewrites,
+        // The two that give back the same go by id.
+        vec![
+            run(4, GIB, 9),
+            run(6, GIB, 9),
+            run(2, GIB, 7),
+            run(9, GIB, 5)
+        ]
+    );
+}
+
+#[test]
+fn a_plan_compacts_the_newest_tracked_l0_table_and_every_older_one() {
+    // Newest first: tables 14, 13, 12, 11.
+    let layout = Layout {
+        l0: vec![
+            l0(14, 4 * MIB),
+            l0(13, 3 * MIB),
+            l0(12, 2 * MIB),
+            l0(11, MIB),
+        ],
+        runs: vec![(0, vec![laid(1, GIB)])],
+    };
+    for (tracked_tables, sources, bytes, dropped_bytes) in [
+        // The oldest alone.
+        (vec![(11, 7)], vec![11], MIB, 7),
+        // One in the middle takes the older ones with it, tracked or not.
+        (vec![(13, 5)], vec![13, 12, 11], 6 * MIB, 5),
+        (vec![(13, 5), (11, 7)], vec![13, 12, 11], 6 * MIB, 12),
+        // The newest takes them all.
+        (vec![(14, 1)], vec![14, 13, 12, 11], 10 * MIB, 1),
+    ] {
+        for reclaimer in [Reclaimer::Caller, IDLE] {
+            assert_eq!(
+                Plan::of(&layout, &tracked(&tracked_tables), reclaimer),
+                Plan {
+                    rewrites: vec![Rewrite::L0 {
+                        sources: sources.iter().copied().map(view).collect(),
+                        bytes,
+                        dropped_bytes,
+                    }],
+                    left: None,
+                },
+                "{tracked_tables:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_plan_compacts_l0_before_any_run_and_never_leaves_l0_in_place() {
+    let layout = Layout {
+        l0: vec![l0(12, 2 * MIB), l0(11, MIB)],
+        runs: vec![(1, vec![laid(5, GIB)]), (0, vec![laid(1, 40 * GIB)])],
+    };
+    let tracked = tracked(&[(11, 1), (5, 9), (1, 2)]);
+    assert_eq!(
+        Plan::of(&layout, &tracked, IDLE),
+        Plan {
+            rewrites: vec![
+                Rewrite::L0 {
+                    sources: vec![view(11)],
+                    bytes: MIB,
+                    dropped_bytes: 1,
+                },
+                run(1, GIB, 9),
+            ],
+            left: Some(LeftInPlace {
+                dropped_bytes: 2,
+                run_bytes: 40 * GIB,
+                runs: 1,
+            }),
+        }
+    );
+}
+
+#[test]
+fn a_rewrite_reads_what_it_names() {
+    let l0 = Rewrite::L0 {
+        sources: vec![view(12), view(11)],
+        bytes: 30,
+        dropped_bytes: 4,
+    };
+    assert_eq!(l0.sources(), vec![view(12), view(11)]);
+    assert_eq!(l0.bytes(), (30, 4));
+    assert_eq!(run(7, 50, 6).sources(), vec![SourceId::SortedRun(7)]);
+    assert_eq!(run(7, 50, 6).bytes(), (50, 6));
+}
+
+#[test]
+fn a_layout_knows_the_tables_a_rewrite_reads_and_whether_any_is_stored() {
+    let layout = Layout {
+        l0: vec![l0(13, MIB), l0(12, MIB), l0(11, MIB)],
+        runs: vec![
+            (4, vec![laid(40, GIB), laid(41, GIB)]),
+            (0, vec![laid(1, GIB)]),
+        ],
+    };
+    let tables = |ids: &[u128]| ids.iter().copied().map(TableId).collect::<HashSet<_>>();
+    assert_eq!(layout.tables_of(&run(4, 2 * GIB, 0)), tables(&[40, 41]));
+    assert_eq!(layout.tables_of(&run(0, GIB, 0)), tables(&[1]));
+    // A run the layout does not have reads nothing.
+    assert_eq!(layout.tables_of(&run(9, GIB, 0)), tables(&[]));
+    assert_eq!(
+        layout.tables_of(&Rewrite::L0 {
+            sources: vec![view(12), view(11)],
+            bytes: 2 * MIB,
+            dropped_bytes: 0,
+        }),
+        tables(&[12, 11])
+    );
+    for (ids, stored) in [
+        (vec![40], true),
+        (vec![11], true),
+        (vec![1, 99], true),
+        (vec![99], false),
+        (vec![], false),
+    ] {
+        assert_eq!(layout.holds_any(&tables(&ids)), stored, "{ids:?}");
+    }
+    assert!(!Layout::default().holds_any(&tables(&[1])));
+}

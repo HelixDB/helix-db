@@ -49,9 +49,12 @@
 //!   can hold a row of it; see that module for the proof. Compactions the
 //!   scheduler picks retire entries as they pass. A restart forgets the
 //!   proof and starts it again from every table the store then has.
-//! - **Reclaim.** [`reclaim`] compacts the store so that the rows go, on
-//!   request, or by itself once the store has been idle with an entry whose
-//!   rows no compaction is going to reach. It deletes no entry itself.
+//! - **Reclaim.** [`reclaim`] rewrites the sorted runs that hold the rows:
+//!   every one of them on request, and by itself those in which the rows
+//!   are a large enough part to be worth it, once the store has been idle or
+//!   the rows have waited long. It rewrites no run that holds none, deletes
+//!   no entry itself, and gives its slot back when the compaction of L0
+//!   tables needs it.
 //!
 //! # What a drop still deletes itself
 //!
@@ -95,10 +98,11 @@
 //! scopes quarantined entries name, for as long as one is stored.
 //! Dropping a partitioned vector generation still costs one cleanup commit
 //! per partition, and its mappings stay until the entry retires. An entry
-//! lives as long as a table that held its rows when the proof started: the
-//! rows of a large index sit in the oldest sorted run, which the scheduler
-//! rewrites rarely, so on a store that is never idle such an entry can stay
-//! for as long as that run does unless a caller asks for a reclaim.
+//! lives as long as a table that held its rows when the proof started. The
+//! rows of an old index sit in the oldest sorted run, which the scheduler
+//! rewrites rarely; when they are too small a part of it to be worth its
+//! rewrite the writer leaves them, and the entry stays for as long as that
+//! run does unless a caller asks for a reclaim.
 
 pub(crate) mod filter;
 pub(crate) mod ownership;
@@ -184,19 +188,26 @@ pub(crate) fn compactor(
     )
 }
 
-/// Whether a writer opened with `settings` runs every compaction of its
-/// store in its own process, behind the filter [`compactor`] installs.
+/// How many compactions a writer opened with `settings` runs at a time in
+/// its own process, behind the filter [`compactor`] installs; `None` when it
+/// does not run every compaction of its store there.
 ///
-/// [`retire`] rests on that: a compaction another process ran would replace
-/// tables without consulting this writer's [`Registry`]. SlateDB runs a
-/// compaction in whichever worker claims it, and a writer's embedded worker
-/// is the only one Helix starts; a writer configured without it leaves its
-/// compactions to workers it cannot see, so it retires nothing.
-pub(crate) fn compacts_in_process(settings: &slatedb::Settings) -> bool {
-    settings
-        .compactor_options
-        .as_ref()
-        .is_some_and(|options| options.worker.is_some())
+/// [`retire`] rests on the writer compacting in process: a compaction
+/// another process ran would replace tables without consulting this writer's
+/// [`Registry`]. SlateDB runs a compaction in whichever worker claims it,
+/// and a writer's embedded worker is the only one Helix starts; a writer
+/// configured without it leaves its compactions to workers it cannot see, so
+/// it retires nothing. The count is the smaller of what the coordinator
+/// schedules and what the worker claims: [`reclaim`] gives its slot back
+/// when they are all taken.
+pub(crate) fn compaction_slots(settings: &slatedb::Settings) -> Option<usize> {
+    let options = settings.compactor_options.as_ref()?;
+    let worker = options.worker.as_ref()?;
+    Some(
+        options
+            .max_concurrent_compactions
+            .min(worker.max_concurrent_compactions),
+    )
 }
 
 /// One generation of one logical index, as a dropped-generation entry names it.
@@ -272,8 +283,10 @@ pub(crate) async fn reclaim_fixture(db: &crate::HelixDB) {
             {
                 DroppedStorageReclaim::Idle => break,
                 // Rewritten, or lost to a compaction the scheduler picked:
-                // the next call tells whether an entry is left.
+                // the next call tells whether an entry is left. A caller is
+                // never declined.
                 DroppedStorageReclaim::Compacted { .. }
+                | DroppedStorageReclaim::Declined { .. }
                 | DroppedStorageReclaim::Incomplete { .. } => {}
                 DroppedStorageReclaim::Retained { .. } => {
                     Box::pin(db.query(QueryRequest::write(write_batch().var_as(
@@ -812,6 +825,39 @@ impl<T: Eq + std::hash::Hash> Waiting<T> {
     }
 }
 
+/// The tables a proof still waits for, each with an estimate of the stored
+/// bytes of the entry's rows in it. Never empty: a proof that waits for no
+/// table is complete.
+///
+/// The estimate is what [`retire`] read of the table when the proof found
+/// it: exact to one block at each end of each owner's rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Tracked(HashMap<TableId, u64>);
+
+impl Tracked {
+    /// `tables`, unless there is none.
+    pub(crate) fn new(tables: HashMap<TableId, u64>) -> Option<Self> {
+        (!tables.is_empty()).then_some(Self(tables))
+    }
+
+    /// The tables and the estimated bytes of the entry's rows in each; never
+    /// empty.
+    pub(crate) fn tables(&self) -> &HashMap<TableId, u64> {
+        &self.0
+    }
+
+    /// Those of the tables that are among `stored`, unless none is.
+    pub(crate) fn still(&self, stored: &HashSet<TableId>) -> Option<Self> {
+        Self::new(
+            self.0
+                .iter()
+                .filter(|(table, _)| stored.contains(table))
+                .map(|(table, bytes)| (*table, *bytes))
+                .collect(),
+        )
+    }
+}
+
 /// How far [`retire`] has got in proving that no table holds a row of one
 /// armed entry. The steps and why each is sound are in that module.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -824,7 +870,7 @@ pub(crate) enum Proof {
     Draining { compactions: Waiting<CompactionId> },
     /// These tables held rows of the entry once every compaction above had
     /// finished. Every later table is free of them.
-    Tracking { tables: Waiting<TableId> },
+    Tracking { tables: Tracked },
 }
 
 /// An entry this writer discards rows for.
@@ -952,6 +998,13 @@ pub struct DroppedIndexStorage {
     pub tracking: usize,
     /// Distinct tables the `tracking` generations wait for.
     pub tracked_tables: usize,
+    /// An estimate of the stored bytes of the `tracking` generations' rows
+    /// in those tables: what the store gets back when they are compacted.
+    /// Rows of generations not yet `tracking` are not counted.
+    pub tracked_bytes: u64,
+    /// The part of that the writer leaves where it is; `None` when a reclaim
+    /// would rewrite every table the generations wait for.
+    pub left_in_place: Option<reclaim::LeftInPlace>,
     /// When this writer armed the armed generation it has waited on longest.
     /// A writer that opens arms every stored entry again.
     pub waiting_since: Option<Instant>,
@@ -1106,6 +1159,9 @@ impl Registry {
     }
 
     /// Every entry this writer knows of, counted by what it waits for.
+    /// [`DroppedIndexStorage::left_in_place`] is not filled in: it takes the
+    /// writer's manifest, which [`crate::HelixDB::dropped_index_storage`]
+    /// has.
     pub(crate) fn storage(&self) -> DroppedIndexStorage {
         let state = self.state.lock();
         let mut storage = DroppedIndexStorage::default();
@@ -1126,7 +1182,8 @@ impl Registry {
                         Proof::Draining { .. } => storage.draining += 1,
                         Proof::Tracking { tables } => {
                             storage.tracking += 1;
-                            tracked.extend(tables.members().iter().copied());
+                            storage.tracked_bytes += tables.tables().values().sum::<u64>();
+                            tracked.extend(tables.tables().keys().copied());
                         }
                     }
                 }
@@ -1165,6 +1222,31 @@ impl Registry {
         })
     }
 
+    /// The estimated bytes of dropped rows in each table a proof tracks,
+    /// for the entries whose gate is at or below `retention`: the rows a
+    /// compaction planned now would discard.
+    pub(crate) fn discardable_tracked(&self, retention: u64) -> HashMap<TableId, u64> {
+        let state = self.state.lock();
+        let mut tracked = HashMap::new();
+        for state in state.entries.values() {
+            let Entry::Armed(Armed {
+                gate,
+                proof: Proof::Tracking { tables },
+                ..
+            }) = state
+            else {
+                continue;
+            };
+            if *gate > retention {
+                continue;
+            }
+            for (table, bytes) in tables.tables() {
+                *tracked.entry(*table).or_default() += bytes;
+            }
+        }
+        tracked
+    }
+
     /// Whether a table some armed entry's proof tracks is missing from
     /// `stored`: only then can a look at the store retire a tracked entry.
     pub(crate) fn tracked_table_left(&self, stored: &HashSet<TableId>) -> bool {
@@ -1172,7 +1254,7 @@ impl Registry {
             Entry::Armed(Armed {
                 proof: Proof::Tracking { tables },
                 ..
-            }) => !tables.members().is_subset(stored),
+            }) => !tables.tables().keys().all(|table| stored.contains(table)),
             Entry::Armed(Armed {
                 proof: Proof::Unproven | Proof::Draining { .. },
                 ..

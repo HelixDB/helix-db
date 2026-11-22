@@ -4,8 +4,9 @@
 //! The compactions the scheduler picks discard an armed entry's rows as they
 //! pass, and a [`Retirer`] pass looks at the store's tables until it can
 //! prove none holds such a row. A pass compacts nothing. The background task
-//! that runs the passes asks for a [reclaim](super::reclaim) when the store
-//! is idle and an entry's rows are still in tables; see [`RetireSupervisor`].
+//! that runs the passes asks for a [reclaim](super::reclaim) of the sorted
+//! runs that still hold an entry's rows, once the store is idle or the rows
+//! have waited long; see [`RetireSupervisor`].
 //!
 //! # The proof
 //!
@@ -36,7 +37,10 @@
 //!    them finished, find the tables that hold a row under one of the entry's
 //!    owner prefixes: its *suspects*. Each table is looked into, not judged
 //!    by its key range, so an entry whose rows are already gone has no
-//!    suspect and retires at once.
+//!    suspect and retires at once. Each suspect is kept with an estimate of
+//!    the stored bytes of the entry's rows in it, from its block index: a
+//!    reclaim weighs them against the size of the run, and the storage
+//!    report adds them up.
 //! 3. **Track.** A table that enters the manifest after that read is a
 //!    flushed memtable, which holds no row of the entry, or the output of a
 //!    compaction every filter of which discarded the entry: had one kept it,
@@ -70,8 +74,8 @@
 //!
 //! A pass with an armed entry reads `.compactions` and the manifest from
 //! object storage. Finding suspects reads the block index of every table
-//! whose key range cuts through an owner prefix, and one data block for each
-//! run of prefixes that falls inside a block; a writer that opens onto many
+//! whose key range reaches an owner prefix without lying wholly under it,
+//! and one data block for each run of prefixes that falls inside a block; a writer that opens onto many
 //! entries pays that once for all of them, in the background. What a pass
 //! reads of a table it keeps in a cache of [`TABLE_CACHE_BYTES`], so a
 //! proof that starts again reads a table again only once the block indexes
@@ -100,10 +104,10 @@ use crate::index_lifecycle::failpoints::{self, IndexOutboxFailpoint};
 use crate::index_lifecycle::DroppedGenerationRows;
 use crate::HelixWriter;
 
-use super::reclaim::Reclaimer;
+use super::reclaim::{Reclaimer, Worth};
 use super::{
     CompactionActivity, CompactionId, DroppedGeneration, DroppedIndexStorage, Proof, TableId,
-    Unquarantined, Waiting,
+    Tracked, Unquarantined, Waiting,
 };
 
 /// Shortest time between two background passes, so that a burst of changes
@@ -122,9 +126,13 @@ const MAX_BACKOFF: Duration = Duration::from_secs(600);
 /// How long the store must have been idle before the background task
 /// reclaims; see [`RetireSupervisor`].
 const IDLE_RECLAIM_AFTER: Duration = Duration::from_secs(300);
-/// Longest an idle reclaim waits for its compactions. One that outlives it
-/// goes on, and the pass after it retires what it discarded.
-const IDLE_RECLAIM_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
+/// How long proofs must have tracked tables before the background task
+/// reclaims a store that is not idle, and how long it then waits before it
+/// tries again; see [`RetireSupervisor`].
+const BUSY_RECLAIM_AFTER: Duration = Duration::from_secs(30 * 60);
+/// Longest a background reclaim waits for its compactions. One that outlives
+/// it goes on, and the pass after it retires what it discarded.
+const RECLAIM_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
 /// Bytes of block indexes and data blocks a retirer keeps of the tables it
 /// has looked into.
 const TABLE_CACHE_BYTES: u64 = 64 * 1024 * 1024;
@@ -143,7 +151,7 @@ enum Step {
     /// suspects.
     Find,
     /// These suspects are still in the manifest.
-    Track(Waiting<TableId>),
+    Track(Tracked),
     /// No table holds a row of the entry.
     Retire,
 }
@@ -160,8 +168,7 @@ impl Proof {
                 .copied()
                 .collect(),
             Self::Tracking { tables } => {
-                let left = tables.members().intersection(stored).copied().collect();
-                return Waiting::new(left).map_or(Step::Retire, Step::Track);
+                return tables.still(stored).map_or(Step::Retire, Step::Track);
             }
         };
         Waiting::new(waiting).map_or(Step::Find, Step::Drain)
@@ -186,22 +193,17 @@ enum Held {
     InBlock(usize),
 }
 
-/// Sorts out, from the first and last keys of a table alone, the `prefixes`
-/// it can hold a row under. Returns the entries that own a prefix the table
-/// starts or ends under, which it therefore holds a row of, and the prefixes
-/// of other entries that sort strictly inside the table, which only its block
-/// index can decide. Every other prefix sorts outside the table.
+/// The `prefixes` a table from `first` to `last` can hold a row under, in
+/// key order: the one `first` is under, and each above `first` and at or
+/// below `last`. Every other prefix sorts outside the table.
 ///
 /// A table without a first key is treated as starting below every prefix,
 /// and one without a last key as ending above every prefix.
-fn held_by_range<'a>(
+fn overlapping<'a>(
     prefixes: &'a BTreeMap<Bytes, DroppedGeneration>,
     first: Option<&[u8]>,
     last: Option<&[u8]>,
-) -> (
-    HashSet<DroppedGeneration>,
-    Vec<(&'a Bytes, DroppedGeneration)>,
-) {
+) -> impl Iterator<Item = (&'a Bytes, DroppedGeneration)> {
     // No owner prefix is a prefix of another, so the only prefix at or below
     // `first` that can cover it is its predecessor.
     let covering = first.and_then(|first| {
@@ -210,25 +212,72 @@ fn held_by_range<'a>(
             .next_back()
             .filter(|(prefix, _)| first.starts_with(prefix))
     });
-    // A prefix above `first` and at or below `last` covers `last`, or every
-    // key under it sorts strictly between the two.
-    let (ending, inside): (Vec<_>, Vec<_>) = prefixes
-        .range::<[u8], _>((
+    covering
+        .into_iter()
+        .chain(prefixes.range::<[u8], _>((
             first.map_or(Bound::Unbounded, Bound::Excluded),
             last.map_or(Bound::Unbounded, Bound::Included),
-        ))
-        .partition(|(prefix, _)| last.is_some_and(|last| last.starts_with(prefix)));
-    let held = covering
+        )))
+        .map(|(prefix, entry)| (prefix, *entry))
+}
+
+/// Sorts out, from the first and last keys of a table alone, the `prefixes`
+/// it can hold a row under. Returns the entries that own a prefix the table
+/// starts or ends under, which it therefore holds a row of, and the prefixes
+/// of other entries that sort strictly inside the table, which only its block
+/// index can decide. Every other prefix sorts outside the table.
+fn held_by_range<'a>(
+    prefixes: &'a BTreeMap<Bytes, DroppedGeneration>,
+    first: Option<&[u8]>,
+    last: Option<&[u8]>,
+) -> (
+    HashSet<DroppedGeneration>,
+    Vec<(&'a Bytes, DroppedGeneration)>,
+) {
+    // A prefix above `first` and at or below `last` covers `last`, or every
+    // key under it sorts strictly between the two.
+    let (ends, inside): (Vec<_>, Vec<_>) =
+        overlapping(prefixes, first, last).partition(|(prefix, _)| {
+            first.is_some_and(|first| first.starts_with(prefix))
+                || last.is_some_and(|last| last.starts_with(prefix))
+        });
+    let held = ends
         .into_iter()
-        .chain(ending)
-        .map(|(_, entry)| *entry)
+        .map(|(_, entry)| entry)
         .collect::<HashSet<_>>();
     let inside = inside
         .into_iter()
         .filter(|(_, entry)| !held.contains(entry))
-        .map(|(prefix, entry)| (prefix, *entry))
         .collect();
     (held, inside)
+}
+
+/// The blocks whose stored bytes estimate the rows under one prefix: blocks
+/// `from..to` have an index key under the prefix. When none has, the rows
+/// are in the one block before them, if there is one.
+///
+/// The estimate is exact to one block at each end: the block before `from`
+/// may end with rows under the prefix, and the last block may go on past
+/// them.
+fn blocks_under(from: usize, to: usize) -> std::ops::Range<usize> {
+    if from < to {
+        from..to
+    } else {
+        from.saturating_sub(1)..from.max(1)
+    }
+}
+
+/// `ranges`, which are in the order of their starts, with those that
+/// overlap joined: every block they cover, once.
+fn disjoint(ranges: Vec<std::ops::Range<usize>>) -> Vec<std::ops::Range<usize>> {
+    let mut joined = Vec::<std::ops::Range<usize>>::with_capacity(ranges.len());
+    for range in ranges {
+        match joined.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            Some(_) | None => joined.push(range),
+        }
+    }
+    joined
 }
 
 /// Decides [`Held`] from a table's block index: `before` blocks have an
@@ -259,6 +308,15 @@ pub enum QuarantinedEntryRemoval {
     Absent,
 }
 
+/// What a retirer last logged.
+#[derive(Debug, Default)]
+pub(super) struct Logged {
+    /// What the last pass that logged left.
+    pub(super) storage: DroppedIndexStorage,
+    /// How the last reclaim ended.
+    pub(super) reclaim: Option<super::reclaim::DroppedStorageReclaim>,
+}
+
 /// Watches one writer's tables and retires its dropped-generation entries,
 /// one pass at a time.
 pub(crate) struct Retirer {
@@ -266,26 +324,33 @@ pub(crate) struct Retirer {
     pub(super) admin: Admin,
     pub(super) tables: SstReader,
     /// Serializes passes, reclaims and removals. Holds what the last pass
-    /// logged, so a pass that changes nothing logs nothing.
-    pub(super) pass: tokio::sync::Mutex<DroppedIndexStorage>,
+    /// and the last reclaim logged, so that one that changes nothing logs
+    /// nothing.
+    pub(super) pass: tokio::sync::Mutex<Logged>,
     pub(super) closed: watch::Sender<bool>,
+    /// How many compactions the writer's compactor runs at a time; see
+    /// [`compaction_slots`](super::compaction_slots).
+    pub(super) slots: usize,
     /// The pace of the background task, once it may run. Contracts step a
     /// retirer by hand, so under test it waits to be told.
     #[cfg(test)]
-    background: watch::Sender<Option<(Duration, Duration)>>,
+    background: watch::Sender<Option<Pace>>,
 }
 
 impl Retirer {
     /// A retirer for `writer`, whose database lives at `path` in
-    /// `object_store` and runs every compaction in this process with the
-    /// writer's [`super::Registry`] behind its filter supplier.
+    /// `object_store` and runs every compaction in this process, `slots` at
+    /// a time, with the writer's [`super::Registry`] behind its filter
+    /// supplier.
     pub(crate) fn new(
         writer: Arc<HelixWriter>,
         path: &str,
         object_store: Arc<dyn ObjectStore>,
+        slots: usize,
     ) -> Self {
         Self {
             writer,
+            slots,
             admin: Admin::builder(path, Arc::clone(&object_store)).build(),
             // A table never changes, so what is read of one stays true.
             tables: SstReader::new(
@@ -297,19 +362,17 @@ impl Retirer {
                 }))),
                 None,
             ),
-            pass: tokio::sync::Mutex::new(DroppedIndexStorage::default()),
+            pass: tokio::sync::Mutex::new(Logged::default()),
             closed: watch::channel(false).0,
             #[cfg(test)]
             background: watch::channel(None).0,
         }
     }
 
-    /// Lets the background task of this retirer run, with passes at least
-    /// `look_gap` apart and a reclaim once the store has been idle for
-    /// `idle_after`.
+    /// Lets the background task of this retirer run at `pace`.
     #[cfg(test)]
-    pub(crate) fn run_in_background(&self, look_gap: Duration, idle_after: Duration) {
-        self.background.send_replace(Some((look_gap, idle_after)));
+    pub(crate) fn run_in_background(&self, pace: Pace) {
+        self.background.send_replace(Some(pace));
     }
 
     /// Deletes the stored entry of `entry` if the catalog contradicts it,
@@ -357,16 +420,16 @@ impl Retirer {
     pub(crate) async fn pass(&self) -> Result<DroppedIndexStorage> {
         let mut logged = self.pass.lock().await;
         self.look(&mut logged).await?;
-        Ok(logged.clone())
+        Ok(logged.storage.clone())
     }
 
     /// One pass, by a caller that holds the pass lock, whose value is
     /// `logged`. Returns how many entries it retired.
-    pub(super) async fn look(&self, logged: &mut DroppedIndexStorage) -> Result<usize> {
+    pub(super) async fn look(&self, logged: &mut Logged) -> Result<usize> {
         let retired = self.advance().await?;
         tracing::debug!(retired, "dropped-generation retirement pass");
         let storage = self.writer.dropped().storage();
-        if retired > 0 || storage != *logged {
+        if retired > 0 || storage != logged.storage {
             tracing::info!(
                 retired,
                 unproven = storage.unproven,
@@ -374,10 +437,11 @@ impl Retirer {
                 draining = storage.draining,
                 tracking = storage.tracking,
                 tracked_tables = storage.tracked_tables,
+                tracked_bytes = storage.tracked_bytes,
                 quarantined = storage.quarantined.len(),
                 "dropped index generations awaiting compaction"
             );
-            *logged = storage;
+            logged.storage = storage;
         }
         Ok(retired)
     }
@@ -434,7 +498,7 @@ impl Retirer {
             .collect::<BTreeMap<_, _>>();
         let mut holding = self.holding(tables, prefixes).await?;
         for (entry, armed) in find {
-            match holding.remove(&entry).and_then(Waiting::new) {
+            match holding.remove(&entry).and_then(Tracked::new) {
                 Some(tables) => {
                     registry.advance(entry, armed.kept, Proof::Tracking { tables });
                 }
@@ -481,13 +545,14 @@ impl Retirer {
     }
 
     /// Those of `tables` that hold a row under one of `prefixes`, by the
-    /// entry that owns the prefix. An entry no table holds a row of is
+    /// entry that owns the prefix, each with an estimate of the stored bytes
+    /// of that entry's rows in it. An entry no table holds a row of is
     /// absent.
     async fn holding(
         &self,
         tables: HashMap<TableId, SsTableHandle>,
         prefixes: BTreeMap<Bytes, DroppedGeneration>,
-    ) -> Result<HashMap<DroppedGeneration, HashSet<TableId>>> {
+    ) -> Result<HashMap<DroppedGeneration, HashMap<TableId, u64>>> {
         if prefixes.is_empty() {
             return Ok(HashMap::new());
         }
@@ -500,32 +565,40 @@ impl Retirer {
             .buffer_unordered(TABLE_READS)
             .try_collect::<Vec<_>>()
             .await?;
-        let mut holding = HashMap::<_, HashSet<_>>::new();
+        let mut holding = HashMap::<_, HashMap<_, _>>::new();
         for (table, entries) in held {
-            for entry in entries {
-                holding.entry(entry).or_default().insert(table);
+            for (entry, bytes) in entries {
+                holding.entry(entry).or_default().insert(table, bytes);
             }
         }
         Ok(holding)
     }
 
-    /// The entries that own a prefix under which the table `sst` holds a row.
+    /// The entries that own a prefix under which the table `sst` holds a row,
+    /// each with an estimate of the stored bytes of its rows in the table.
     ///
-    /// Reads the table's block index only when a prefix sorts strictly inside
-    /// its key range, and a data block only when a prefix sorts strictly
-    /// inside that block.
+    /// Reads nothing of a table that sorts outside every prefix, or wholly
+    /// under one. Of any other it reads the block index, and a data block
+    /// only when a prefix sorts strictly inside that block.
     async fn held(
         &self,
         sst: &SsTableHandle,
         prefixes: &BTreeMap<Bytes, DroppedGeneration>,
-    ) -> Result<HashSet<DroppedGeneration>> {
-        let (mut held, inside) = held_by_range(
-            prefixes,
-            sst.info.first_entry.as_deref(),
-            sst.info.last_entry.as_deref(),
-        );
-        if inside.is_empty() {
-            return Ok(held);
+    ) -> Result<HashMap<DroppedGeneration, u64>> {
+        let first = sst.info.first_entry.as_deref();
+        let last = sst.info.last_entry.as_deref();
+        let (mut held, inside) = held_by_range(prefixes, first, last);
+        if held.is_empty() && inside.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let whole = overlapping(prefixes, first, last)
+            .next()
+            .filter(|(prefix, _)| {
+                first.is_some_and(|first| first.starts_with(prefix))
+                    && last.is_some_and(|last| last.starts_with(prefix))
+            });
+        if let Some((_, entry)) = whole {
+            return Ok(HashMap::from([(entry, sst.estimate_size())]));
         }
         let file = self.tables.open_with_handle(sst.clone())?;
         let index = file.index().await?;
@@ -557,7 +630,38 @@ impl Retirer {
                     .map(|(_, entry)| entry),
             );
         }
-        Ok(held)
+        // The data blocks end where the filter or the index starts.
+        let info = &sst.info;
+        let data_end = match info.filter_len {
+            0 => info.index_offset,
+            _ => info.index_offset.min(info.filter_offset),
+        };
+        let offset = |block| index.get(block).map_or(data_end, |(offset, _)| offset);
+        // The blocks of each held entry, in key order. Two prefixes of one
+        // entry can share a block, which counts once.
+        let mut blocks = HashMap::<_, Vec<std::ops::Range<usize>>>::new();
+        for (prefix, entry) in overlapping(prefixes, first, last) {
+            if !held.contains(&entry) {
+                continue;
+            }
+            let from = index.partition_point(|start| start < &prefix[..]);
+            let to = index
+                .partition_point(|start| start < &prefix[..] || start.starts_with(&prefix[..]));
+            blocks
+                .entry(entry)
+                .or_default()
+                .push(blocks_under(from, to));
+        }
+        Ok(blocks
+            .into_iter()
+            .map(|(entry, blocks)| {
+                let bytes = disjoint(blocks)
+                    .into_iter()
+                    .map(|blocks| offset(blocks.end).saturating_sub(offset(blocks.start)))
+                    .sum();
+                (entry, bytes)
+            })
+            .collect())
     }
 
     /// Deletes the partition mappings a retired partitioned generation's
@@ -599,6 +703,28 @@ fn table_ids(manifest: &VersionedManifest) -> HashSet<TableId> {
         .collect()
 }
 
+/// How often the background task acts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Pace {
+    /// Shortest time between two passes; see [`LOOK_GAP`].
+    pub(crate) look_gap: Duration,
+    /// How long the store must be idle before it is reclaimed; see
+    /// [`IDLE_RECLAIM_AFTER`].
+    pub(crate) idle_after: Duration,
+    /// How long proofs must track tables before a store that is not idle is
+    /// reclaimed, and between two such reclaims; see [`BUSY_RECLAIM_AFTER`].
+    pub(crate) busy_after: Duration,
+}
+
+impl Pace {
+    /// The pace of a writer.
+    const WRITER: Self = Self {
+        look_gap: LOOK_GAP,
+        idle_after: IDLE_RECLAIM_AFTER,
+        busy_after: BUSY_RECLAIM_AFTER,
+    };
+}
+
 /// What the background task waits for besides being told of a change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Timer {
@@ -607,12 +733,14 @@ enum Timer {
     /// A pass at `at`: a proof waits for compactions that `.compactions`
     /// showed in flight, whose end this process is not told of.
     Look { at: Instant },
-    /// A reclaim at `at`, if the store is idle until then: no compaction
-    /// job of this process has started or ended since `compactions` was
-    /// read, and none is running.
+    /// A reclaim at `at`: of an idle store if the store is idle until then,
+    /// which is that no compaction job of this process has started or ended
+    /// since `compactions` was read and none is running; of a busy store if
+    /// it is not and `at` has reached `overdue`.
     Reclaim {
         at: Instant,
         compactions: CompactionActivity,
+        overdue: Instant,
     },
     /// A pass at `at`, after one that failed.
     Retry { at: Instant },
@@ -625,8 +753,8 @@ impl Timer {
     /// store is looked at again after `drain_look`. Once every proof tracks
     /// tables, only a compaction can move one on: the scheduler's, which
     /// this process is told of, or a reclaim, which is due after
-    /// `idle_after` of idleness unless one has `reclaimed` since the store
-    /// last changed.
+    /// `idle_after` of idleness, or at `overdue` without it, unless one has
+    /// `reclaimed` since the store last changed.
     fn after_pass(
         storage: &DroppedIndexStorage,
         compactions: CompactionActivity,
@@ -634,6 +762,7 @@ impl Timer {
         now: Instant,
         drain_look: Duration,
         idle_after: Duration,
+        overdue: Instant,
     ) -> Self {
         if storage.unproven + storage.draining > 0 {
             Self::Look {
@@ -641,8 +770,9 @@ impl Timer {
             }
         } else if storage.tracking > 0 && !reclaimed {
             Self::Reclaim {
-                at: now + idle_after,
+                at: (now + idle_after).min(overdue.max(now)),
                 compactions,
+                overdue,
             }
         } else {
             Self::Off
@@ -656,6 +786,36 @@ impl Timer {
             Self::Look { at } | Self::Reclaim { at, .. } | Self::Retry { at } => Some(at),
         }
     }
+
+    /// What a reclaim timer that fires at `now` does, given what the
+    /// compactor has done by then; `None` of any other timer.
+    fn due(self, now: Instant, activity: CompactionActivity, worth: Worth) -> Option<Due> {
+        let Self::Reclaim {
+            compactions,
+            overdue,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        Some(if activity == compactions && activity.running == 0 {
+            Due::Reclaim(Reclaimer::IdleStore(worth))
+        } else if now >= overdue {
+            Due::Reclaim(Reclaimer::BusyStore(worth))
+        } else {
+            Due::Later
+        })
+    }
+}
+
+/// What a reclaim timer that fires does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Due {
+    /// This reclaim.
+    Reclaim(Reclaimer),
+    /// Nothing yet: a compaction ran meanwhile and the proofs have not
+    /// tracked tables for long enough, so idle starts again.
+    Later,
 }
 
 /// What the background task does when it wakes.
@@ -664,7 +824,21 @@ enum Wake {
     /// A retirement pass.
     Pass,
     /// A reclaim, which ends with a pass.
-    Reclaim,
+    Reclaim(Reclaimer),
+}
+
+impl Wake {
+    /// When a store that is not idle is next reclaimed, after this wake:
+    /// `restarted` if the wait of a busy store starts again, `overdue` as it
+    /// was otherwise. The wait starts when proofs come to track tables, so
+    /// with a pass before which none `tracked` any, and again with each
+    /// reclaim, whatever it achieved.
+    fn overdue(self, tracked: bool, overdue: Instant, restarted: Instant) -> Instant {
+        match (self, tracked) {
+            (Self::Reclaim(_), _) | (Self::Pass, false) => restarted,
+            (Self::Pass, true) => overdue,
+        }
+    }
 }
 
 /// The background retirement task of one writer, retained by the database
@@ -695,46 +869,56 @@ enum Wake {
 /// # When it reclaims
 ///
 /// An entry whose proof tracks tables waits for compactions to rewrite them.
-/// The scheduler compacts only as writes arrive, so on a store that takes
-/// few of them the entry, and the bytes of its rows, would stay. The task
-/// therefore runs the [reclaim](super::reclaim) a caller could ask for once
-/// the store has been *idle* for [`IDLE_RECLAIM_AFTER`] with such an entry.
+/// The scheduler compacts only as writes arrive, and rewrites its oldest and
+/// largest run rarely however many arrive, so the entry, and the bytes of
+/// its rows, could stay for long. The task therefore runs the
+/// [reclaim](super::reclaim) a caller could ask for, limited to the sorted
+/// runs worth rewriting ([`Worth::WRITER`]), in two cases.
 ///
-/// Idle means that the compactor has had nothing to do for that long: no
-/// compaction job of this process started or ended, and none is running.
-/// Every job creates its filters through this writer's registry, so that is
-/// known without reading object storage. It is the compactor a reclaim
-/// competes with, not writes. The scheduler starts a compaction within
-/// seconds of the flush that makes one due, so a compactor that has rested
-/// for minutes belongs to a store whose writes fill a memtable more slowly
-/// than that, or not at all: such a store is reclaimed, writes or no. A
-/// store under load compacts every few seconds and is never idle, and its
-/// ordinary compactions retire its entries. A reclaim also gives way if
-/// writes resume as it starts; see
+/// **The store is idle**, for [`IDLE_RECLAIM_AFTER`]. Idle means that the
+/// compactor has had nothing to do for that long: no compaction job of this
+/// process started or ended, and none is running. Every job creates its
+/// filters through this writer's registry, so that is known without reading
+/// object storage. It is the compactor a reclaim competes with, not writes.
+/// The scheduler starts a compaction within seconds of the flush that makes
+/// one due, so a compactor that has rested for minutes belongs to a store
+/// whose writes fill a memtable more slowly than that, or not at all: such a
+/// store is reclaimed, writes or no. This reclaim starts a compaction only
+/// while no other is in flight; see
 /// [`Reclaimer::IdleStore`](super::reclaim::Reclaimer::IdleStore).
+///
+/// **The store is never idle**, and proofs have tracked tables for
+/// [`BUSY_RECLAIM_AFTER`]. A store under load compacts every few seconds,
+/// and its ordinary compactions retire most entries within minutes: the
+/// rows that outlast that wait are in a run the scheduler is not about to
+/// rewrite. This reclaim starts a compaction only while that leaves the
+/// scheduler a free slot; see
+/// [`Reclaimer::BusyStore`](super::reclaim::Reclaimer::BusyStore). It is
+/// tried again after the same wait for as long as proofs track tables.
+///
+/// Either reclaim gives its slot back when the compaction of L0 tables needs
+/// it; see [`ReclaimObstacle::GaveWay`](super::reclaim::ReclaimObstacle).
 ///
 /// One reclaim runs per idle period. Whatever it achieved, the next waits
 /// until the store has changed and been idle again, so a reclaim that
 /// cannot make progress, for instance while a reader older than the drop
-/// is open, is not repeated on a store that stays still.
+/// is open or because no run is worth rewriting, is not repeated on a store
+/// that stays still.
 ///
 /// # What does not scale
 ///
-/// A reclaim rewrites every sorted run, so what an idle store pays for a
-/// drop grows with the store, not with the rows the drop left: every stored
-/// byte is read and written again, however small the dropped index was.
+/// A reclaim rewrites whole sorted runs. What a drop costs to reclaim grows
+/// with the runs its rows are in, not with the rows: a large index in the
+/// oldest run costs a rewrite of that run, and a small index in it is left
+/// in place, for as long as the scheduler leaves the run alone, unless a
+/// caller asks; see [`LeftInPlace`](super::reclaim::LeftInPlace).
 ///
-/// A reclaim cannot be cancelled. Writes that start while it runs are not
-/// held up: it takes one compaction slot and the scheduler goes on
-/// compacting L0 tables on the others. But the sorted runs those compactions
-/// add are merged only once the reclaim has ended, so on a large store a
-/// long burst of writes during a reclaim leaves reads more runs to look
-/// through until then.
+/// While a run is rewritten the scheduler cannot merge it with others, so
+/// the runs newer than it wait to be merged into it until the reclaim has
+/// ended, and reads look through that many more runs until then.
 ///
-/// A store that is never idle is never reclaimed: its entries wait for the
-/// scheduler to rewrite the tables that hold their rows, the oldest sorted
-/// run last, which under a steady load can take many minutes and under a
-/// load too light to grow the newer runs much longer.
+/// A reclaim that gives way loses what its compaction had written, and
+/// starts the run again from its first byte when it next runs.
 pub(crate) struct RetireSupervisor {
     retirer: Arc<Retirer>,
     handle: JoinHandle<()>,
@@ -760,9 +944,9 @@ impl RetireSupervisor {
     async fn run(retirer: Arc<Retirer>) {
         let mut closed = retirer.closed.subscribe();
         #[cfg(not(test))]
-        let (look_gap, idle_after) = (LOOK_GAP, IDLE_RECLAIM_AFTER);
+        let pace = Pace::WRITER;
         #[cfg(test)]
-        let (look_gap, idle_after) = {
+        let pace = {
             let mut background = retirer.background.subscribe();
             let pace = tokio::select! {
                 pace = background.wait_for(Option::is_some) => pace.ok().and_then(|pace| *pace),
@@ -773,6 +957,11 @@ impl RetireSupervisor {
             };
             pace
         };
+        let Pace {
+            look_gap,
+            idle_after,
+            busy_after,
+        } = pace;
         let registry = retirer.writer.dropped();
         let mut status = retirer.writer.db().subscribe();
         // The tables of the manifest the writer held when last compared
@@ -783,6 +972,9 @@ impl RetireSupervisor {
         let mut retry = RETRY;
         // Whether a reclaim has run since the store last changed.
         let mut reclaimed = false;
+        // When a store that is not idle is next reclaimed: `busy_after`
+        // after its proofs came to track tables, or after its last reclaim.
+        let mut overdue = Instant::now() + busy_after;
         // The open cross-checked every stored entry, so the first pass is
         // due at once if one was armed, and not at all otherwise.
         let mut timer = Timer::after_pass(
@@ -792,6 +984,7 @@ impl RetireSupervisor {
             Instant::now(),
             Duration::ZERO,
             idle_after,
+            overdue,
         );
         while !*closed.borrow() {
             // Imperative: waits until this process is told of a change a
@@ -840,6 +1033,7 @@ impl RetireSupervisor {
                                 Instant::now(),
                                 drain_look,
                                 idle_after,
+                                overdue,
                             );
                         }
                     }
@@ -855,16 +1049,19 @@ impl RetireSupervisor {
                             break Wake::Pass;
                         }
                         Timer::Retry { .. } => break Wake::Pass,
-                        Timer::Reclaim { compactions, .. } => {
-                            let now = registry.compactions();
-                            if now == compactions && now.running == 0 {
-                                break Wake::Reclaim;
+                        Timer::Reclaim { overdue, .. } => {
+                            let now = Instant::now();
+                            let activity = registry.compactions();
+                            match timer.due(now, activity, Worth::WRITER) {
+                                Some(Due::Reclaim(reclaimer)) => break Wake::Reclaim(reclaimer),
+                                Some(Due::Later) | None => {
+                                    timer = Timer::Reclaim {
+                                        at: (now + idle_after).min(overdue),
+                                        compactions: activity,
+                                        overdue,
+                                    };
+                                }
                             }
-                            // A compaction ran meanwhile: idle starts again.
-                            timer = Timer::Reclaim {
-                                at: Instant::now() + idle_after,
-                                compactions: now,
-                            };
                         }
                     },
                 }
@@ -876,18 +1073,20 @@ impl RetireSupervisor {
                 }
             }
             let compactions = registry.compactions();
+            let tracked = registry.tracks_tables();
             let outcome = match wake {
                 Wake::Pass => retirer.pass().await,
-                Wake::Reclaim => {
+                Wake::Reclaim(reclaimer) => {
                     reclaimed = true;
                     retirer
-                        .reclaim(Instant::now() + IDLE_RECLAIM_WAIT, Reclaimer::IdleStore)
+                        .reclaim(Instant::now() + RECLAIM_WAIT, reclaimer)
                         .await
                         .map(|_| registry.storage())
                 }
             };
             let now = Instant::now();
             looked = Some(now);
+            overdue = wake.overdue(tracked, overdue, now + busy_after);
             timer = match outcome {
                 Ok(storage) => {
                     retry = RETRY;
@@ -898,6 +1097,7 @@ impl RetireSupervisor {
                         now,
                         drain_look,
                         idle_after,
+                        overdue,
                     )
                 }
                 Err(error) => {

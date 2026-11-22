@@ -633,11 +633,14 @@ fn dropped_index_storage_reports_progress_and_warns_on_quarantined_entries() {
         draining: 3,
         tracking: 4,
         tracked_tables: 1,
+        tracked_bytes: 3 * MIB,
+        left_in_place: None,
         waiting_since: None,
         quarantined: Vec::new(),
     };
     let counts = "2 not yet tracked (1 kept by a compaction whose retention sequence was behind \
-                  the drop), 3 waiting for compactions in flight, 4 with rows in 1 table.";
+                  the drop), 3 waiting for compactions in flight, 4 with about 3.0 MiB of rows \
+                  in 1 table.";
     let reclaiming = dropped_index_storage(&waiting);
     assert_eq!(
         reclaiming.summary,
@@ -648,10 +651,67 @@ fn dropped_index_storage_reports_progress_and_warns_on_quarantined_entries() {
         Outcome::Pass {
             detail: format!(
                 "9 dropped index generations await compaction: {counts} Compactions discard \
-                 the rows as they reach them, and the server compacts for them itself once it \
-                 has been idle for a few minutes."
+                 the rows as they reach them, and the server rewrites the sorted runs that \
+                 hold them itself once it has been idle for a few minutes."
             )
         }
+    );
+
+    // Rows the server does not rewrite a run for are reported as left, with
+    // what rewriting them would cost and how to ask for it.
+    for (runs, places) in [
+        (1, "1 sorted run of 40.0 GiB in all"),
+        (2, "2 sorted runs of 40.0 GiB in all"),
+    ] {
+        let left = dropped_index_storage(&db::DroppedIndexStorage {
+            left_in_place: Some(db::LeftInPlace {
+                dropped_bytes: 2 * MIB,
+                run_bytes: 40 * 1024 * MIB,
+                runs,
+            }),
+            ..waiting.clone()
+        });
+        assert_eq!(
+            left.summary,
+            "Dropped index rows are left in sorted runs not worth rewriting"
+        );
+        let Outcome::Pass { detail } = &left.outcome else {
+            panic!("rows left in place pass: {left:?}");
+        };
+        assert!(
+            detail.starts_with(&format!(
+                "9 dropped index generations await compaction: {counts} About 2.0 MiB of them \
+                 are in {places}, which the server does not rewrite for them"
+            )),
+            "{detail}"
+        );
+        assert!(
+            detail.contains(match runs {
+                1 => "when compaction next rewrites that run,",
+                _ => "when compaction next rewrites those runs,",
+            }),
+            "{detail}"
+        );
+        assert!(
+            detail.ends_with(
+                "call `HelixDB::reclaim_dropped_index_storage` from a process that opens the \
+                 database as its writer; the server has no route for it."
+            ),
+            "{detail}"
+        );
+    }
+    // Nothing waits: what would be left is not mentioned.
+    assert_eq!(
+        dropped_index_storage(&db::DroppedIndexStorage {
+            left_in_place: Some(db::LeftInPlace {
+                dropped_bytes: 1,
+                run_bytes: 2,
+                runs: 1,
+            }),
+            ..db::DroppedIndexStorage::default()
+        })
+        .summary,
+        "No dropped index storage awaits compaction"
     );
 
     // The age of the oldest wait is reported once there is one.
@@ -713,7 +773,10 @@ fn dropped_index_storage_reports_progress_and_warns_on_quarantined_entries() {
         ),
         "{detail}"
     );
-    assert!(detail.ends_with("with rows in 1 table."), "{detail}");
+    assert!(
+        detail.ends_with("with about 3.0 MiB of rows in 1 table."),
+        "{detail}"
+    );
     assert!(fix.contains("armed again by itself"));
     assert!(fix.contains("`HelixDB::remove_quarantined_dropped_index_entry`"));
     assert!(fix.contains("the rows it named stay stored and are never reclaimed"));

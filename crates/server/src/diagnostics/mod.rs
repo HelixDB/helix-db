@@ -1060,7 +1060,7 @@ fn dropped_index_storage(storage: &db::DroppedIndexStorage) -> Check {
     let progress = format!(
         "{waiting} dropped index {} compaction{}: {} not yet tracked ({} kept by a compaction \
          whose retention sequence was behind the drop), {} waiting for compactions in flight, {} \
-         with rows in {} {}.",
+         with about {} of rows in {} {}.",
         plural(waiting as u64, "generation awaits", "generations await"),
         storage
             .waiting_since
@@ -1070,6 +1070,7 @@ fn dropped_index_storage(storage: &db::DroppedIndexStorage) -> Check {
         storage.retained,
         storage.draining,
         storage.tracking,
+        bytes(storage.tracked_bytes),
         storage.tracked_tables,
         plural(storage.tracked_tables as u64, "table", "tables"),
     );
@@ -1132,21 +1133,42 @@ fn dropped_index_storage(storage: &db::DroppedIndexStorage) -> Check {
             },
         );
     }
+    let (summary, detail) = match (waiting, storage.left_in_place) {
+        (0, _) => (
+            "No dropped index storage awaits compaction",
+            "Every dropped index has given its storage back.".into(),
+        ),
+        (_, None) => (
+            "Compactions are reclaiming dropped index storage",
+            format!(
+                "{progress} Compactions discard the rows as they reach them, and the server \
+                 rewrites the sorted runs that hold them itself once it has been idle for a few \
+                 minutes."
+            ),
+        ),
+        (_, Some(left)) => (
+            "Dropped index rows are left in sorted runs not worth rewriting",
+            format!(
+                "{progress} About {} of them are in {} sorted {} of {} in all, which the server \
+                 does not rewrite for them: it rewrites a sorted run by itself only when the \
+                 run is no larger than 1.0 GiB or at least an eighth of it is dropped rows. \
+                 They cost their storage and nothing else, and are discarded when compaction \
+                 next rewrites {}, or once more dropped rows make the rewrite worth it. To have \
+                 them rewritten now, call `HelixDB::reclaim_dropped_index_storage` from a \
+                 process that opens the database as its writer; the server has no route for \
+                 it.",
+                bytes(left.dropped_bytes),
+                left.runs,
+                plural(left.runs as u64, "run", "runs"),
+                bytes(left.run_bytes),
+                plural(left.runs as u64, "that run", "those runs"),
+            ),
+        ),
+    };
     Check::new(
         CheckId::DroppedIndexStorage,
-        match waiting {
-            0 => "No dropped index storage awaits compaction",
-            _ => "Compactions are reclaiming dropped index storage",
-        },
-        Outcome::Pass {
-            detail: match waiting {
-                0 => "Every dropped index has given its storage back.".into(),
-                _ => format!(
-                    "{progress} Compactions discard the rows as they reach them, and the \
-                     server compacts for them itself once it has been idle for a few minutes."
-                ),
-            },
-        },
+        summary,
+        Outcome::Pass { detail },
     )
 }
 

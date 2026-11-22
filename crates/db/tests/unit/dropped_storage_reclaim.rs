@@ -32,7 +32,9 @@ use super::*;
 use crate::encoding::v2::keys::scope::TenantId;
 use crate::encoding::v2::values::encode_metadata_value;
 use crate::index_lifecycle::dropped::ownership::OwnerKey;
-use crate::index_lifecycle::dropped::reclaim::{DroppedStorageReclaim, ReclaimObstacle};
+use crate::index_lifecycle::dropped::reclaim::{
+    DroppedStorageReclaim, LeftInPlace, ReclaimObstacle, Reclaimer, Worth,
+};
 use crate::index_lifecycle::dropped::{self, Armed, QuarantinedDroppedGeneration};
 use crate::index_lifecycle::{
     DroppedGenerationValue, IndexGenerationId, IndexId, IndexV2MetadataValue,
@@ -46,6 +48,8 @@ const WAIT: Duration = Duration::from_secs(60);
 const POLL: Duration = Duration::from_millis(50);
 /// Two scans this far apart that read the same rows have settled.
 const SETTLE: Duration = Duration::from_millis(500);
+/// Compactions the default compactor runs at a time.
+const SLOTS: usize = 4;
 
 /// Failpoints are process-global, so the contracts that arm one run in their
 /// own process.
@@ -444,15 +448,17 @@ async fn reclaim(db: &HelixDB) -> DroppedStorageReclaim {
             {
                 DroppedStorageReclaim::Incomplete {
                     obstacle:
-                        ReclaimObstacle::Busy | ReclaimObstacle::Rejected | ReclaimObstacle::Unobserved,
+                        ReclaimObstacle::Busy | ReclaimObstacle::Rejected,
                     ..
                 } => tokio::time::sleep(POLL).await,
                 outcome @ (DroppedStorageReclaim::Idle
                 | DroppedStorageReclaim::Retained { .. }
                 | DroppedStorageReclaim::Incomplete {
-                    obstacle: ReclaimObstacle::TimedOut | ReclaimObstacle::Closed,
+                    obstacle:
+                        ReclaimObstacle::TimedOut | ReclaimObstacle::Closed | ReclaimObstacle::GaveWay,
                     ..
                 }
+                | DroppedStorageReclaim::Declined { .. }
                 | DroppedStorageReclaim::Compacted { .. }) => return outcome,
             }
         }
@@ -775,7 +781,8 @@ async fn ordinary_compactions_retire_an_entry_without_a_reclaim() {
         let Proof::Tracking { tables } = armed_entry(&db).proof else {
             panic!("the entry's rows are stored, so its proof tracks their tables");
         };
-        assert_eq!(storage.tracked_tables, tables.members().len());
+        assert_eq!(storage.tracked_tables, tables.tables().len());
+        assert_eq!(storage.tracked_bytes, tables.tables().values().sum::<u64>());
         suspects.push(tables);
     }
     assert_eq!(suspects[0], suspects[1]);
@@ -1042,6 +1049,7 @@ async fn a_filter_that_keeps_an_entry_while_a_pass_reads_the_store_voids_its_ret
             inner: Arc::clone(db.inner.storage.object_store()),
             writer: Arc::clone(shared),
         }),
+        SLOTS,
     );
     let storage = disturbed.pass().await.expect("the pass runs");
     assert_eq!(
@@ -1121,7 +1129,7 @@ async fn a_row_that_starts_a_block_under_a_shortened_index_key_is_found() {
     assert_eq!(table.info.first_entry.as_deref(), Some(&b"a"[..]));
     assert_eq!(table.info.last_entry.as_deref(), Some(&[0xFFu8][..]));
 
-    let retirer = Retirer::new(Arc::clone(shared), path, store);
+    let retirer = Retirer::new(Arc::clone(shared), path, store, SLOTS);
     let index = retirer
         .tables
         .open_with_handle(table.clone())
@@ -1130,11 +1138,16 @@ async fn a_row_that_starts_a_block_under_a_shortened_index_key_is_found() {
         .await
         .expect("the block index reads");
     assert_eq!(index.len(), 2);
-    let (_, second) = index.get(1).expect("the table has a second block");
+    let (second_at, second) = index.get(1).expect("the table has a second block");
     assert!(
         second.len() < held_prefix.len() && held_prefix.starts_with(second),
         "the second block is indexed by a key shorter than the prefix: {second:?}"
     );
+    // No block is indexed under the prefix, so the estimate of its rows is
+    // the one block that can hold them: the second, to the end of the data.
+    assert_eq!(table.info.filter_len, 0, "three rows get no filter");
+    let second_block = table.info.index_offset - second_at;
+    assert!(second_block > 0);
 
     let prefixes = BTreeMap::from([
         (held_prefix.clone(), generation_entry(1)),
@@ -1145,9 +1158,98 @@ async fn a_row_that_starts_a_block_under_a_shortened_index_key_is_found() {
             .held(table, &prefixes)
             .await
             .expect("the table is looked into"),
-        HashSet::from([generation_entry(1)])
+        HashMap::from([(generation_entry(1), second_block)])
     );
     rows.close().await.expect("the row store closes");
+    db.close().await.expect("the writer closes");
+}
+
+/// Proves what a table's key range tells of the bytes: a table that lies
+/// wholly under one prefix counts in full, with nothing read of it, and a
+/// table that only starts under the prefix counts the blocks its rows are
+/// in, which is less than the table.
+#[tokio::test]
+async fn a_table_wholly_under_a_prefix_counts_in_full_and_one_that_starts_under_it_does_not() {
+    let db = open("dropped-retire-whole-table").await;
+    let HelixStorage::Writer(shared) = db.storage() else {
+        panic!("the contract opens a writer");
+    };
+    let [prefix, ..] = &OwnerKey::PhysicalIndex {
+        scope: DataScope::LegacyUnscoped,
+        physical_index_id: 7,
+    }
+    .prefixes()[..] else {
+        panic!("a physical index owns a prefix");
+    };
+    let prefixes = BTreeMap::from([(prefix.clone(), generation_entry(1))]);
+    for (name, last_row, whole) in [
+        ("whole", [&prefix[..], b"z"].concat(), true),
+        ("starts", vec![0xFFu8], false),
+    ] {
+        // A store of its own, so that the rows below are the whole table.
+        let store: Arc<dyn ObjectStore> = Arc::new(slatedb::object_store::memory::InMemory::new());
+        let path = format!("dropped-retire-whole-table-{name}");
+        let rows = slatedb::Db::builder(path.clone(), Arc::clone(&store))
+            .build()
+            .await
+            .expect("the row store opens");
+        rows.put([&prefix[..], b"a"].concat(), vec![7u8; 6000])
+            .await
+            .expect("the row writes");
+        rows.put(&last_row, vec![7u8; 6000])
+            .await
+            .expect("the row writes");
+        rows.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .expect("the rows flush");
+        let manifest = Admin::builder(path.clone(), Arc::clone(&store))
+            .build()
+            .read_manifest(None)
+            .await
+            .expect("the manifest reads")
+            .expect("an open store has a manifest");
+        let tables = manifest
+            .all_sst_views()
+            .map(|view| view.sst.clone())
+            .collect::<Vec<_>>();
+        let [table] = &tables[..] else {
+            panic!("one flush leaves one table: {}", tables.len());
+        };
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let table_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let retirer = Retirer::new(
+            Arc::clone(shared),
+            &path,
+            Arc::new(CountingStore {
+                inner: store,
+                requests: Arc::clone(&requests),
+                table_reads: Arc::clone(&table_reads),
+            }),
+            SLOTS,
+        );
+        let held = retirer
+            .held(table, &prefixes)
+            .await
+            .expect("the table is looked into");
+        let [(entry, bytes)] = held.into_iter().collect::<Vec<_>>()[..] else {
+            panic!("the table holds rows of the one entry");
+        };
+        assert_eq!(entry, generation_entry(1));
+        if whole {
+            assert_eq!(bytes, table.estimate_size(), "{name}");
+            assert_eq!(table_reads.load(Ordering::SeqCst), 0, "{name}");
+        } else {
+            // The first block of two: the second starts above the prefix.
+            assert!(
+                0 < bytes && bytes < table.estimate_size() / 2 + 512,
+                "{name} {bytes}"
+            );
+            assert!(table_reads.load(Ordering::SeqCst) > 0, "{name}");
+        }
+        rows.close().await.expect("the row store closes");
+    }
     db.close().await.expect("the writer closes");
 }
 
@@ -1717,7 +1819,8 @@ async fn a_compaction_that_kept_the_rows_restarts_the_proof() {
     // the flush needs a row to carry.
     add(&db, "Other", 0).await;
     compact_every_table(&db).await;
-    assert!(tracked.members().is_disjoint(&stored_tables(&db).await));
+    let stored = stored_tables(&db).await;
+    assert!(tracked.tables().keys().all(|table| !stored.contains(table)));
     assert_eq!(
         armed_entry(&db),
         Armed {
@@ -1733,7 +1836,10 @@ async fn a_compaction_that_kept_the_rows_restarts_the_proof() {
     let Proof::Tracking { tables: kept } = armed_entry(&db).proof else {
         panic!("the compaction kept the rows, so its output is tracked");
     };
-    assert!(kept.members().is_disjoint(tracked.members()));
+    assert!(kept
+        .tables()
+        .keys()
+        .all(|table| !tracked.tables().contains_key(table)));
     assert_eq!(stored_entries(&db).await, entries);
     assert_eq!(owned(rows(writer(&db).db()).await), held);
     assert_eq!(owned(rows(older.as_ref()).await), held);
@@ -1968,6 +2074,7 @@ async fn a_dropped_supervisor_releases_its_retirer() {
         Arc::clone(shared),
         db.inner.storage.path(),
         Arc::clone(db.inner.storage.object_store()),
+        SLOTS,
     ));
     let retirer = Arc::downgrade(&supervisor.retirer());
     assert_eq!(retirer.strong_count(), 2, "the supervisor and its task");
@@ -2083,6 +2190,7 @@ fn counted_retirer(
             requests: Arc::clone(&requests),
             table_reads: Arc::clone(&table_reads),
         }),
+        SLOTS,
     );
     (retirer, requests, table_reads)
 }
@@ -2094,6 +2202,16 @@ const GAP: Duration = Duration::from_millis(10);
 const QUIET: Duration = Duration::from_millis(600);
 
 /// Waits until `db` stores no dropped-generation entry.
+/// A background pace that reclaims a store idle for `idle_after`, and one
+/// that is not idle never.
+fn idle_pace(idle_after: Duration) -> Pace {
+    Pace {
+        look_gap: GAP,
+        idle_after,
+        busy_after: Duration::from_secs(86_400),
+    }
+}
+
 async fn retired(db: &HelixDB) {
     tokio::time::timeout(WAIT, async {
         while !stored_entries(db).await.is_empty() {
@@ -2129,7 +2247,7 @@ async fn an_idle_store_reclaims_a_drop_by_itself() {
     assert!(owned_rows(&db).await > 0);
     retirer(&db)
         .await
-        .run_in_background(GAP, Duration::from_millis(200));
+        .run_in_background(idle_pace(Duration::from_millis(200)));
     // The task has nothing to look at yet.
     tokio::time::sleep(QUIET).await;
     assert_eq!(db.dropped_index_storage(), DroppedIndexStorage::default());
@@ -2165,7 +2283,7 @@ async fn a_writer_that_opens_onto_an_entry_retires_it_by_itself() {
     // Nothing happens in this process that the task could be told of.
     retirer(&db)
         .await
-        .run_in_background(GAP, Duration::from_millis(200));
+        .run_in_background(idle_pace(Duration::from_millis(200)));
     retired(&db).await;
     assert_eq!(db.dropped_index_storage(), DroppedIndexStorage::default());
     assert_eq!(owned_rows(&db).await, 0);
@@ -2211,7 +2329,7 @@ async fn a_background_task_reads_nothing_while_nothing_changes() {
 
     let (retirer, requests, _) = counted_retirer(&db);
     // Idle for longer than the contract runs: the task never reclaims.
-    retirer.run_in_background(GAP, Duration::from_secs(3_600));
+    retirer.run_in_background(idle_pace(Duration::from_secs(3_600)));
     let supervisor = RetireSupervisor::start(retirer);
     // The first pass is due at once, for the entry the open armed.
     tokio::time::timeout(WAIT, async {
@@ -2305,7 +2423,7 @@ async fn a_store_whose_compactor_has_work_is_not_reclaimed() {
     };
     let before = submitted().await;
     let idle_after = Duration::from_millis(300);
-    retirer(&db).await.run_in_background(GAP, idle_after);
+    retirer(&db).await.run_in_background(idle_pace(idle_after));
     tokio::time::sleep(idle_after * 5).await;
     assert_eq!(submitted().await, before);
     assert_eq!(stored_entries(&db).await.len(), 1);
@@ -2327,6 +2445,77 @@ async fn a_store_whose_compactor_has_work_is_not_reclaimed() {
 
     // The compactor rests: the store is reclaimed.
     retired(&db).await;
+    assert_discarded(&db, &prefixes).await;
+    db.close().await.expect("the writer closes");
+}
+
+/// Proves a store that is never idle is still reclaimed: with compaction
+/// jobs following one another faster than the idle time, nothing is
+/// submitted until the proofs have tracked tables for the busy wait, and
+/// then the run that holds the dropped rows is rewritten and the entry
+/// retires, the jobs still coming.
+#[tokio::test]
+async fn a_store_that_is_never_idle_is_reclaimed_once_its_proofs_have_waited() {
+    let db = open_quiet(ProcessLocalDatabaseToken::new("dropped-busy-reclaim").unwrap()).await;
+    db.wait_for_background_migrations().await;
+    for seed in 0..48 {
+        add(&db, "Gone", seed).await;
+    }
+    create_index(&db, "Gone").await;
+    compact_every_table(&db).await;
+    drop_index(&db, "Gone").await;
+    let prefixes = armed_prefixes(&db).await;
+    assert_eq!(pass(&db).await.tracking, 1);
+    let registry = writer(&db).dropped();
+    let job = CompactionJobContext {
+        destination: 0,
+        is_dest_last_run: true,
+        compaction_clock_tick: 0,
+        retention_min_seq: Some(u64::MAX),
+    };
+    // The newest compaction `.compactions` lists: it keeps those in flight
+    // and the last that finished.
+    let submitted = || async {
+        admin(&db)
+            .read_compactions(None)
+            .await
+            .expect("the compactions read")
+            .iter()
+            .flat_map(|compactions| compactions.recent_compactions())
+            .map(|compaction| compaction.id())
+            .max()
+    };
+    let before = submitted().await;
+    let busy_after = Duration::from_secs(2);
+    let started = Instant::now();
+    retirer(&db).await.run_in_background(Pace {
+        look_gap: GAP,
+        // Longer than the contract: only the busy wait can start a reclaim.
+        idle_after: Duration::from_secs(3_600),
+        busy_after,
+    });
+    // Jobs that start and end, until the entry has retired.
+    let mut early = None;
+    tokio::time::timeout(WAIT, async {
+        while !stored_entries(&db).await.is_empty() {
+            registry.discardable(&job);
+            registry.filter_dropped();
+            if early.is_none() && started.elapsed() >= busy_after / 2 {
+                early = Some((started.elapsed(), submitted().await));
+            }
+            tokio::time::sleep(POLL).await;
+        }
+    })
+    .await
+    .expect("the busy store is reclaimed in time");
+    let (at, count) = early.expect("the entry outlived half the busy wait");
+    assert!(at < busy_after, "{at:?}");
+    assert_eq!(
+        count, before,
+        "nothing is submitted before the busy wait is over"
+    );
+    assert!(started.elapsed() >= busy_after);
+    assert!(submitted().await > before);
     assert_discarded(&db, &prefixes).await;
     db.close().await.expect("the writer closes");
 }
@@ -2354,7 +2543,7 @@ async fn an_idle_reclaim_that_retains_the_rows_is_not_repeated() {
     let held = owned_rows(&db).await;
 
     let (retirer, requests, _) = counted_retirer(&db);
-    retirer.run_in_background(GAP, Duration::from_millis(200));
+    retirer.run_in_background(idle_pace(Duration::from_millis(200)));
     let supervisor = RetireSupervisor::start(retirer);
     // Long enough for the first reclaim and, were it repeated, many more.
     tokio::time::sleep(QUIET * 3).await;
@@ -2498,101 +2687,703 @@ impl ObjectStore for SubmissionGate {
     }
 }
 
-/// Proves a reclaim of an idle store gives way to writes: when a memtable is
-/// flushed while it compacts the L0 tables, it rewrites no sorted run and
-/// says the store is busy, where a caller's reclaim goes on regardless.
-#[tokio::test]
-async fn an_idle_reclaim_gives_way_once_the_store_takes_writes() {
-    let db = open_quiet(ProcessLocalDatabaseToken::new("dropped-idle-gives-way").unwrap()).await;
+/// The table ids and the stored bytes of each sorted run, by run id.
+async fn sorted_runs(db: &HelixDB) -> BTreeMap<u32, (Vec<TableId>, u64)> {
+    admin(db)
+        .read_manifest(None)
+        .await
+        .expect("the manifest reads")
+        .expect("an open database has a manifest")
+        .compacted()
+        .iter()
+        .map(|run| {
+            (
+                run.id,
+                (
+                    run.sst_views()
+                        .iter()
+                        .map(|view| TableId(view.sst.id.value().0))
+                        .collect(),
+                    run.estimate_size(),
+                ),
+            )
+        })
+        .collect()
+}
+
+/// The ids of the L0 tables, newest first.
+async fn l0_tables(db: &HelixDB) -> Vec<TableId> {
+    admin(db)
+        .read_manifest(None)
+        .await
+        .expect("the manifest reads")
+        .expect("an open database has a manifest")
+        .l0()
+        .iter()
+        .map(|view| TableId(view.sst.id.value().0))
+        .collect()
+}
+
+async fn flush(db: &HelixDB) {
+    writer(db)
+        .db()
+        .flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .expect("the memtable flushes");
+}
+
+/// Compacts the L0 tables, after a memtable flush, into a new sorted run
+/// above every other, and waits for it.
+async fn compact_l0(db: &HelixDB) {
+    flush(db).await;
+    let admin = admin(db);
+    let manifest = admin
+        .read_manifest(None)
+        .await
+        .expect("the manifest reads")
+        .expect("an open database has a manifest");
+    let compaction = admin
+        .submit_compaction(CompactionSpec::new(
+            manifest
+                .l0()
+                .iter()
+                .map(|view| SourceId::SstView(view.id))
+                .collect(),
+            manifest
+                .compacted()
+                .iter()
+                .map(|run| run.id)
+                .max()
+                .map_or(0, |id| id + 1),
+        ))
+        .await
+        .expect("the compaction is submitted");
+    assert!(tokio::time::timeout(WAIT, finished(db, &compaction))
+        .await
+        .expect("the compaction of the L0 tables ends in time"));
+}
+
+/// A quiet store with two sorted runs and a dropped index: the older run
+/// holds the rows of the dropped `Gone` index among others, the newer run
+/// holds none of them. Returns the store and the prefixes of the dropped
+/// rows, with the entry armed and its proof tracking the older run's tables.
+async fn two_runs_and_a_drop(database: &str) -> (HelixDB, Vec<Bytes>) {
+    let db = open_quiet(ProcessLocalDatabaseToken::new(database).unwrap()).await;
     db.wait_for_background_migrations().await;
-    for seed in 0..48 {
+    // Enough rows that the nodes, which stay, and the index rows, which go,
+    // each fill many blocks: the estimate of the dropped bytes is good to a
+    // block or two.
+    for seed in 0..300 {
         add(&db, "Gone", seed).await;
     }
     create_index(&db, "Gone").await;
     compact_every_table(&db).await;
+    for seed in 0..96 {
+        add(&db, "Other", seed).await;
+    }
+    compact_l0(&db).await;
     drop_index(&db, "Gone").await;
     let prefixes = armed_prefixes(&db).await;
+    assert_eq!(pass(&db).await.tracking, 1);
+    assert_eq!(sorted_runs(&db).await.len(), 2);
+    (db, prefixes)
+}
+
+/// Proves a reclaim rewrites the sorted run that holds the dropped rows and
+/// no other: the run that holds none of them keeps its tables, the L0 tables
+/// that hold none are left in L0, one compaction is submitted, and the
+/// outcome counts the bytes of the one run.
+#[tokio::test]
+async fn a_reclaim_rewrites_only_the_sorted_run_that_holds_the_dropped_rows() {
+    let (db, prefixes) = two_runs_and_a_drop("dropped-reclaim-scope").await;
+    let before = sorted_runs(&db).await;
+    let (holding, apart) = (
+        *before.keys().next().expect("the older run"),
+        *before.keys().next_back().expect("the newer run"),
+    );
+    let Proof::Tracking { tables: tracked } = armed_entry(&db).proof else {
+        panic!("the entry's rows are stored, so its proof tracks their tables");
+    };
+    assert!(tracked
+        .tables()
+        .keys()
+        .all(|table| before[&holding].0.contains(table)));
+    let tracked_bytes = tracked.tables().values().sum::<u64>();
+    assert!(tracked_bytes > 0);
+    // The drop left L0 tables: they hold its entry and its record, and no
+    // row of the dropped generation.
+    let l0 = l0_tables(&db).await;
+    assert!(!l0.is_empty());
     let HelixStorage::Writer(shared) = db.storage() else {
         panic!("the contract opens a writer");
     };
     let (submissions, mut submitted) = tokio::sync::mpsc::unbounded_channel();
-    let written_to = Retirer::new(
+    let counted = Retirer::new(
         Arc::clone(shared),
         db.inner.storage.path(),
         Arc::new(SubmissionGate {
             inner: Arc::clone(db.inner.storage.object_store()),
             submissions,
         }),
+        SLOTS,
     );
-    // Runs `reclaimer`'s reclaim, flushing a memtable as each of its
-    // compactions is submitted. Returns the outcome and the submissions.
-    let mut seed = 0;
-    let mut reclaimed = async |reclaimer: dropped::reclaim::Reclaimer| {
-        let reclaim = written_to.reclaim(tokio::time::Instant::now() + WAIT, reclaimer);
-        tokio::pin!(reclaim);
-        let mut submissions = 0;
-        loop {
-            tokio::select! {
-                outcome = &mut reclaim => break (outcome.expect("the reclaim runs"), submissions),
-                through = submitted.recv() => {
-                    submissions += 1;
-                    add(&db, "Other", seed).await;
-                    seed += 1;
-                    writer(&db)
-                        .db()
-                        .flush_with_options(FlushOptions {
-                            flush_type: FlushType::MemTable,
-                        })
-                        .await
-                        .expect("the memtable flushes");
-                    through
-                        .expect("the gate is open")
-                        .send(())
-                        .expect("the submission is waiting");
-                }
+    let reclaim = counted.reclaim(tokio::time::Instant::now() + WAIT, Reclaimer::Caller);
+    tokio::pin!(reclaim);
+    let mut written = 0;
+    let outcome = loop {
+        tokio::select! {
+            outcome = &mut reclaim => break outcome.expect("the reclaim runs"),
+            through = submitted.recv() => {
+                written += 1;
+                through
+                    .expect("the gate is open")
+                    .send(())
+                    .expect("the submission is waiting");
             }
         }
     };
-    let runs = || async {
-        admin(&db)
-            .read_manifest(None)
-            .await
-            .expect("the manifest reads")
-            .expect("an open database has a manifest")
-            .compacted()
-            .iter()
-            .flat_map(|run| run.sst_views().iter().map(|view| view.sst.id))
-            .collect::<Vec<_>>()
-    };
-    let oldest_run = runs().await;
-    assert!(!oldest_run.is_empty());
 
-    // One compaction, of the L0 tables; the table flushed meanwhile is left.
     assert_eq!(
-        reclaimed(dropped::reclaim::Reclaimer::IdleStore).await,
-        (
-            DroppedStorageReclaim::Incomplete {
-                entries: 1,
-                obstacle: ReclaimObstacle::Busy
-            },
-            1
-        )
+        outcome,
+        DroppedStorageReclaim::Compacted {
+            retired: 1,
+            entries: 0,
+            rewritten_bytes: before[&holding].1,
+            dropped_bytes: tracked_bytes,
+            left: None,
+        }
     );
-    // The run that holds the dropped rows was not rewritten.
-    let after = runs().await;
-    assert!(oldest_run.iter().all(|table| after.contains(table)));
-    assert_eq!(stored_entries(&db).await.len(), 1);
+    assert_eq!(written, 1, "one compaction, of the one run");
+    let after = sorted_runs(&db).await;
+    assert_eq!(after[&apart], before[&apart]);
+    assert!(before[&holding]
+        .0
+        .iter()
+        .all(|table| !after[&holding].0.contains(table)));
+    assert!(after[&holding].1 < before[&holding].1);
+    assert_eq!(after.len(), 2);
+    assert_eq!(l0_tables(&db).await, l0);
+    assert_eq!(stored_entries(&db).await, vec![]);
+    assert_discarded(&db, &prefixes).await;
+    assert_eq!(db.dropped_index_storage(), DroppedIndexStorage::default());
+    db.close().await.expect("the writer closes");
+}
 
-    // A caller's reclaim compacts the L0 tables and then every sorted run.
-    let (outcome, submissions) = reclaimed(dropped::reclaim::Reclaimer::Caller).await;
+/// Proves a reclaim the writer starts leaves a sorted run that is not worth
+/// rewriting, says what it left, and submits nothing; that the storage
+/// report counts the dropped bytes that wait; and that a caller's reclaim
+/// rewrites the same run.
+#[tokio::test]
+async fn the_writer_leaves_dropped_rows_in_a_run_not_worth_rewriting_and_a_caller_does_not() {
+    let (db, prefixes) = two_runs_and_a_drop("dropped-reclaim-declined").await;
+    let before = sorted_runs(&db).await;
+    let holding = *before.keys().next().expect("the older run");
+    let storage = db.dropped_index_storage();
+    assert!(storage.tracked_bytes > 0);
+    assert!(storage.tracked_bytes < before[&holding].1);
+    // The run is small, so by the writer's own rule nothing is left.
+    assert_eq!(storage.left_in_place, None);
+    let retirer = retirer(&db).await;
+    // No run is small, and a run is worth its rewrite only if every byte of
+    // it is dropped: this one also holds the nodes.
+    let never = Worth {
+        small_run_bytes: 0,
+        rewritten_per_dropped_byte: 1,
+    };
+    let left = LeftInPlace {
+        dropped_bytes: storage.tracked_bytes,
+        run_bytes: before[&holding].1,
+        runs: 1,
+    };
+    // Twice: a reclaim that declines changes nothing, so the next declines
+    // the same.
+    for _ in 0..2 {
+        assert_eq!(
+            retirer
+                .reclaim(
+                    tokio::time::Instant::now() + WAIT,
+                    Reclaimer::IdleStore(never)
+                )
+                .await
+                .expect("the reclaim runs"),
+            DroppedStorageReclaim::Declined { entries: 1, left }
+        );
+        assert_eq!(sorted_runs(&db).await, before);
+        assert_eq!(stored_entries(&db).await.len(), 1);
+        assert_eq!(
+            clockless(db.dropped_index_storage()),
+            clockless(storage.clone())
+        );
+    }
+    // An eighth of the run or more is dropped rows: a rule that asks for
+    // less than that rewrites it.
+    let outcome = retirer
+        .reclaim(
+            tokio::time::Instant::now() + WAIT,
+            Reclaimer::IdleStore(Worth {
+                small_run_bytes: 0,
+                rewritten_per_dropped_byte: before[&holding].1 / storage.tracked_bytes + 1,
+            }),
+        )
+        .await
+        .expect("the reclaim runs");
+    assert_eq!(
+        outcome,
+        DroppedStorageReclaim::Compacted {
+            retired: 1,
+            entries: 0,
+            rewritten_bytes: before[&holding].1,
+            dropped_bytes: storage.tracked_bytes,
+            left: None,
+        }
+    );
+    assert_discarded(&db, &prefixes).await;
+    db.close().await.expect("the writer closes");
+}
+
+/// Proves a caller is never refused: where the writer's rule would leave
+/// the run, a requested reclaim rewrites it.
+#[tokio::test]
+async fn a_caller_reclaims_a_run_the_writer_would_leave() {
+    let (db, prefixes) = two_runs_and_a_drop("dropped-reclaim-caller").await;
+    let before = sorted_runs(&db).await;
+    let holding = *before.keys().next().expect("the older run");
+    assert!(matches!(
+        retirer(&db)
+            .await
+            .reclaim(
+                tokio::time::Instant::now() + WAIT,
+                Reclaimer::IdleStore(Worth {
+                    small_run_bytes: 0,
+                    rewritten_per_dropped_byte: 1,
+                }),
+            )
+            .await
+            .expect("the reclaim runs"),
+        DroppedStorageReclaim::Declined { .. }
+    ));
+    let outcome = db
+        .reclaim_dropped_index_storage(WAIT)
+        .await
+        .expect("the reclaim runs");
     assert!(
-        matches!(outcome, DroppedStorageReclaim::Compacted { .. }),
+        matches!(
+            outcome,
+            DroppedStorageReclaim::Compacted {
+                retired: 1,
+                entries: 0,
+                left: None,
+                ..
+            }
+        ),
         "{outcome:?}"
     );
-    assert_eq!(submissions, 2);
-    let after = runs().await;
-    assert!(oldest_run.iter().all(|table| !after.contains(table)));
+    let after = sorted_runs(&db).await;
+    assert!(before[&holding]
+        .0
+        .iter()
+        .all(|table| !after[&holding].0.contains(table)));
+    assert_discarded(&db, &prefixes).await;
+    db.close().await.expect("the writer closes");
+}
+
+/// Proves a reclaim compacts the newest L0 table that holds dropped rows
+/// and every older one, into a new run, and leaves a newer L0 table that
+/// holds none where it is.
+#[tokio::test]
+async fn a_reclaim_compacts_the_l0_tables_from_the_newest_that_holds_dropped_rows() {
+    let db = open_quiet(ProcessLocalDatabaseToken::new("dropped-reclaim-l0").unwrap()).await;
+    db.wait_for_background_migrations().await;
+    for seed in 0..48 {
+        add(&db, "Gone", seed).await;
+    }
+    create_index(&db, "Gone").await;
+    flush(&db).await;
+    drop_index(&db, "Gone").await;
+    let prefixes = armed_prefixes(&db).await;
+    assert_eq!(pass(&db).await.tracking, 1);
+    let Proof::Tracking { tables: tracked } = armed_entry(&db).proof else {
+        panic!("the entry's rows are stored, so its proof tracks their tables");
+    };
+    // A table flushed since holds no dropped row.
+    add(&db, "Other", 0).await;
+    flush(&db).await;
+    let l0 = l0_tables(&db).await;
+    let newest_tracked = l0
+        .iter()
+        .position(|table| tracked.tables().contains_key(table))
+        .expect("the dropped rows are in L0");
+    assert!(newest_tracked > 0, "a newer table holds none: {l0:?}");
+    assert_eq!(sorted_runs(&db).await.len(), 0);
+
+    let outcome = db
+        .reclaim_dropped_index_storage(WAIT)
+        .await
+        .expect("the reclaim runs");
+
+    assert!(
+        matches!(
+            outcome,
+            DroppedStorageReclaim::Compacted {
+                retired: 1,
+                entries: 0,
+                left: None,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+    // The newer tables are still in L0, in their order; the rest is one run.
+    assert_eq!(l0_tables(&db).await, l0[..newest_tracked]);
+    assert_eq!(sorted_runs(&db).await.len(), 1);
+    assert_discarded(&db, &prefixes).await;
+    db.close().await.expect("the writer closes");
+}
+
+/// Proves a reclaim submits nothing that shares a table with a compaction
+/// in flight, and that one the writer starts submits nothing beside any
+/// compaction: with the run that holds the dropped rows in a compaction, a
+/// caller's reclaim says the store is busy; with only the L0 tables in one,
+/// the writer's reclaim does and a caller's goes on.
+#[tokio::test]
+async fn a_reclaim_starts_nothing_that_a_compaction_in_flight_is_rewriting() {
+    let (db, prefixes) = two_runs_and_a_drop("dropped-reclaim-busy").await;
+    let before = sorted_runs(&db).await;
+    let always = Reclaimer::IdleStore(Worth {
+        small_run_bytes: u64::MAX,
+        rewritten_per_dropped_byte: 1,
+    });
+    let retirer = retirer(&db).await;
+    let busy = DroppedStorageReclaim::Incomplete {
+        entries: 1,
+        obstacle: ReclaimObstacle::Busy,
+    };
+
+    // A compaction of the L0 tables alone: it reads no sorted run.
+    add(&db, "Other", 1000).await;
+    flush(&db).await;
+    let manifest = admin(&db)
+        .read_manifest(None)
+        .await
+        .expect("the manifest reads")
+        .expect("an open database has a manifest");
+    let of_l0 = admin(&db)
+        .submit_compaction(CompactionSpec::new(
+            manifest
+                .l0()
+                .iter()
+                .map(|view| SourceId::SstView(view.id))
+                .collect(),
+            before.keys().next_back().expect("the newer run") + 1,
+        ))
+        .await
+        .expect("the compaction is submitted");
+    assert_eq!(
+        retirer
+            .reclaim(tokio::time::Instant::now() + WAIT, always)
+            .await
+            .expect("the reclaim runs"),
+        busy
+    );
+    let in_flight = admin(&db)
+        .read_compaction(of_l0.id(), None)
+        .await
+        .expect("the compaction status reads")
+        .is_some_and(|compaction| compaction.active());
+    assert!(
+        in_flight,
+        "the reclaim ended while the compaction was in flight"
+    );
+    assert_eq!(sorted_runs(&db).await, before);
+    assert!(finished(&db, &of_l0).await);
+
+    // A compaction of every table: it reads the run that holds the rows.
+    let before = sorted_runs(&db).await;
+    let of_all = submit_compaction_of_every_table(&db).await;
+    assert_eq!(
+        retirer
+            .reclaim(tokio::time::Instant::now() + WAIT, Reclaimer::Caller)
+            .await
+            .expect("the reclaim runs"),
+        busy
+    );
+    let in_flight = admin(&db)
+        .read_compaction(of_all.id(), None)
+        .await
+        .expect("the compaction status reads")
+        .is_some_and(|compaction| compaction.active());
+    assert!(
+        in_flight,
+        "the reclaim ended while the compaction was in flight"
+    );
+    assert_eq!(sorted_runs(&db).await, before);
+    // That compaction discards the rows itself.
+    assert!(finished(&db, &of_all).await);
+    assert_eq!(pass(&db).await, DroppedIndexStorage::default());
+    assert_discarded(&db, &prefixes).await;
+    db.close().await.expect("the writer closes");
+}
+
+/// Proves a caller's reclaim goes on beside a compaction that reads none of
+/// its tables.
+#[tokio::test]
+async fn a_callers_reclaim_runs_beside_a_compaction_of_other_tables() {
+    let (db, prefixes) = two_runs_and_a_drop("dropped-reclaim-beside").await;
+    add(&db, "Other", 1000).await;
+    flush(&db).await;
+    let manifest = admin(&db)
+        .read_manifest(None)
+        .await
+        .expect("the manifest reads")
+        .expect("an open database has a manifest");
+    admin(&db)
+        .submit_compaction(CompactionSpec::new(
+            manifest
+                .l0()
+                .iter()
+                .map(|view| SourceId::SstView(view.id))
+                .collect(),
+            manifest
+                .compacted()
+                .iter()
+                .map(|run| run.id)
+                .max()
+                .expect("two runs")
+                + 1,
+        ))
+        .await
+        .expect("the compaction is submitted");
+    let outcome = retirer(&db)
+        .await
+        .reclaim(tokio::time::Instant::now() + WAIT, Reclaimer::Caller)
+        .await
+        .expect("the reclaim runs");
+    assert!(
+        matches!(
+            outcome,
+            DroppedStorageReclaim::Compacted {
+                retired: 1,
+                entries: 0,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+    // The other compaction ran too: `.compactions` keeps only the last to
+    // finish, so the manifest tells.
+    tokio::time::timeout(WAIT, async {
+        while !l0_tables(&db).await.is_empty() {
+            tokio::time::sleep(POLL).await;
+        }
+    })
+    .await
+    .expect("the compaction of the L0 tables completes in time");
+    assert_eq!(sorted_runs(&db).await.len(), 3);
+    assert_discarded(&db, &prefixes).await;
+    db.close().await.expect("the writer closes");
+}
+
+/// Proves a reclaim gives way to the compaction of L0 tables: on a
+/// compactor with one slot, its compaction holds that slot while an L0
+/// table waits, so it cancels the compaction, which then never runs, and
+/// says it gave way. The run and the entry are as they were, and a reclaim
+/// on a compactor with slots to spare finishes the job.
+#[tokio::test]
+async fn a_reclaim_cancels_its_compaction_when_it_holds_the_last_slot_and_l0_waits() {
+    let (db, prefixes) = two_runs_and_a_drop("dropped-reclaim-gives-way").await;
+    let before = sorted_runs(&db).await;
+    assert!(!l0_tables(&db).await.is_empty());
+    let HelixStorage::Writer(shared) = db.storage() else {
+        panic!("the contract opens a writer");
+    };
+    let one_slot = Retirer::new(
+        Arc::clone(shared),
+        db.inner.storage.path(),
+        Arc::clone(db.inner.storage.object_store()),
+        1,
+    );
+    let submitted = || async {
+        admin(&db)
+            .read_compactions(None)
+            .await
+            .expect("the compactions read")
+            .iter()
+            .flat_map(|compactions| compactions.recent_compactions())
+            .map(|compaction| (compaction.id(), compaction.status()))
+            .collect::<HashMap<_, _>>()
+    };
+    let earlier = submitted().await;
+
+    assert_eq!(
+        one_slot
+            .reclaim(tokio::time::Instant::now() + WAIT, Reclaimer::Caller)
+            .await
+            .expect("the reclaim runs"),
+        DroppedStorageReclaim::Incomplete {
+            entries: 1,
+            obstacle: ReclaimObstacle::GaveWay,
+        }
+    );
+
+    // The one compaction it submitted is failed, and stays so: no worker
+    // claims it and the coordinator does not put it back.
+    let cancelled = |now: HashMap<_, CompactionStatus>| {
+        now.into_iter()
+            .filter(|(id, _)| !earlier.contains_key(id))
+            .collect::<Vec<_>>()
+    };
+    let [(id, CompactionStatus::Failed)] = cancelled(submitted().await)[..] else {
+        panic!("the reclaim submitted one compaction and cancelled it");
+    };
+    // Longer than the compactor's poll and the worker's heartbeat.
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    assert_eq!(
+        admin(&db)
+            .read_compaction(id, None)
+            .await
+            .expect("the compaction status reads")
+            .map(|compaction| compaction.status()),
+        Some(CompactionStatus::Failed)
+    );
+    assert_eq!(sorted_runs(&db).await, before);
+    assert_eq!(stored_entries(&db).await.len(), 1);
+    assert_eq!(pass(&db).await.tracking, 1);
+
+    // With a second slot the same reclaim keeps its own: the cancelled
+    // compaction's record is still listed, and takes no slot.
+    assert!(submitted().await.len() > 1);
+    let two_slots = Retirer::new(
+        Arc::clone(shared),
+        db.inner.storage.path(),
+        Arc::clone(db.inner.storage.object_store()),
+        2,
+    );
+    let outcome = two_slots
+        .reclaim(tokio::time::Instant::now() + WAIT, Reclaimer::Caller)
+        .await
+        .expect("the reclaim runs");
+    assert!(
+        matches!(
+            outcome,
+            DroppedStorageReclaim::Compacted {
+                retired: 1,
+                entries: 0,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+    assert_discarded(&db, &prefixes).await;
+    db.close().await.expect("the writer closes");
+}
+
+/// Proves a reclaim submits no compaction of L0 tables beside another:
+/// with the dropped rows in L0 and a compaction of the L0 tables in flight,
+/// it says the store is busy, and that compaction discards the rows.
+#[tokio::test]
+async fn a_reclaim_compacts_no_l0_table_beside_a_compaction_of_l0_tables() {
+    let db = open_quiet(ProcessLocalDatabaseToken::new("dropped-reclaim-l0-busy").unwrap()).await;
+    db.wait_for_background_migrations().await;
+    for seed in 0..48 {
+        add(&db, "Gone", seed).await;
+    }
+    create_index(&db, "Gone").await;
+    flush(&db).await;
+    drop_index(&db, "Gone").await;
+    let prefixes = armed_prefixes(&db).await;
+    assert_eq!(pass(&db).await.tracking, 1);
+    let l0 = l0_tables(&db).await;
+    let manifest = admin(&db)
+        .read_manifest(None)
+        .await
+        .expect("the manifest reads")
+        .expect("an open database has a manifest");
+    let of_l0 = admin(&db)
+        .submit_compaction(CompactionSpec::new(
+            manifest
+                .l0()
+                .iter()
+                .map(|view| SourceId::SstView(view.id))
+                .collect(),
+            0,
+        ))
+        .await
+        .expect("the compaction is submitted");
+
+    assert_eq!(
+        retirer(&db)
+            .await
+            .reclaim(tokio::time::Instant::now() + WAIT, Reclaimer::Caller)
+            .await
+            .expect("the reclaim runs"),
+        DroppedStorageReclaim::Incomplete {
+            entries: 1,
+            obstacle: ReclaimObstacle::Busy,
+        }
+    );
+    let in_flight = admin(&db)
+        .read_compaction(of_l0.id(), None)
+        .await
+        .expect("the compaction status reads")
+        .is_some_and(|compaction| compaction.active());
+    assert!(
+        in_flight,
+        "the reclaim ended while the compaction was in flight"
+    );
+    assert_eq!(l0_tables(&db).await, l0);
+
+    assert!(finished(&db, &of_l0).await);
+    assert_eq!(pass(&db).await, DroppedIndexStorage::default());
+    assert_discarded(&db, &prefixes).await;
+    db.close().await.expect("the writer closes");
+}
+
+/// Proves the bytes a proof tracks are about the bytes of the dropped rows:
+/// no more than the tables that hold them, no less than half of what the
+/// rows take unencoded, and what the run shrinks by when it is rewritten,
+/// to within a block at each end of each owner's rows.
+#[tokio::test]
+async fn the_bytes_a_proof_tracks_are_those_of_the_dropped_rows() {
+    let db = open_quiet(ProcessLocalDatabaseToken::new("dropped-tracked-bytes").unwrap()).await;
+    db.wait_for_background_migrations().await;
+    for seed in 0..400 {
+        add(&db, "Gone", seed).await;
+    }
+    create_index(&db, "Gone").await;
+    compact_every_table(&db).await;
+    drop_index(&db, "Gone").await;
+    let prefixes = armed_prefixes(&db).await;
+    let unencoded = rows(writer(&db).db())
+        .await
+        .into_iter()
+        .filter(|(key, _)| prefixes.iter().any(|prefix| key.starts_with(prefix)))
+        .map(|(key, value)| (key.len() + value.len()) as u64)
+        .sum::<u64>();
+    let storage = pass(&db).await;
+    assert_eq!(storage.tracking, 1);
+    let before = sorted_runs(&db).await;
+    let [(tables, stored)] = &before.values().cloned().collect::<Vec<_>>()[..] else {
+        panic!("one run holds every row: {before:?}");
+    };
+    assert_eq!(storage.tracked_tables, tables.len());
+    assert!(
+        unencoded / 2 <= storage.tracked_bytes && storage.tracked_bytes <= *stored,
+        "{unencoded} {storage:?} {stored}"
+    );
+
     reclaim_every_entry(&db).await;
+
+    let after = sorted_runs(&db).await;
+    let rewritten = after.values().map(|(_, bytes)| bytes).sum::<u64>();
+    // Two owners, a block of at most 4 KiB at each end of each, and the
+    // filter and index the smaller table no longer carries.
+    let shrunk = stored - rewritten;
+    assert!(
+        shrunk.abs_diff(storage.tracked_bytes) <= shrunk / 4 + 4 * 4096,
+        "{shrunk} {storage:?}"
+    );
     assert_discarded(&db, &prefixes).await;
     db.close().await.expect("the writer closes");
 }

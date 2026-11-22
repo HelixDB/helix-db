@@ -15,6 +15,17 @@ fn waiting<T: Eq + std::hash::Hash>(members: HashSet<T>) -> Waiting<T> {
     Waiting::new(members).expect("the fixture waits for something")
 }
 
+/// Tracks `ids`, with ten bytes of rows in table 1, twenty in table 2, and
+/// so on.
+fn tracked(ids: &[u128]) -> Tracked {
+    Tracked::new(
+        ids.iter()
+            .map(|id| (TableId(*id), *id as u64 * 10))
+            .collect(),
+    )
+    .expect("the fixture tracks something")
+}
+
 /// What a pass left: this many entries unproven, draining and tracking.
 fn left(unproven: usize, draining: usize, tracking: usize) -> DroppedIndexStorage {
     DroppedIndexStorage {
@@ -30,12 +41,13 @@ fn the_timer_after_a_pass_follows_what_the_entries_wait_for() {
     let now = Instant::now();
     let look = Duration::from_secs(5);
     let idle = Duration::from_secs(300);
+    let overdue = now + Duration::from_secs(1_800);
     let compactions = CompactionActivity {
         events: 6,
         running: 0,
     };
     let after = |storage: &DroppedIndexStorage, reclaimed: bool| {
-        Timer::after_pass(storage, compactions, reclaimed, now, look, idle)
+        Timer::after_pass(storage, compactions, reclaimed, now, look, idle, overdue)
     };
     // Nothing stored, or only quarantined entries: nothing to wait for.
     for reclaimed in [false, true] {
@@ -73,11 +85,136 @@ fn the_timer_after_a_pass_follows_what_the_entries_wait_for() {
         after(&left(0, 0, 2), false),
         Timer::Reclaim {
             at: now + idle,
-            compactions
+            compactions,
+            overdue,
         }
     );
     // One reclaim per idle period.
     assert_eq!(after(&left(0, 0, 2), true), Timer::Off);
+}
+
+#[test]
+fn a_reclaim_timer_fires_no_later_than_a_busy_store_is_due() {
+    let now = Instant::now();
+    let idle = Duration::from_secs(300);
+    let compactions = CompactionActivity::default();
+    for (overdue, at) in [
+        // Far off: idleness comes first.
+        (now + Duration::from_secs(1_800), now + idle),
+        (now + idle, now + idle),
+        // Sooner than idleness.
+        (now + Duration::from_secs(60), now + Duration::from_secs(60)),
+        // Already past: at once, not in the past.
+        (now, now),
+        (now - Duration::from_secs(60), now),
+    ] {
+        assert_eq!(
+            Timer::after_pass(
+                &left(0, 0, 1),
+                compactions,
+                false,
+                now,
+                Duration::from_secs(5),
+                idle,
+                overdue
+            ),
+            Timer::Reclaim {
+                at,
+                compactions,
+                overdue,
+            }
+        );
+    }
+}
+
+#[test]
+fn a_reclaim_timer_reclaims_an_idle_store_or_one_that_has_waited_long_enough() {
+    let now = Instant::now();
+    let seen = CompactionActivity {
+        events: 6,
+        running: 0,
+    };
+    let overdue = now + Duration::from_secs(1_800);
+    let timer = Timer::Reclaim {
+        at: now,
+        compactions: seen,
+        overdue,
+    };
+    let idle = Due::Reclaim(Reclaimer::IdleStore(Worth::WRITER));
+    let busy = Due::Reclaim(Reclaimer::BusyStore(Worth::WRITER));
+    let started = CompactionActivity {
+        events: 7,
+        running: 1,
+    };
+    let ended = CompactionActivity {
+        events: 8,
+        running: 0,
+    };
+    for (at, activity, due) in [
+        // Nothing started or ended, and nothing runs: idle, however long
+        // the proofs have waited.
+        (now, seen, idle),
+        (overdue, seen, idle),
+        // A job runs, or one ran and ended: not idle.
+        (now, started, Due::Later),
+        (now, ended, Due::Later),
+        (overdue - Duration::from_secs(1), started, Due::Later),
+        // Not idle, and the proofs have waited long enough.
+        (overdue, started, busy),
+        (overdue, ended, busy),
+        (overdue + Duration::from_secs(1), ended, busy),
+    ] {
+        assert_eq!(
+            timer.due(at, activity, Worth::WRITER),
+            Some(due),
+            "{activity:?}"
+        );
+    }
+    // A job that never ended keeps the store busy though no event followed.
+    let running = CompactionActivity {
+        events: 6,
+        running: 1,
+    };
+    assert_eq!(
+        Timer::Reclaim {
+            at: now,
+            compactions: running,
+            overdue,
+        }
+        .due(now, running, Worth::WRITER),
+        Some(Due::Later)
+    );
+    // No other timer reclaims.
+    for timer in [
+        Timer::Off,
+        Timer::Look { at: now },
+        Timer::Retry { at: now },
+    ] {
+        assert_eq!(timer.due(overdue, seen, Worth::WRITER), None);
+    }
+}
+
+#[test]
+fn the_wait_of_a_busy_store_starts_with_tracking_and_again_with_each_reclaim() {
+    let overdue = Instant::now() + Duration::from_secs(100);
+    let restarted = overdue + Duration::from_secs(1_800);
+    // A pass while proofs already tracked tables leaves the wait running.
+    assert_eq!(Wake::Pass.overdue(true, overdue, restarted), overdue);
+    // A pass before which none did starts it.
+    assert_eq!(Wake::Pass.overdue(false, overdue, restarted), restarted);
+    // A reclaim starts it again, whoever ran it and whatever tracked.
+    for reclaimer in [
+        Reclaimer::Caller,
+        Reclaimer::IdleStore(Worth::WRITER),
+        Reclaimer::BusyStore(Worth::WRITER),
+    ] {
+        for tracked in [false, true] {
+            assert_eq!(
+                Wake::Reclaim(reclaimer).overdue(tracked, overdue, restarted),
+                restarted
+            );
+        }
+    }
 }
 
 #[test]
@@ -89,7 +226,8 @@ fn a_timer_fires_when_it_says_unless_it_is_off() {
     assert_eq!(
         Timer::Reclaim {
             at,
-            compactions: CompactionActivity::default()
+            compactions: CompactionActivity::default(),
+            overdue: at + Duration::from_secs(1),
         }
         .at(),
         Some(at)
@@ -135,15 +273,15 @@ fn a_draining_entry_waits_only_for_the_compactions_it_started_with() {
 #[test]
 fn a_tracked_entry_retires_once_no_suspect_is_stored() {
     let proof = Proof::Tracking {
-        tables: waiting(tables(&[1, 2])),
+        tables: tracked(&[1, 2]),
     };
     // Compactions in flight do not hold a tracked entry back: every one
     // created since the drain discards its rows.
     for active in [compactions(&[]), compactions(&[7])] {
         for (stored, step) in [
-            (tables(&[1, 2, 3]), Step::Track(waiting(tables(&[1, 2])))),
-            (tables(&[2, 3]), Step::Track(waiting(tables(&[2])))),
-            (tables(&[1]), Step::Track(waiting(tables(&[1])))),
+            (tables(&[1, 2, 3]), Step::Track(tracked(&[1, 2]))),
+            (tables(&[2, 3]), Step::Track(tracked(&[2]))),
+            (tables(&[1]), Step::Track(tracked(&[1]))),
             (tables(&[3, 4]), Step::Retire),
             (tables(&[]), Step::Retire),
         ] {
@@ -220,6 +358,86 @@ fn a_tables_key_range_decides_only_what_it_can() {
 }
 
 #[test]
+fn the_prefixes_a_table_can_hold_rows_under_are_the_one_it_starts_under_and_those_inside() {
+    let prefixes = BTreeMap::from([
+        (Bytes::from_static(b"b"), entry(1)),
+        (Bytes::from_static(b"m"), entry(2)),
+        (Bytes::from_static(b"p"), entry(3)),
+    ]);
+    for (first, last, expected) in [
+        // Starts under `m`: `b` is behind it, `p` is in reach.
+        (Some(&b"ma"[..]), Some(&b"q"[..]), vec![&b"m"[..], b"p"]),
+        (Some(b"ma"), Some(b"mz"), vec![b"m"]),
+        // A prefix equal to the first key covers it and is listed once.
+        (Some(b"m"), Some(b"n"), vec![b"m"]),
+        // Starts between prefixes: the one before does not cover it.
+        (Some(b"c"), Some(b"pz"), vec![b"m", b"p"]),
+        (Some(b"c"), Some(b"l"), vec![]),
+        // The last key bounds the reach, inclusively.
+        (Some(b"a"), Some(b"m"), vec![b"b", b"m"]),
+        (Some(b"a"), Some(b"lz"), vec![b"b"]),
+        // No first key: from below every prefix. No last key: past every one.
+        (None, Some(b"c"), vec![b"b"]),
+        (Some(b"n"), None, vec![b"p"]),
+        (None, None, vec![b"b", b"m", b"p"]),
+    ] {
+        assert_eq!(
+            overlapping(&prefixes, first, last)
+                .map(|(prefix, owner)| {
+                    assert_eq!(prefixes[prefix], owner);
+                    &prefix[..]
+                })
+                .collect::<Vec<_>>(),
+            expected,
+            "{first:?}..={last:?}"
+        );
+    }
+}
+
+#[test]
+fn the_bytes_under_a_prefix_are_those_of_the_blocks_indexed_under_it() {
+    for (from, to, blocks) in [
+        // Blocks 2, 3 and 4 are indexed under the prefix.
+        (2, 5, 2..5),
+        (0, 1, 0..1),
+        (0, 3, 0..3),
+        // None is: the rows are in the block before, when there is one.
+        (3, 3, 2..3),
+        (1, 1, 0..1),
+        // The table starts under the prefix but its first block is indexed
+        // below it: that block.
+        (0, 0, 0..1),
+    ] {
+        assert_eq!(blocks_under(from, to), blocks, "{from}..{to}");
+    }
+}
+
+#[test]
+fn blocks_two_prefixes_share_count_once() {
+    let ranges = |bounds: &[(usize, usize)]| {
+        bounds
+            .iter()
+            .map(|(start, end)| *start..*end)
+            .collect::<Vec<_>>()
+    };
+    for (given, joined) in [
+        (vec![], vec![]),
+        (vec![(2, 5)], vec![(2, 5)]),
+        // Apart: both stay.
+        (vec![(0, 1), (3, 4)], vec![(0, 1), (3, 4)]),
+        // The same block twice, as when two prefixes fall inside one block.
+        (vec![(2, 3), (2, 3)], vec![(2, 3)]),
+        // Overlapping, touching, and one inside another.
+        (vec![(0, 3), (2, 5)], vec![(0, 5)]),
+        (vec![(0, 2), (2, 4)], vec![(0, 4)]),
+        (vec![(0, 9), (3, 4), (8, 9)], vec![(0, 9)]),
+        (vec![(0, 2), (1, 3), (5, 6), (6, 7)], vec![(0, 3), (5, 7)]),
+    ] {
+        assert_eq!(disjoint(ranges(&given)), ranges(&joined), "{given:?}");
+    }
+}
+
+#[test]
 fn a_block_index_points_at_the_one_block_that_can_hide_a_row() {
     for (before, next, verdict) in [
         // The first block indexed at or after the prefix starts under it.
@@ -250,5 +468,14 @@ fn the_background_paces_are_ordered() {
     assert!(LOOK_GAP <= DRAIN_LOOK_MAX);
     assert!(DRAIN_LOOK_MAX < IDLE_RECLAIM_AFTER);
     assert!(RETRY <= MAX_BACKOFF);
-    assert!(IDLE_RECLAIM_AFTER < IDLE_RECLAIM_WAIT);
+    assert!(IDLE_RECLAIM_AFTER < BUSY_RECLAIM_AFTER);
+    assert!(BUSY_RECLAIM_AFTER < RECLAIM_WAIT);
+    assert_eq!(
+        Pace::WRITER,
+        Pace {
+            look_gap: LOOK_GAP,
+            idle_after: IDLE_RECLAIM_AFTER,
+            busy_after: BUSY_RECLAIM_AFTER,
+        }
+    );
 }

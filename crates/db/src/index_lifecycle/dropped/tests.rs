@@ -100,10 +100,17 @@ fn state(registry: &Registry, index_id: u64) -> Armed {
         .1
 }
 
+/// A proof that tracks `tables`, with a hundred bytes of the entry's rows
+/// in table 1, two hundred in table 2, and so on.
 fn tracking(tables: &[u128]) -> Proof {
     Proof::Tracking {
-        tables: Waiting::new(tables.iter().copied().map(TableId).collect())
-            .expect("a fixture proof tracks a table"),
+        tables: Tracked::new(
+            tables
+                .iter()
+                .map(|table| (TableId(*table), *table as u64 * 100))
+                .collect(),
+        )
+        .expect("a fixture proof tracks a table"),
     }
 }
 
@@ -119,6 +126,53 @@ fn a_proof_never_waits_for_nothing() {
     assert_eq!(Waiting::<TableId>::new(HashSet::new()), None);
     let one = Waiting::new(HashSet::from([TableId(7)])).expect("one member is enough");
     assert_eq!(one.members(), &HashSet::from([TableId(7)]));
+    assert_eq!(Tracked::new(HashMap::new()), None);
+    let one = Tracked::new(HashMap::from([(TableId(7), 0)])).expect("one table is enough");
+    assert_eq!(one.tables(), &HashMap::from([(TableId(7), 0)]));
+}
+
+#[test]
+fn a_proof_goes_on_tracking_the_tables_that_are_still_stored() {
+    let Proof::Tracking { tables } = tracking(&[1, 2, 3]) else {
+        unreachable!("the fixture tracks tables");
+    };
+    let stored = |ids: &[u128]| ids.iter().copied().map(TableId).collect::<HashSet<_>>();
+    // Each table that stays keeps its own estimate; a table that was never
+    // tracked is not picked up.
+    assert_eq!(
+        tables
+            .still(&stored(&[2, 3, 4]))
+            .map(|left| left.tables().clone()),
+        Some(HashMap::from([(TableId(2), 200), (TableId(3), 300)]))
+    );
+    assert_eq!(tables.still(&stored(&[1, 2, 3])), Some(tables.clone()));
+    assert_eq!(tables.still(&stored(&[4])), None);
+    assert_eq!(tables.still(&stored(&[])), None);
+}
+
+#[test]
+fn the_rows_a_compaction_would_discard_are_those_of_tracked_entries_past_their_gate() {
+    let registry = registry(&[(1, 10), (2, 10), (3, 20), (4, 10)]);
+    assert!(registry.advance(entry(1), 0, tracking(&[7, 8])));
+    assert!(registry.advance(entry(2), 0, tracking(&[8])));
+    assert!(registry.advance(entry(3), 0, tracking(&[8, 9])));
+    assert!(registry.advance(entry(4), 0, draining(&[5])));
+    // Below every gate nothing is discardable.
+    assert_eq!(registry.discardable_tracked(9), HashMap::new());
+    // At a gate its entries count, and a table two of them track counts
+    // the rows of both. An entry that tracks no table yet adds nothing.
+    assert_eq!(
+        registry.discardable_tracked(10),
+        HashMap::from([(TableId(7), 700), (TableId(8), 1600)])
+    );
+    assert_eq!(
+        registry.discardable_tracked(19),
+        HashMap::from([(TableId(7), 700), (TableId(8), 1600)])
+    );
+    assert_eq!(
+        registry.discardable_tracked(20),
+        HashMap::from([(TableId(7), 700), (TableId(8), 2400), (TableId(9), 900)])
+    );
 }
 
 #[test]
@@ -576,6 +630,10 @@ fn storage_counts_each_entry_by_what_its_proof_waits_for() {
             draining: 1,
             tracking: 3,
             tracked_tables: 3,
+            // Tables 7 and 8, 8 and 9, and 7: a table two generations track
+            // counts the rows of each.
+            tracked_bytes: 700 + 800 + 800 + 900 + 700,
+            left_in_place: None,
             waiting_since: Some(*SINCE),
             quarantined: Vec::new(),
         }
@@ -731,12 +789,28 @@ fn only_a_writer_with_its_own_compaction_worker_compacts_in_process() {
         compactor_options,
         ..slatedb::Settings::default()
     };
-    assert!(compacts_in_process(&slatedb::Settings::default()));
-    assert!(!compacts_in_process(&settings(None)));
-    assert!(!compacts_in_process(&settings(Some(
-        slatedb::config::CompactorOptions {
+    assert_eq!(compaction_slots(&slatedb::Settings::default()), Some(4));
+    assert_eq!(compaction_slots(&settings(None)), None);
+    assert_eq!(
+        compaction_slots(&settings(Some(slatedb::config::CompactorOptions {
             worker: None,
             ..slatedb::config::CompactorOptions::default()
-        }
-    ))));
+        }))),
+        None
+    );
+    // The slots are what both the coordinator and the worker allow.
+    for (coordinator, worker, slots) in [(6, 2, 2), (2, 6, 2), (3, 3, 3)] {
+        assert_eq!(
+            compaction_slots(&settings(Some(slatedb::config::CompactorOptions {
+                max_concurrent_compactions: coordinator,
+                worker: Some(slatedb::config::CompactionWorkerOptions {
+                    max_concurrent_compactions: worker,
+                    ..slatedb::config::CompactionWorkerOptions::default()
+                }),
+                ..slatedb::config::CompactorOptions::default()
+            }))),
+            Some(slots),
+            "{coordinator} {worker}"
+        );
+    }
 }

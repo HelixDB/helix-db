@@ -98,7 +98,7 @@ use std::sync::{Arc, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 pub use config::{DbConfig, HelixConfig};
-pub use index_lifecycle::dropped::reclaim::{DroppedStorageReclaim, ReclaimObstacle};
+pub use index_lifecycle::dropped::reclaim::{DroppedStorageReclaim, LeftInPlace, ReclaimObstacle};
 pub use index_lifecycle::dropped::retire::QuarantinedEntryRemoval;
 pub use index_lifecycle::dropped::{
     DroppedEntryContradiction, DroppedEntryRows, DroppedIndexStorage, QuarantinedDroppedGeneration,
@@ -1517,7 +1517,7 @@ impl HelixDB {
             Arc::clone(&object_store),
             Arc::clone(&dropped),
         );
-        let retires = index_lifecycle::dropped::compacts_in_process(&settings);
+        let compaction_slots = index_lifecycle::dropped::compaction_slots(&settings);
         let builder = Db::builder(path.clone(), Arc::clone(&object_store))
             .with_merge_operator(Arc::new(merge_operator::HelixMergeOperator::new()))
             .with_settings(settings);
@@ -1558,8 +1558,8 @@ impl HelixDB {
         db.close_on_open_error(finish_result).await?;
         db.start_background_migration_worker(migrations::background::BackgroundMigrations::All)
             .await;
-        if retires {
-            db.start_dropped_generation_retirement().await;
+        if let Some(slots) = compaction_slots {
+            db.start_dropped_generation_retirement(slots).await;
         }
         Ok(db)
     }
@@ -1632,7 +1632,7 @@ impl HelixDB {
             Arc::clone(&object_store),
             Arc::clone(&dropped),
         );
-        let retires = index_lifecycle::dropped::compacts_in_process(&settings);
+        let compaction_slots = index_lifecycle::dropped::compaction_slots(&settings);
         let builder = Db::builder(path.clone(), Arc::clone(&object_store))
             .with_merge_operator(Arc::new(merge_operator::HelixMergeOperator::new()))
             .with_settings(settings)
@@ -1820,8 +1820,8 @@ impl HelixDB {
             migrations::background::BackgroundMigrations::LabelIdentity
         })
         .await;
-        if retires {
-            db.start_dropped_generation_retirement().await;
+        if let Some(slots) = compaction_slots {
+            db.start_dropped_generation_retirement(slots).await;
         }
         tracing::info!(
             open_intent,
@@ -2338,8 +2338,9 @@ impl HelixDB {
     }
 
     /// Starts the background retirement of dropped index generations on a
-    /// writer whose storage runs every compaction in this process.
-    async fn start_dropped_generation_retirement(&self) {
+    /// writer whose storage runs every compaction in this process, `slots`
+    /// at a time.
+    async fn start_dropped_generation_retirement(&self, slots: usize) {
         let HelixStorage::Writer(writer) = self.inner.storage.handle() else {
             return;
         };
@@ -2350,6 +2351,7 @@ impl HelixDB {
                     Arc::clone(writer),
                     self.inner.storage.path(),
                     Arc::clone(self.inner.storage.object_store()),
+                    slots,
                 ),
             ));
         }
@@ -2379,21 +2381,23 @@ impl HelixDB {
             })
     }
 
-    /// Reclaims the storage of dropped indexes now, instead of waiting for
-    /// the compactions the scheduler picks to reach it, or for the store to
-    /// fall idle.
+    /// Reclaims the storage of dropped indexes now, whatever it costs,
+    /// instead of waiting for the compactions the scheduler picks to reach
+    /// it.
     ///
     /// Dropping an index, or aborting its build, removes it from the catalog
     /// at once and leaves its rows for compactions to discard. A writer
-    /// reclaims by itself once its compactor has had nothing to do for a few
-    /// minutes, so a store that is busy for long keeps the rows until its
-    /// own compactions reach them. This call
-    /// compacts the L0 tables into a sorted run and then every sorted run
-    /// into one, and returns once that has finished or `wait` has passed: it
-    /// rewrites every stored byte, so its cost grows with the database, not
-    /// with the dropped indexes. Reads and writes proceed meanwhile, and so
-    /// do the scheduler's L0 compactions. A compaction that outlives `wait`
-    /// goes on; its result shows in [`Self::dropped_index_storage`].
+    /// compacts for them by itself, but only the sorted runs in which the
+    /// rows are a large enough part to be worth rewriting: rows it leaves in
+    /// place show in [`DroppedIndexStorage::left_in_place`]. This call
+    /// rewrites every sorted run that holds such rows, one at a time, and
+    /// returns once that has finished or `wait` has passed. It reads and
+    /// writes every byte of those runs, however few of them belong to
+    /// dropped indexes, and no byte of any other run. Reads and writes
+    /// proceed meanwhile; if the compactor runs out of slots while L0 tables
+    /// wait to be compacted, the reclaim cancels its compaction and returns
+    /// [`ReclaimObstacle::GaveWay`]. A compaction that outlives `wait` goes
+    /// on; its result shows in [`Self::dropped_index_storage`].
     ///
     /// Rows are retained, and [`DroppedStorageReclaim::Retained`] returned,
     /// while a snapshot or transaction older than the drop is open.
@@ -2515,9 +2519,11 @@ impl HelixDB {
     }
 
     /// The dropped index generations whose rows this writer still stores, as
-    /// of its last background look: how many await compaction, how far the
-    /// proof that their rows are gone has got, and which the catalog
-    /// contradicts. Empty on a read-only handle, which discards nothing.
+    /// of its last background look: how many await compaction and for how
+    /// long, how far the proof that their rows are gone has got, an estimate
+    /// of the bytes those rows take, how much of that the writer leaves in
+    /// place, and which entries the catalog contradicts. Empty on a
+    /// read-only handle, which discards nothing.
     ///
     /// # Examples
     ///
@@ -2534,7 +2540,10 @@ impl HelixDB {
     /// ```
     pub fn dropped_index_storage(&self) -> DroppedIndexStorage {
         match self.storage() {
-            HelixStorage::Writer(writer) => writer.dropped().storage(),
+            HelixStorage::Writer(writer) => DroppedIndexStorage {
+                left_in_place: index_lifecycle::dropped::reclaim::left_in_place(writer),
+                ..writer.dropped().storage()
+            },
             HelixStorage::Reader(_) => DroppedIndexStorage::default(),
         }
     }
