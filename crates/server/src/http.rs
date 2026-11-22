@@ -1,20 +1,22 @@
 //! Axum HTTP transport for query execution and server health endpoints.
 
 use std::net::SocketAddr;
+use std::time::Instant;
 
 use axum::body::{to_bytes, Body, Bytes};
 use axum::extract::State;
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use db::query_service::{QueryMode, QueryResponse, QueryServiceError};
+use db::query_service::{CommitTimings, QueryMode, QueryResponse, QueryServiceError};
 use helix_ast::error_code;
 use helix_ast::query::{QueryRequest, QueryRequestType};
 use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
+use crate::server_timing;
 use crate::state::ServerState;
 use crate::MAX_QUERY_BODY_BYTES;
 
@@ -96,6 +98,7 @@ async fn execute_query(
         Ok(bytes) => bytes,
         Err(response) => return *response,
     };
+    let received = Instant::now();
     // simd-json parses a uniquely owned body in place and copies a shared
     // one. The request owns everything it needs, so the body is freed here
     // rather than held through planning and execution.
@@ -106,14 +109,18 @@ async fn execute_query(
     let request = match parsed {
         Ok(request) => request,
         Err(error) => {
-            return error_response(
-                error_code::QueryErrorCode::InvalidQueryJson,
-                format!("invalid query JSON: {error}"),
+            return timed(
+                received,
+                CommitTimings::default(),
+                error_response(
+                    error_code::QueryErrorCode::InvalidQueryJson,
+                    format!("invalid query JSON: {error}"),
+                ),
             );
         }
     };
     if let Err(error) = options.validate_for_request_type(request.request_type(), state.db_mode()) {
-        return error.into_response();
+        return timed(received, CommitTimings::default(), error.into_response());
     }
 
     match state
@@ -125,9 +132,28 @@ async fn execute_query(
         )
         .await
     {
-        Ok(response) => query_response(response),
-        Err(error) => service_error_response(error),
+        Ok(response) => timed(
+            received,
+            response.commit_timings(),
+            query_response(response),
+        ),
+        Err(error) => timed(
+            received,
+            CommitTimings::default(),
+            service_error_response(error),
+        ),
     }
+}
+
+/// Report where the server time since `received` went. The clock starts once
+/// the body is read, so a slow upload is not counted as execution.
+fn timed(received: Instant, commit: CommitTimings, mut response: Response) -> Response {
+    response.headers_mut().insert(
+        server_timing::NAME,
+        HeaderValue::try_from(server_timing::value(received.elapsed(), commit))
+            .expect("server timing is visible ASCII"),
+    );
+    response
 }
 
 async fn read_body(body: Body) -> Result<Bytes, Box<Response>> {
@@ -139,21 +165,27 @@ async fn read_body(body: Body) -> Result<Bytes, Box<Response>> {
     })
 }
 
-/// Read the options and JSON body of a Cypher or SQL request.
+/// Read the options and JSON body of a Cypher or SQL request, and when the
+/// body had fully arrived.
 async fn read_json_request<T: serde::de::DeserializeOwned>(
     headers: &HeaderMap,
     body: Body,
-) -> Result<(RequestOptions, T), Box<Response>> {
+) -> Result<(RequestOptions, T, Instant), Box<Response>> {
     let options =
         RequestOptions::from_headers(headers).map_err(|error| Box::new(error.into_response()))?;
     let bytes = read_body(body).await?;
+    let received = Instant::now();
     let request = serde_json::from_slice::<T>(&bytes).map_err(|error| {
-        Box::new(error_response(
-            error_code::QueryErrorCode::InvalidQueryJson,
-            error.to_string(),
+        Box::new(timed(
+            received,
+            CommitTimings::default(),
+            error_response(
+                error_code::QueryErrorCode::InvalidQueryJson,
+                error.to_string(),
+            ),
         ))
     })?;
-    Ok((options, request))
+    Ok((options, request, received))
 }
 
 async fn explain_cypher(
@@ -161,28 +193,31 @@ async fn explain_cypher(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    let (options, request) = match read_json_request::<db::cypher::Request>(&headers, body).await {
-        Ok(request) => request,
-        Err(response) => return *response,
-    };
-    match request.compile() {
+    let (options, request, received) =
+        match read_json_request::<db::cypher::Request>(&headers, body).await {
+            Ok(request) => request,
+            Err(response) => return *response,
+        };
+    let response = match request.compile() {
         Ok(request) => explain_compiled(&state, &options, request).await,
         Err(error) => cypher_error_response(error.into()),
-    }
+    };
+    timed(received, CommitTimings::default(), response)
 }
 
 /// `POST /v2/sql/explain`: translate one SQL statement, then plan it exactly
 /// like `POST /v2/cypher/explain`.
 async fn explain_sql(State(state): State<ServerState>, headers: HeaderMap, body: Body) -> Response {
-    let (options, request) =
+    let (options, request, received) =
         match read_json_request::<db::cypher::sql::request::Request>(&headers, body).await {
             Ok(request) => request,
             Err(response) => return *response,
         };
-    match request.compile() {
+    let response = match request.compile() {
         Ok(request) => explain_compiled(&state, &options, request).await,
         Err(error) => cypher_error_response(error.into()),
-    }
+    };
+    timed(received, CommitTimings::default(), response)
 }
 
 /// Explaining never executes, so even a modifying statement uses read options.
@@ -214,37 +249,48 @@ async fn execute_cypher(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    let (options, request) = match read_json_request::<db::cypher::Request>(&headers, body).await {
-        Ok(request) => request,
-        Err(response) => return *response,
-    };
-    match request.compile() {
+    let (options, request, received) =
+        match read_json_request::<db::cypher::Request>(&headers, body).await {
+            Ok(request) => request,
+            Err(response) => return *response,
+        };
+    let (commit, response) = match request.compile() {
         Ok(request) => execute_compiled(&state, &options, request).await,
-        Err(error) => cypher_error_response(error.into()),
-    }
+        Err(error) => (
+            CommitTimings::default(),
+            cypher_error_response(error.into()),
+        ),
+    };
+    timed(received, commit, response)
 }
 
 /// `POST /v2/sql`: translate one SQL statement to Cypher, then route and
 /// execute it exactly like `POST /v2/cypher`.
 async fn execute_sql(State(state): State<ServerState>, headers: HeaderMap, body: Body) -> Response {
-    let (options, request) =
+    let (options, request, received) =
         match read_json_request::<db::cypher::sql::request::Request>(&headers, body).await {
             Ok(request) => request,
             Err(response) => return *response,
         };
-    match request.compile() {
+    let (commit, response) = match request.compile() {
         Ok(request) => execute_compiled(&state, &options, request).await,
-        Err(error) => cypher_error_response(error.into()),
-    }
+        Err(error) => (
+            CommitTimings::default(),
+            cypher_error_response(error.into()),
+        ),
+    };
+    timed(received, commit, response)
 }
 
+/// Execute a compiled statement, returning its response with the time it
+/// spent committing.
 async fn execute_compiled(
     state: &ServerState,
     options: &RequestOptions,
     request: db::cypher::CompiledRequest,
-) -> Response {
+) -> (CommitTimings, Response) {
     if let Err(error) = options.validate_for_request_type(request.request_type(), state.db_mode()) {
-        return error.into_response();
+        return (CommitTimings::default(), error.into_response());
     }
     let result = state
         .query_service()
@@ -259,12 +305,15 @@ async fn execute_compiled(
         .await;
     match result {
         Ok(response) => (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "application/json")],
-            response.into_bytes(),
-        )
-            .into_response(),
-        Err(error) => cypher_error_response(error),
+            response.resources.commit,
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                response.into_bytes(),
+            )
+                .into_response(),
+        ),
+        Err(error) => (CommitTimings::default(), cypher_error_response(error)),
     }
 }
 

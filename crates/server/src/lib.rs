@@ -8,6 +8,7 @@ mod config;
 mod diagnostics;
 mod grpc;
 mod http;
+mod server_timing;
 mod state;
 #[cfg(test)]
 mod transport_contracts;
@@ -444,3 +445,6 @@ mod tests;
 
 #[cfg(test)]
 mod cypher_tests;
+
+#[cfg(test)]
+mod server_timing_tests;

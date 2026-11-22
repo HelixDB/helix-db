@@ -63,9 +63,11 @@ pub struct Response {
 pub struct ResourceUsage {
     pub peak_memory_bytes: usize,
     pub reads: StorageReadUsage,
+    /// Time the statement spent committing; empty for a read.
+    pub commit: CommitTimings,
 }
 
-pub use crate::query_resources::StorageReadUsage;
+pub use crate::query_resources::{CommitTimings, StorageReadUsage};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

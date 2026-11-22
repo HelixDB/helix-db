@@ -20,6 +20,52 @@ pub struct StorageReadUsage {
     pub scan_rows: usize,
 }
 
+/// Time a request spent committing, apart from executing its steps.
+///
+/// A read has neither. A graph write has `commit`, and `durable` unless it
+/// asked to return before its WAL upload. Index DDL has only `durable`. A
+/// request that commits more than once reports the sum of each.
+///
+/// ```
+/// use std::time::Duration;
+///
+/// use db::query_service::CommitTimings;
+///
+/// let mut timings = CommitTimings::default();
+/// assert_eq!(timings.durable, None);
+/// timings.add(CommitTimings {
+///     commit: Some(Duration::from_millis(2)),
+///     durable: Some(Duration::from_millis(40)),
+/// });
+/// timings.add(CommitTimings {
+///     commit: Some(Duration::from_millis(1)),
+///     durable: None,
+/// });
+/// assert_eq!(timings.commit, Some(Duration::from_millis(3)));
+/// assert_eq!(timings.durable, Some(Duration::from_millis(40)));
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct CommitTimings {
+    /// Preparing index maintenance and applying the commit until it is
+    /// visible on the writer.
+    pub commit: Option<std::time::Duration>,
+    /// Waiting for the commit, or the writes the response rests on, to become
+    /// durable in object storage.
+    pub durable: Option<std::time::Duration>,
+}
+
+impl CommitTimings {
+    /// Add another commit of the same request.
+    pub fn add(&mut self, other: Self) {
+        let sum = |left: Option<std::time::Duration>, right| match (left, right) {
+            (Some(left), Some(right)) => Some(left.saturating_add(right)),
+            (left, right) => left.or(right),
+        };
+        self.commit = sum(self.commit, other.commit);
+        self.durable = sum(self.durable, other.durable);
+    }
+}
+
 use helix_planner::relational as r;
 
 use std::sync::{

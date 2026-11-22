@@ -185,6 +185,11 @@
         "responses": {
           "200": {
             "description": "Query executed successfully.",
+            "headers": {
+              "Server-Timing": {
+                "$ref": "#/components/headers/ServerTiming"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -400,6 +405,11 @@
         "responses": {
           "200": {
             "description": "Statement executed successfully, including writes without RETURN.",
+            "headers": {
+              "Server-Timing": {
+                "$ref": "#/components/headers/ServerTiming"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -621,6 +631,11 @@
         "responses": {
           "200": {
             "description": "Statement planned without execution.",
+            "headers": {
+              "Server-Timing": {
+                "$ref": "#/components/headers/ServerTiming"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -830,6 +845,11 @@
         "responses": {
           "200": {
             "description": "Statement translated and executed successfully, including writes without RETURNING.",
+            "headers": {
+              "Server-Timing": {
+                "$ref": "#/components/headers/ServerTiming"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1056,6 +1076,11 @@
         "responses": {
           "200": {
             "description": "Statement translated and planned without execution.",
+            "headers": {
+              "Server-Timing": {
+                "$ref": "#/components/headers/ServerTiming"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2573,6 +2598,15 @@
             "default": {}
           }
         }
+      }
+    },
+    "headers": {
+      "ServerTiming": {
+        "description": "Where the server time of the request went, in milliseconds, measured from the fully received body. `exec` is parsing, planning and execution. `commit` (graph writes) is applying the commit on the writer. `durable` is the wait for the WAL upload, present when the request waited: a graph write unless X-Helix-Await-Durable is false, and index creation or removal always. The three never overlap. Sent by local servers; an error response or an explain response reports `exec` alone.",
+        "schema": {
+          "type": "string"
+        },
+        "example": "exec;dur=1.204, commit;dur=0.310, durable;dur=41.870"
       }
     }
   }
