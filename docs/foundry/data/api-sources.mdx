@@ -174,6 +174,13 @@ A source holds at most 2,000,000 rows or 2 GiB. Its page and each answer warn fr
 once it is full, sends are refused, so send new pieces to a new source before then.
 Foundry keeps every piece until you delete the source.
 
+### Recall pieces
+
+A source with a text field can be read back through the Helix MCP:
+`helix_foundry_recall` returns its pieces as Markdown notes, newest first or those
+holding some words, from the moment they are sent. Any member of the workspace can
+recall, signed in; send tokens only send. See [Agent memory](/foundry/agents/agent-memory).
+
 ## How ontologies read it
 
 On [New ontology](/foundry/ontologies/create-an-ontology) and in
@@ -217,6 +224,7 @@ When new pieces sync, ontologies that read the source
 | Rows per source | 2,000,000, and 2 GiB |
 | Pieces read by extraction | The newest 500 |
 | Extraction no person started | $5 a month per source, $20 a month per workspace |
+| Recall | 50 notes and 64 KiB of text a call, from a table of at most 64 MiB |
 
 ## Next steps
 

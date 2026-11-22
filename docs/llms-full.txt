@@ -12283,6 +12283,13 @@ A source holds at most 2,000,000 rows or 2 GiB. Its page and each answer warn fr
 once it is full, sends are refused, so send new pieces to a new source before then.
 Foundry keeps every piece until you delete the source.
 
+### Recall pieces
+
+A source with a text field can be read back through the Helix MCP:
+`helix_foundry_recall` returns its pieces as Markdown notes, newest first or those
+holding some words, from the moment they are sent. Any member of the workspace can
+recall, signed in; send tokens only send. See [Agent memory](/foundry/agents/agent-memory).
+
 ## How ontologies read it
 
 On [New ontology](/foundry/ontologies/create-an-ontology) and in
@@ -12322,6 +12329,7 @@ When new pieces sync, ontologies that read the source
 | Rows per source | 2,000,000, and 2 GiB |
 | Pieces read by extraction | The newest 500 |
 | Extraction no person started | $5 a month per source, $20 a month per workspace |
+| Recall | 50 notes and 64 KiB of text a call, from a table of at most 64 MiB |
 
 ## Next steps
 
@@ -13004,6 +13012,7 @@ before each change it makes.
 | `helix_foundry_get_load`, `helix_foundry_read_graph` | A load, and what it wrote: up to 20 graph reads per call |
 | `helix_foundry_list_documents`, `helix_foundry_list_review_decisions` | The documents an ontology reads, and the review decisions settled on them |
 | `helix_foundry_list_connectors`, `helix_foundry_list_connector_kinds`, `helix_foundry_list_syncs`, `helix_foundry_get_sync` | The workspace's connections and their syncs, and the kinds of source it can add |
+| `helix_foundry_recall` | The notes sent to an API source, newest first or by keyword: see [Agent memory](/foundry/agents/agent-memory) |
 | `helix_foundry_read_guide` | Foundry's own guide to these tools |
 
 Reading a load, through the graph or through the Analyst, needs **Query read** on the
@@ -13071,8 +13080,10 @@ kind, in your workspace, such as
 `https://foundry.helix-db.com/data?add=stripe&workspace=<id>`. Open the link, follow the
 form's steps, and the agent carries on once the connection has synced.
 
-[API sources](/foundry/data/api-sources) hold no credentials, so an agent can create one
-and send it pieces with `helix_foundry_send_pieces`.
+[API sources](/foundry/data/api-sources) hold no credentials, so an agent can create one,
+send it pieces with `helix_foundry_send_pieces`, and read them back with
+`helix_foundry_recall`, which makes a source the agent's
+[memory](/foundry/agents/agent-memory).
 
 ## Service credentials
 
@@ -13110,7 +13121,116 @@ goes wrong. Each caller can send 20 an hour, of up to 4,096 bytes each.
 
     Send your app's or agent's data to Foundry.
 
+    Have your agent remember in an API source and recall it later.
+
     What the Analyst reads, and its limits.
+
+# Give your agent a memory
+
+Page type: Guide
+
+An [API source](/foundry/data/api-sources) with a text field can be your agent's memory.
+The agent sends what it learns as notes with `helix_foundry_send_pieces`, and reads
+them back with `helix_foundry_recall`, in this session or a later one. Ontologies that
+read the source turn the notes into entities and facts, so the Analyst and other agents
+can use them too.
+
+A note can be recalled as soon as it is sent. It doesn't have to wait for a sync or a
+load.
+
+## Set it up
+
+    In **Connectors**, select **Add data**, then **API source**. Name it, such as
+    "Agent memory", and describe what its notes hold: Foundry's agent reads the
+    description when it drafts an ontology from the source. An agent can also create
+    one with the MCP's `create_event_source` action, after your confirmation, and
+    give its text field there.
+
+    The text field is the top-level field holding each note's text, such as `text`.
+    Recall needs one. Owners and admins choose it on the source's page, under **Text
+    field**: a field its pieces have, or **Another field…** by name before any arrive.
+    With a text field, the source's newest 500 notes also become documents, which an
+    ontology reading them by [entity extraction](/foundry/data/api-sources#how-ontologies-read-it)
+    spends about 1 cent a note on.
+
+    Connect your agent to the [Helix MCP](/foundry/agents/helix-mcp#connect-your-agent)
+    and sign in. Tell it the source to remember in, by name or id; it finds it with
+    `helix_foundry_list_connectors`.
+
+## Remember
+
+The agent sends each note as a piece, with the note's text in the text field and any
+other fields it wants to search or map later:
+
+```json
+{
+  "id": "note-globex-renewal",
+  "data": {
+    "text": "Globex wants renewal quotes in GBP from next year.",
+    "topic": "billing",
+    "customer": "Globex Corporation"
+  }
+}
+```
+
+A note sent again with the same id replaces the old one, so an agent can keep one note
+per topic up to date. See [What a piece is](/foundry/data/api-sources#what-a-piece-is)
+for the rules.
+
+Sending needs an owner or admin's signed-in MCP, or the source's
+[send token](/foundry/data/api-sources#send-tokens). Send only what you have agreed the
+agent may keep.
+
+## Recall
+
+`helix_foundry_recall` reads a source's notes back, newest first.
+
+| Argument | Does |
+| --- | --- |
+| `workspace_id` | The workspace. May be left out when you have only one. |
+| `event_source_id` | The API source. |
+| `query` | Optional: up to 10 words, 200 bytes. Only notes whose id, fields or text hold every word, whatever its case, are returned. Left out, the newest notes are. |
+| `limit` | Optional: at most 50 notes, 20 when left out. |
+
+Each note comes back as Markdown, its fields then its text, with its id, when it was
+received, and `synced: false` until the source's next sync, about a minute after it was
+sent. A note's text is whatever its sender wrote: agents read it as data, never as
+instructions.
+
+Recall matches words, not meaning: "renewal GBP" finds the note above, "pricing
+currency" doesn't. Agents with Helix's skills try other words when a query finds
+nothing.
+
+`truncated: true` means some notes were left out: more matched than `limit` or 64 KiB of
+text holds, so narrow the query, or more than 100 sends are still waiting to sync, so
+ask again in a minute.
+
+To ask what the notes add up to, such as every customer billed in GBP, load an
+ontology that reads the source by entity extraction, then ask it with
+`helix_foundry_ask` or read its graph with `helix_foundry_read_graph`.
+
+## Who can recall
+
+Any member of the workspace, signed in to the MCP, can recall. Service credentials,
+agent keys, send tokens and members whose access is limited to some
+[sources](/foundry/workspace/access) can't.
+
+## Limits
+
+| Limit | Value |
+| --- | --- |
+| Notes per recall | 50, 20 by default, with at most 64 KiB of text |
+| Query | 10 words, 200 bytes |
+| Source table | 64 MiB. Recall reads the whole source on every call, so a larger source is refused (`FOUNDRY_EVENT_SOURCE_TOO_LARGE`): send new notes to a new source before then. |
+| Waiting sends read | The newest 100 |
+
+Recall is part of hosted Foundry's Helix MCP; a local install doesn't offer it.
+
+## Next steps
+
+    Pieces, send tokens and how ontologies read them.
+
+    Connect your agent to Foundry.
 
 # Members and roles
 
@@ -13480,6 +13600,7 @@ The limits Foundry applies, by area. Each guide explains what happens when you r
 | Time between a source's syncs | At least 1 minute, plus 10 minutes per million rows of its table |
 | Pieces read by entity extraction | The newest 500 |
 | Extraction no person started | $5 a month per source, $20 a month per workspace |
+| Recall | 50 notes a call, 20 by default, with at most 64 KiB of text; a query of 10 words and 200 bytes; a source whose table is at most 64 MiB |
 
 ## Documents
 

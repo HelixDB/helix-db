@@ -83,6 +83,7 @@ before each change it makes.
 | `helix_foundry_get_load`, `helix_foundry_read_graph` | A load, and what it wrote: up to 20 graph reads per call |
 | `helix_foundry_list_documents`, `helix_foundry_list_review_decisions` | The documents an ontology reads, and the review decisions settled on them |
 | `helix_foundry_list_connectors`, `helix_foundry_list_connector_kinds`, `helix_foundry_list_syncs`, `helix_foundry_get_sync` | The workspace's connections and their syncs, and the kinds of source it can add |
+| `helix_foundry_recall` | The notes sent to an API source, newest first or by keyword: see [Agent memory](/foundry/agents/agent-memory) |
 | `helix_foundry_read_guide` | Foundry's own guide to these tools |
 
 Reading a load, through the graph or through the Analyst, needs **Query read** on the
@@ -150,8 +151,10 @@ kind, in your workspace, such as
 `https://foundry.helix-db.com/data?add=stripe&workspace=<id>`. Open the link, follow the
 form's steps, and the agent carries on once the connection has synced.
 
-[API sources](/foundry/data/api-sources) hold no credentials, so an agent can create one
-and send it pieces with `helix_foundry_send_pieces`.
+[API sources](/foundry/data/api-sources) hold no credentials, so an agent can create one,
+send it pieces with `helix_foundry_send_pieces`, and read them back with
+`helix_foundry_recall`, which makes a source the agent's
+[memory](/foundry/agents/agent-memory).
 
 ## Service credentials
 
@@ -190,6 +193,9 @@ goes wrong. Each caller can send 20 an hour, of up to 4,096 bytes each.
 <CardGroup cols={2}>
   <Card title="API sources" icon="code" href="/foundry/data/api-sources">
     Send your app's or agent's data to Foundry.
+  </Card>
+  <Card title="Agent memory" icon="brain" href="/foundry/agents/agent-memory">
+    Have your agent remember in an API source and recall it later.
   </Card>
   <Card title="Ask the Analyst" icon="comments" href="/foundry/ask/ask-questions">
     What the Analyst reads, and its limits.
