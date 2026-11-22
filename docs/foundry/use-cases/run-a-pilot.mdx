@@ -27,9 +27,10 @@ time, and each should need more than one system to answer. For each, write down:
 - **What it's worth**: revenue kept or found, or hours saved.
 - **The sources that hold the answer**: which databases, apps and documents.
 
-[Use cases on the sample company](/foundry/use-cases/sample-company) shows three such
+[Use cases on the sample company](/foundry/use-cases/sample-company) shows four such
 questions. Then check the machine has Docker with Compose v2, ports 3000, 8333 and 8081
-free, and room for a few GB of images.
+free, and room for a few GB of images. To run the bundled Ollama, give Docker at least
+10 GB of memory.
 
 ## The checklist
 
@@ -61,7 +62,8 @@ free, and room for a few GB of images.
   <Step title="Choose where AI runs">
     Drafting, reading documents and answering run on an AI provider. To keep your data
     on the machine, run Ollama beside Foundry with
-    `docker compose --profile ollama up -d --wait`. Otherwise Foundry uses the
+    `docker compose --profile ollama up -d --wait`; small local models may stop a draft
+    early, which can cost the pilot a question. Otherwise Foundry uses the
     `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` of the shell that started it, or a provider
     you choose in **Settings › AI models**. See
     [what reaches AI model providers](/foundry/reference/security-and-data#what-reaches-ai-model-providers).

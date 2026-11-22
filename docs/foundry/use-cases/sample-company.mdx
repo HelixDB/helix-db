@@ -1,6 +1,6 @@
 ---
 title: "Use cases on the sample company"
-description: "Three questions worth money or time, answered from the Acme Corp sample ontology: renewal risk, account research before a call, and support triage with the customer's full context"
+description: "Four questions worth money or time, answered from the Acme Corp sample ontology: renewal risk, account research before a call, support triage with the customer's full context, and ops questions without a data request"
 sidebarTitle: "Sample company use cases"
 pageType: "Guide"
 ---
@@ -67,7 +67,7 @@ champion is leaving. No single table says any of this is a risk; together they d
 
 ## Account research before a call
 
-**What it's worth:** rep time saved. The brief comes with sources, rather than an hour
+**What it's worth:** rep time saved. The brief comes with sources, rather than a search
 across the CRM, billing, support and old notes.
 
 **The question:**
@@ -112,6 +112,28 @@ In the sample, `T-4404` is Sable Solar's, raised by its operations director duri
 7 October incident, with a second ticket, `T-4401`, from the same morning. The
 escalation thread and the incident report name both tickets, which is what lets the
 load link them to the conversations about them.
+
+## Ops questions without a data request
+
+**What it's worth:** analyst time saved. Whoever has the question asks it, rather than
+filing a request with the data team and waiting.
+
+**The question:**
+
+> Which invoices are overdue, which accounts owe them, and how much?
+
+**What answers it:**
+
+- The `Invoice`'s `status`, `amount_usd` and `due_on`.
+- `invoice_for` reaches its `Subscription`, and `subscription_of` the `Account` that
+  owes it.
+
+In the sample, three invoices are `overdue`, $6,162 in all: Vantage Lift Trucks'
+`INV-30309` and `INV-30339`, $435 each on its Starter subscription `SUB-2011`, and
+Brightmoor Facilities' `INV-30350`, $5,292 on `SUB-2028`. Other questions of this kind
+the sample answers: how much active subscriptions on each plan bring in each month, from
+each `Subscription`'s `monthly_amount_usd` and `on_plan`, and how each account's active
+users moved month by month, from its `MonthlyUsage`.
 
 ## Ask in the Analyst
 
