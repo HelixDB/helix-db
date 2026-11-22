@@ -34,23 +34,24 @@
 //!   every stored entry it has not armed against the catalog and the id
 //!   watermarks, and *quarantines* one that fails: its rows are kept, the
 //!   store opens, and the entry is reported until a later refresh finds it
-//!   consistent. [`ensure_index_unclaimed`] and
-//!   [`ensure_generation_unclaimed`] fail the allocation of an id an entry
-//!   names. A vector physical id has no such check: an entry is keyed by
-//!   generation, not by physical id, so the check would scan every entry on
-//!   every allocation. The cross-check gives the same guarantee, because an
-//!   armed entry names only ids below the watermark, which are never
-//!   allocated again, and the transaction that allocates an id above it also
-//!   writes the record or the partition mapping that makes the cross-check
-//!   quarantine an entry naming that id.
+//!   consistent or [`retire::Retirer::remove_quarantined`] deletes it on
+//!   request. No allocation hands out an id an entry names, armed or
+//!   quarantined: [`unclaimed_index_id`] and [`unclaimed_generation`] skip
+//!   past them, so no entry can fail the creation of an index either. A
+//!   vector physical id has no such skip: an entry is keyed by generation,
+//!   not by physical id, so it would scan every entry on every allocation.
+//!   The cross-check gives the same guarantee, because an armed entry names
+//!   only ids below the watermark, which are never allocated again, and the
+//!   transaction that allocates an id above it also writes the record or the
+//!   partition mapping that makes the cross-check quarantine an entry naming
+//!   that id.
 //! - **Retirement.** [`retire`] deletes an entry once no table of the store
 //!   can hold a row of it; see that module for the proof. Compactions the
-//!   scheduler picks retire entries as they pass; nothing compacts on their
-//!   behalf. A restart forgets the proof and starts it again from every
-//!   table the store then has.
-//! - **Reclaim.** [`reclaim`] compacts on request, for a caller who wants the
-//!   bytes back before the scheduler gets to them. It deletes no entry
-//!   itself.
+//!   scheduler picks retire entries as they pass. A restart forgets the
+//!   proof and starts it again from every table the store then has.
+//! - **Reclaim.** [`reclaim`] compacts the store so that the rows go, on
+//!   request, or by itself once the store has been idle with an entry whose
+//!   rows no compaction is going to reach. It deletes no entry itself.
 //!
 //! # What a drop still deletes itself
 //!
@@ -96,8 +97,8 @@
 //! per partition, and its mappings stay until the entry retires. An entry
 //! lives as long as a table that held its rows when the proof started: the
 //! rows of a large index sit in the oldest sorted run, which the scheduler
-//! rewrites rarely, so such an entry can stay for as long as that run does
-//! unless a caller asks for a reclaim.
+//! rewrites rarely, so on a store that is never idle such an entry can stay
+//! for as long as that run does unless a caller asks for a reclaim.
 
 pub(crate) mod filter;
 pub(crate) mod ownership;
@@ -106,6 +107,7 @@ pub(crate) mod retire;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use bytes::Bytes;
 use slatedb::config::{FlushOptions, FlushType};
@@ -214,14 +216,6 @@ impl DroppedGeneration {
         }
         .to_bytes()
     }
-}
-
-fn violation(entry: DroppedGeneration, reason: &str) -> HelixDbError {
-    HelixDbError::IndexCatalogCorruption(format!(
-        "dropped-generation entry for index {} generation {} {reason}",
-        entry.index_id.get(),
-        entry.generation.get()
-    ))
 }
 
 /// Whether the store admits dropped-generation entries.
@@ -351,41 +345,149 @@ pub(crate) async fn load_entries(
     Ok(entries)
 }
 
-/// Fails when an entry names any generation of the freshly allocated
-/// `index_id`: compactions would discard the rows the new index writes.
-pub(crate) async fn ensure_index_unclaimed(
+/// The first logical index id at or after `from` that no entry names, armed
+/// or quarantined: compactions may discard the rows of an id an armed entry
+/// names, and an id a quarantined entry names is left to that entry.
+///
+/// A consistent store has no entry at or above the watermark, so this reads
+/// nothing past the first key. Each entry it skips costs one more.
+///
+/// # Errors
+///
+/// A failed read, and [`HelixDbError::IdentifierExhausted`] when entries
+/// name every id up to the last.
+pub(crate) async fn unclaimed_index_id(
+    read: &(impl DbReadOps + Sync),
+    from: IndexId,
+) -> Result<IndexId> {
+    let first = from.get().to_be_bytes();
+    let mut rows = read
+        .scan_prefix(
+            GlobalKey::logical_prefix(GlobalKind::DroppedGeneration),
+            first.as_slice()..,
+        )
+        .await?;
+    let mut candidate = from;
+    // Imperative: the scan ends at the first id no entry names.
+    while let Some(row) = rows.next().await? {
+        let GlobalKey::DroppedGeneration { index_id, .. } = GlobalKey::parse_from_slice(&row.key)?
+        else {
+            return Err(HelixDbError::IndexCatalogCorruption(
+                "dropped-generation prefix yielded a different typed key".to_string(),
+            ));
+        };
+        match index_id.cmp(&candidate) {
+            // Another generation of an id already skipped.
+            std::cmp::Ordering::Less => {}
+            std::cmp::Ordering::Equal => candidate = candidate.checked_next()?,
+            std::cmp::Ordering::Greater => break,
+        }
+    }
+    Ok(candidate)
+}
+
+/// The first generation of `index_id` at or after `from` that no entry
+/// names, armed or quarantined; see [`unclaimed_index_id`].
+///
+/// # Errors
+///
+/// A failed read, and [`HelixDbError::IdentifierExhausted`] when entries
+/// name every generation up to the last.
+pub(crate) async fn unclaimed_generation(
     read: &(impl DbReadOps + Sync),
     index_id: IndexId,
-) -> Result<()> {
+    from: IndexGenerationId,
+) -> Result<IndexGenerationId> {
     let prefix = [
         &GlobalKey::logical_prefix(GlobalKind::DroppedGeneration)[..],
         &index_id.get().to_be_bytes(),
     ]
     .concat();
-    let mut rows = read.scan_prefix(prefix, ..).await?;
-    if rows.next().await?.is_some() {
-        return Err(HelixDbError::IndexCatalogCorruption(format!(
-            "a dropped-generation entry names index {}, which was never allocated",
-            index_id.get()
-        )));
+    let first = from.get().to_be_bytes();
+    let mut rows = read.scan_prefix(prefix, first.as_slice()..).await?;
+    let mut candidate = from;
+    // Imperative: the scan ends at the first generation no entry names.
+    while let Some(row) = rows.next().await? {
+        let GlobalKey::DroppedGeneration { generation, .. } =
+            GlobalKey::parse_from_slice(&row.key)?
+        else {
+            return Err(HelixDbError::IndexCatalogCorruption(
+                "dropped-generation prefix yielded a different typed key".to_string(),
+            ));
+        };
+        if generation != candidate {
+            break;
+        }
+        candidate = candidate.checked_next()?;
     }
-    Ok(())
+    Ok(candidate)
 }
 
-/// Fails when an entry names the generation a recreated index is about to
-/// build.
-pub(crate) async fn ensure_generation_unclaimed(
-    read: &(impl DbReadOps + Sync),
-    entry: DroppedGeneration,
-) -> Result<()> {
-    if read.get(entry.key()).await?.is_some() {
-        return Err(violation(entry, "names a generation that was never built"));
-    }
-    Ok(())
+/// What in the catalog contradicts a dropped-generation entry.
+///
+/// ```
+/// use db::DroppedEntryContradiction;
+///
+/// assert_eq!(
+///     DroppedEntryContradiction::GenerationStillOwned.to_string(),
+///     "names a generation its index record still owns",
+/// );
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DroppedEntryContradiction {
+    /// The logical index id was never allocated.
+    IndexAboveWatermark,
+    /// A vector physical index id was never allocated.
+    PhysicalIndexAboveWatermark,
+    /// A partition of another generation maps to one of its vector physical
+    /// indexes.
+    PhysicalIndexMappedByAnotherGeneration,
+    /// Its scope has no record of the index.
+    IndexWithoutRecord,
+    /// The index is of another family than the entry's rows.
+    AnotherFamily,
+    /// The generation is building, active, aborting or dropping.
+    GenerationStillOwned,
+    /// The index has not reached the generation.
+    GenerationNotReached,
+    /// A live generation owns one of its vector physical indexes.
+    PhysicalIndexStillOwned,
+    /// One of its vector physical indexes has a metadata row, which the drop
+    /// deleted: the id is in use again.
+    PhysicalIndexDescribed,
+    /// Among its partition mappings is one of another generation.
+    MappingOfAnotherGeneration,
+    /// Two of its partitions map to one vector physical index.
+    PhysicalIndexMappedTwice,
 }
 
-/// Why an entry failed its cross-check.
-pub(crate) type Contradiction = &'static str;
+impl std::fmt::Display for DroppedEntryContradiction {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::IndexAboveWatermark => "names an index id above the watermark",
+            Self::PhysicalIndexAboveWatermark => {
+                "names a vector physical index id above the watermark"
+            }
+            Self::PhysicalIndexMappedByAnotherGeneration => {
+                "names a vector physical index another generation's partition maps to"
+            }
+            Self::IndexWithoutRecord => "names an index its scope has no record of",
+            Self::AnotherFamily => "names an index of another family",
+            Self::GenerationStillOwned => "names a generation its index record still owns",
+            Self::GenerationNotReached => "names a generation its index has not reached",
+            Self::PhysicalIndexStillOwned => {
+                "names a vector physical index an index record still owns"
+            }
+            Self::PhysicalIndexDescribed => "names a vector physical index that has a metadata row",
+            Self::MappingOfAnotherGeneration => "has a partition mapping of another generation",
+            Self::PhysicalIndexMappedTwice => {
+                "has two partitions mapped to one vector physical index"
+            }
+        })
+    }
+}
+
+use DroppedEntryContradiction as Contradiction;
 
 /// What the catalog records of one index, as far as an entry is checked
 /// against it.
@@ -506,31 +608,31 @@ impl ScopeFacts {
             .iter()
             .any(|id| next_physical_index_id.is_none_or(|next_id| *id >= next_id))
         {
-            return Err("names a vector physical index id above the watermark");
+            return Err(Contradiction::PhysicalIndexAboveWatermark);
         }
         if physical_index_ids.iter().any(|id| {
             self.mapped
                 .get(id)
                 .is_some_and(|mapped| *mapped != MappedBy::One(entry))
         }) {
-            return Err("names a vector physical index another generation's partition maps to");
+            return Err(Contradiction::PhysicalIndexMappedByAnotherGeneration);
         }
         // Index records are never deleted, so the drop's own record is there.
         let Some(record) = self.records.get(&entry.index_id) else {
-            return Err("names an index its scope has no record of");
+            return Err(Contradiction::IndexWithoutRecord);
         };
         if record.family != family {
-            return Err("names an index of another family");
+            return Err(Contradiction::AnotherFamily);
         }
         // A recreated index builds a strictly later generation.
         if record.live.is_some_and(|live| live <= entry.generation) {
-            return Err("names a generation its index record still owns");
+            return Err(Contradiction::GenerationStillOwned);
         }
         if record.generation < entry.generation {
-            return Err("names a generation its index has not reached");
+            return Err(Contradiction::GenerationNotReached);
         }
         if physical_index_ids.iter().any(|id| self.owned.contains(id)) {
-            return Err("names a vector physical index an index record still owns");
+            return Err(Contradiction::PhysicalIndexStillOwned);
         }
         Ok(())
     }
@@ -599,7 +701,7 @@ async fn cross_check(
     let mut checked = Vec::with_capacity(named.len());
     for (entry, value, family, physical_index_ids) in named {
         let verdict = if entry.index_id >= next_index_id {
-            Err("names an index id above the watermark")
+            Err(Contradiction::IndexAboveWatermark)
         } else {
             physical_index_ids.and_then(|physical_index_ids| {
                 scopes[&value.scope]
@@ -623,7 +725,7 @@ async fn cross_check(
                     described = described || read.get(metadata).await?.is_some();
                 }
                 if described {
-                    Err("names a vector physical index that has a metadata row")
+                    Err(Contradiction::PhysicalIndexDescribed)
                 } else {
                     Ok(std::iter::once(OwnerKey::Generation {
                         scope: value.scope,
@@ -664,12 +766,10 @@ async fn partition_physical_index_ids(
             "vector partition mapping key contains another value kind",
         )?;
         if mapping.index_id != entry.index_id || mapping.generation != entry.generation {
-            return Ok(Err("has a partition mapping of another generation"));
+            return Ok(Err(Contradiction::MappingOfAnotherGeneration));
         }
         if !physical_index_ids.insert(mapping.physical_index_id) {
-            return Ok(Err(
-                "has two partitions mapped to one vector physical index",
-            ));
+            return Ok(Err(Contradiction::PhysicalIndexMappedTwice));
         }
     }
     Ok(Ok(physical_index_ids.into_iter().collect()))
@@ -695,6 +795,23 @@ pub(crate) struct TableId(pub(crate) u128);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct CompactionId(pub(crate) u128);
 
+/// A set with at least one member: what a proof still waits for. A proof
+/// that waits for nothing is a different state, never an empty set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Waiting<T: Eq + std::hash::Hash>(HashSet<T>);
+
+impl<T: Eq + std::hash::Hash> Waiting<T> {
+    /// `members`, unless there is none.
+    pub(crate) fn new(members: HashSet<T>) -> Option<Self> {
+        (!members.is_empty()).then_some(Self(members))
+    }
+
+    /// The members; never empty.
+    pub(crate) fn members(&self) -> &HashSet<T> {
+        &self.0
+    }
+}
+
 /// How far [`retire`] has got in proving that no table holds a row of one
 /// armed entry. The steps and why each is sound are in that module.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -703,12 +820,11 @@ pub(crate) enum Proof {
     /// rows since.
     Unproven,
     /// These compactions were in flight when the proof started, so they may
-    /// write rows a filter of theirs kept before the entry was armed. Never
-    /// empty.
-    Draining { compactions: HashSet<CompactionId> },
+    /// write rows a filter of theirs kept before the entry was armed.
+    Draining { compactions: Waiting<CompactionId> },
     /// These tables held rows of the entry once every compaction above had
-    /// finished. Every later table is free of them. Never empty.
-    Tracking { tables: HashSet<TableId> },
+    /// finished. Every later table is free of them.
+    Tracking { tables: Waiting<TableId> },
 }
 
 /// An entry this writer discards rows for.
@@ -727,6 +843,8 @@ pub(crate) struct Armed {
     pub(crate) kept: u64,
     /// How far the proof that its rows are gone has got.
     pub(crate) proof: Proof,
+    /// When this writer armed the entry.
+    pub(crate) since: Instant,
 }
 
 /// An entry that failed its cross-check. It holds no owner, so no filter can
@@ -737,6 +855,8 @@ pub(crate) struct Quarantined {
     pub(crate) value: DroppedGenerationValue,
     /// What in the catalog contradicts the entry.
     pub(crate) contradiction: Contradiction,
+    /// When this writer first quarantined the entry.
+    pub(crate) since: Instant,
 }
 
 /// What a writer does with one stored entry.
@@ -748,6 +868,52 @@ enum Entry {
     Quarantined(Quarantined),
 }
 
+/// The rows a dropped-generation entry records as given up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DroppedEntryRows {
+    /// A secondary index generation.
+    Secondary,
+    /// A text index generation.
+    Text,
+    /// An unpartitioned vector index generation stored under this vector
+    /// physical index id.
+    UnpartitionedVector {
+        /// The vector physical index id the entry names.
+        physical_index_id: u64,
+    },
+    /// A partitioned vector index generation, whose partition mappings list
+    /// its vector physical index ids.
+    PartitionedVector,
+}
+
+impl std::fmt::Display for DroppedEntryRows {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Secondary => formatter.write_str("secondary"),
+            Self::Text => formatter.write_str("text"),
+            Self::UnpartitionedVector { physical_index_id } => {
+                write!(formatter, "vector, physical index {physical_index_id}")
+            }
+            Self::PartitionedVector => formatter.write_str("partitioned vector"),
+        }
+    }
+}
+
+impl From<DroppedGenerationRows> for DroppedEntryRows {
+    fn from(rows: DroppedGenerationRows) -> Self {
+        match rows {
+            DroppedGenerationRows::Secondary => Self::Secondary,
+            DroppedGenerationRows::Text => Self::Text,
+            DroppedGenerationRows::UnpartitionedVector { physical_index_id } => {
+                Self::UnpartitionedVector {
+                    physical_index_id: physical_index_id.get(),
+                }
+            }
+            DroppedGenerationRows::PartitionedVector => Self::PartitionedVector,
+        }
+    }
+}
+
 /// A dropped index generation whose entry the catalog contradicts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuarantinedDroppedGeneration {
@@ -755,8 +921,15 @@ pub struct QuarantinedDroppedGeneration {
     pub index_id: u64,
     /// The generation of that index the entry names.
     pub generation: u64,
+    /// The data scope the entry records.
+    pub scope: DataScope,
+    /// The rows the entry records as given up. They are kept.
+    pub rows: DroppedEntryRows,
     /// What in the catalog contradicts the entry.
-    pub contradiction: &'static str,
+    pub contradiction: DroppedEntryContradiction,
+    /// When this writer first found the entry contradicted. A writer that
+    /// opens starts the clock again.
+    pub since: Instant,
 }
 
 /// What a writer knows of the dropped index generations whose entries are
@@ -765,10 +938,12 @@ pub struct QuarantinedDroppedGeneration {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DroppedIndexStorage {
     /// Armed, with no proof under way: just dropped, or a compaction kept
-    /// their rows for a reader older than the drop.
+    /// their rows since.
     pub unproven: usize,
-    /// Of `unproven`, those whose rows a compaction has kept for an older
-    /// reader since they were armed.
+    /// Of `unproven`, those whose rows a compaction has kept since they were
+    /// armed, because its retention sequence was behind the drop: a snapshot
+    /// or transaction older than the drop was open, or the compaction had
+    /// been planned before the drop.
     pub retained: usize,
     /// Armed, waiting for the compactions that were in flight when their
     /// proof started.
@@ -777,6 +952,9 @@ pub struct DroppedIndexStorage {
     pub tracking: usize,
     /// Distinct tables the `tracking` generations wait for.
     pub tracked_tables: usize,
+    /// When this writer armed the armed generation it has waited on longest.
+    /// A writer that opens arms every stored entry again.
+    pub waiting_since: Option<Instant>,
     /// Entries the catalog contradicts. Their rows are kept.
     pub quarantined: Vec<QuarantinedDroppedGeneration>,
 }
@@ -788,6 +966,35 @@ impl DroppedIndexStorage {
     }
 }
 
+/// What the compactions of this process have done, as far as the filters
+/// they created tell: enough to know, without reading object storage, that
+/// the compactor has had nothing to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct CompactionActivity {
+    /// Filters created and filters dropped, in total. Unchanged between two
+    /// reads means no compaction job started or ended in between.
+    pub(crate) events: u64,
+    /// Filters alive: zero when no compaction job is running.
+    pub(crate) running: usize,
+}
+
+/// What [`Registry::remove_quarantined`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unquarantined {
+    /// The entry was quarantined and is forgotten.
+    Removed,
+    /// The entry is armed.
+    Armed,
+    /// The registry knows no such entry.
+    Absent,
+}
+
+#[derive(Debug, Default)]
+struct State {
+    entries: HashMap<DroppedGeneration, Entry>,
+    compactions: CompactionActivity,
+}
+
 /// The dropped generations one writer knows of, and what its compactions do
 /// with each.
 ///
@@ -795,7 +1002,9 @@ impl DroppedIndexStorage {
 /// and [`retire`], which arms entries and removes the ones it retires.
 #[derive(Debug, Default)]
 pub(crate) struct Registry {
-    entries: parking_lot::Mutex<HashMap<DroppedGeneration, Entry>>,
+    state: parking_lot::Mutex<State>,
+    /// Wakes the retirer; see [`Self::changed`].
+    changed: tokio::sync::Notify,
 }
 
 impl Registry {
@@ -815,10 +1024,10 @@ impl Registry {
         let gate = snapshot.seq();
         let stored = load_entries(snapshot.as_ref()).await?;
         let unarmed = {
-            let entries = self.entries.lock();
+            let state = self.state.lock();
             stored
                 .into_iter()
-                .filter(|(entry, _)| !matches!(entries.get(entry), Some(Entry::Armed(_))))
+                .filter(|(entry, _)| !matches!(state.entries.get(entry), Some(Entry::Armed(_))))
                 .collect::<Vec<_>>()
         };
         let checked = cross_check(snapshot.as_ref(), unarmed).await?;
@@ -830,9 +1039,11 @@ impl Registry {
             })
             .await?;
         }
-        let mut entries = self.entries.lock();
+        let now = Instant::now();
+        let mut state = self.state.lock();
         let mut armed = 0usize;
         for (entry, value, verdict) in checked {
+            let previous = state.entries.get(&entry);
             let next = match verdict {
                 Ok(owners) => {
                     armed += 1;
@@ -842,19 +1053,25 @@ impl Registry {
                         owners,
                         kept: 0,
                         proof: Proof::Unproven,
+                        since: now,
                     })
                 }
                 Err(contradiction) => Entry::Quarantined(Quarantined {
                     value,
                     contradiction,
+                    // The clock of an entry that stays quarantined runs on.
+                    since: match previous {
+                        Some(Entry::Quarantined(quarantined)) => quarantined.since,
+                        Some(Entry::Armed(_)) | None => now,
+                    },
                 }),
             };
-            match (&next, entries.insert(entry, next.clone())) {
-                (Entry::Quarantined(quarantined), previous) if previous.as_ref() != Some(&next) => {
+            match (&next, previous) {
+                (Entry::Quarantined(quarantined), previous) if previous != Some(&next) => {
                     tracing::error!(
                         index_id = entry.index_id.get(),
                         generation = entry.generation.get(),
-                        contradiction = quarantined.contradiction,
+                        contradiction = %quarantined.contradiction,
                         "quarantined a dropped-generation entry: compactions keep its rows"
                     );
                 }
@@ -867,6 +1084,7 @@ impl Registry {
                 }
                 (Entry::Armed(_) | Entry::Quarantined(_), _) => {}
             }
+            state.entries.insert(entry, next);
         }
         if armed > 0 {
             tracing::info!(entries = armed, gate, "armed dropped-generation entries");
@@ -876,8 +1094,9 @@ impl Registry {
 
     /// Every armed entry.
     pub(crate) fn armed(&self) -> Vec<(DroppedGeneration, Armed)> {
-        self.entries
+        self.state
             .lock()
+            .entries
             .iter()
             .filter_map(|(entry, state)| match state {
                 Entry::Armed(armed) => Some((*entry, armed.clone())),
@@ -888,27 +1107,37 @@ impl Registry {
 
     /// Every entry this writer knows of, counted by what it waits for.
     pub(crate) fn storage(&self) -> DroppedIndexStorage {
-        let entries = self.entries.lock();
+        let state = self.state.lock();
         let mut storage = DroppedIndexStorage::default();
         let mut tracked = HashSet::new();
-        for (entry, state) in entries.iter() {
+        for (entry, state) in &state.entries {
             match state {
-                Entry::Armed(armed) => match &armed.proof {
-                    Proof::Unproven => {
-                        storage.unproven += 1;
-                        storage.retained += usize::from(armed.kept > 0);
+                Entry::Armed(armed) => {
+                    storage.waiting_since = Some(
+                        storage
+                            .waiting_since
+                            .map_or(armed.since, |since| since.min(armed.since)),
+                    );
+                    match &armed.proof {
+                        Proof::Unproven => {
+                            storage.unproven += 1;
+                            storage.retained += usize::from(armed.kept > 0);
+                        }
+                        Proof::Draining { .. } => storage.draining += 1,
+                        Proof::Tracking { tables } => {
+                            storage.tracking += 1;
+                            tracked.extend(tables.members().iter().copied());
+                        }
                     }
-                    Proof::Draining { .. } => storage.draining += 1,
-                    Proof::Tracking { tables } => {
-                        storage.tracking += 1;
-                        tracked.extend(tables.iter().copied());
-                    }
-                },
+                }
                 Entry::Quarantined(quarantined) => {
                     storage.quarantined.push(QuarantinedDroppedGeneration {
                         index_id: entry.index_id.get(),
                         generation: entry.generation.get(),
+                        scope: quarantined.value.scope,
+                        rows: quarantined.value.rows.into(),
                         contradiction: quarantined.contradiction,
+                        since: quarantined.since,
                     });
                 }
             }
@@ -920,17 +1149,37 @@ impl Registry {
         storage
     }
 
+    /// Whether a table some armed entry's proof tracks is missing from
+    /// `stored`: only then can a look at the store retire a tracked entry.
+    pub(crate) fn tracked_table_left(&self, stored: &HashSet<TableId>) -> bool {
+        self.state.lock().entries.values().any(|state| match state {
+            Entry::Armed(Armed {
+                proof: Proof::Tracking { tables },
+                ..
+            }) => !tables.members().is_subset(stored),
+            Entry::Armed(Armed {
+                proof: Proof::Unproven | Proof::Draining { .. },
+                ..
+            })
+            | Entry::Quarantined(_) => false,
+        })
+    }
+
     /// The owners whose rows one compaction job may discard, decided once for
     /// the filter being created: every armed entry whose gate the job's
     /// `retention_min_seq` has reached. A job that reports no retention
     /// sequence discards nothing.
     ///
     /// An armed entry whose rows the filter keeps loses its proof: the job
-    /// may write those rows into a table no proof step has seen.
+    /// may write those rows into a table no proof step has seen. The caller
+    /// owes one [`Self::filter_dropped`] for the filter it creates.
     fn discardable(&self, context: &CompactionJobContext) -> HashSet<OwnerKey> {
-        let mut entries = self.entries.lock();
+        let mut state = self.state.lock();
+        state.compactions.events += 1;
+        state.compactions.running += 1;
         let mut discardable = HashSet::new();
-        for state in entries.values_mut() {
+        let mut kept = false;
+        for state in state.entries.values_mut() {
             let Entry::Armed(armed) = state else {
                 continue;
             };
@@ -942,17 +1191,73 @@ impl Registry {
             } else {
                 armed.kept += 1;
                 armed.proof = Proof::Unproven;
+                kept = true;
             }
         }
+        drop(state);
+        if kept {
+            self.changed.notify_one();
+        }
         discardable
+    }
+
+    /// Records that a filter [`Self::discardable`] was called for is gone:
+    /// its job ended, or was abandoned.
+    fn filter_dropped(&self) {
+        let mut state = self.state.lock();
+        state.compactions.events += 1;
+        debug_assert!(
+            state.compactions.running > 0,
+            "every dropped filter was created through this registry"
+        );
+        // Saturating: this runs as a filter is dropped, where a panic
+        // during an unwind would abort the process.
+        state.compactions.running = state.compactions.running.saturating_sub(1);
+        // A proof that tracks tables is told when one leaves the manifest;
+        // any other may wait for the compaction that just ended.
+        let waiting = state.entries.values().any(|state| match state {
+            Entry::Armed(Armed {
+                proof: Proof::Unproven | Proof::Draining { .. },
+                ..
+            }) => true,
+            Entry::Armed(Armed {
+                proof: Proof::Tracking { .. },
+                ..
+            })
+            | Entry::Quarantined(_) => false,
+        });
+        drop(state);
+        if waiting {
+            self.changed.notify_one();
+        }
+    }
+
+    /// What this process's compactions have done so far.
+    pub(crate) fn compactions(&self) -> CompactionActivity {
+        self.state.lock().compactions
+    }
+
+    /// Tells the retirer that a stored entry or the catalog it is checked
+    /// against may have changed: an index operation reached its end.
+    pub(crate) fn catalog_changed(&self) {
+        self.changed.notify_one();
+    }
+
+    /// Completes once something a retirement pass depends on has changed
+    /// in this process since the last call completed: an entry may have been
+    /// stored, the catalog moved, a filter kept an armed entry's rows, or a
+    /// compaction ended while an armed entry's proof was not yet tracking
+    /// tables. One waiter at a time.
+    pub(crate) async fn changed(&self) {
+        self.changed.notified().await;
     }
 
     /// Records that the proof of `entry` has reached `proof`, unless a filter
     /// kept the entry's rows since the caller read `kept`, or the entry is
     /// no longer armed. Returns whether the step applied.
     pub(crate) fn advance(&self, entry: DroppedGeneration, kept: u64, proof: Proof) -> bool {
-        let mut entries = self.entries.lock();
-        let Some(Entry::Armed(armed)) = entries.get_mut(&entry) else {
+        let mut state = self.state.lock();
+        let Some(Entry::Armed(armed)) = state.entries.get_mut(&entry) else {
             return false;
         };
         if armed.kept != kept {
@@ -967,15 +1272,30 @@ impl Registry {
     /// armed. Returns whether it was forgotten: only then may the caller
     /// delete the stored entry.
     pub(crate) fn retire(&self, entry: DroppedGeneration, kept: u64) -> bool {
-        let mut entries = self.entries.lock();
-        let Some(Entry::Armed(armed)) = entries.get(&entry) else {
+        let mut state = self.state.lock();
+        let Some(Entry::Armed(armed)) = state.entries.get(&entry) else {
             return false;
         };
         if armed.kept != kept {
             return false;
         }
-        entries.remove(&entry);
+        state.entries.remove(&entry);
         true
+    }
+
+    /// Forgets `entry` if it is quarantined. Only after
+    /// [`Unquarantined::Removed`] may the caller delete the stored entry: an
+    /// armed entry is never deleted this way, its rows are being discarded.
+    pub(crate) fn remove_quarantined(&self, entry: DroppedGeneration) -> Unquarantined {
+        let mut state = self.state.lock();
+        match state.entries.get(&entry) {
+            Some(Entry::Quarantined(_)) => {
+                state.entries.remove(&entry);
+                Unquarantined::Removed
+            }
+            Some(Entry::Armed(_)) => Unquarantined::Armed,
+            None => Unquarantined::Absent,
+        }
     }
 }
 

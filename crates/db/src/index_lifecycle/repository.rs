@@ -1035,18 +1035,23 @@ fn stale_generation(handle: &ActiveIndexHandle) -> HelixDbError {
     }
 }
 
-/// Reserves the current logical ID and advances its watermark in `transaction`.
+/// Reserves the first logical ID at or after the watermark that no
+/// dropped-generation entry names, and advances the watermark past it in
+/// `transaction`.
+///
+/// An entry names only ids below the watermark unless the store is damaged;
+/// such an entry is quarantined, and the ids it names are skipped here
+/// rather than handed to an index whose rows it could then claim.
 pub(crate) async fn allocate_index_id(
     transaction: &impl crate::transaction::Mutation,
 ) -> Result<IndexId> {
     let key = global_key(GlobalKey::LogicalIndexIdWatermark);
     let watermark = load_logical_index_watermark(transaction).await?;
-    if watermark.next_id.get() == u64::MAX {
+    let allocated = super::dropped::unclaimed_index_id(transaction, watermark.next_id).await?;
+    if allocated.get() == u64::MAX {
         return Err(HelixDbError::IdentifierExhausted("logical index ID"));
     }
-    let allocated = watermark.next_id;
     let next_id = allocated.checked_next()?;
-    super::dropped::ensure_index_unclaimed(transaction, allocated).await?;
     transaction.put(
         key,
         encode_metadata_value(&IndexV2MetadataValue::LogicalIndexIdWatermark(
@@ -1056,7 +1061,9 @@ pub(crate) async fn allocate_index_id(
     Ok(allocated)
 }
 
-/// Loads the next logical index ID that [`allocate_index_id`] would reserve.
+/// Loads the logical index ID watermark: no ID at or above it was ever
+/// allocated, and [`allocate_index_id`] reserves the first of them that no
+/// dropped-generation entry names.
 pub(crate) async fn load_logical_index_watermark(
     read: &(impl DbReadOps + Sync),
 ) -> Result<LogicalIndexIdWatermark> {

@@ -1580,12 +1580,12 @@ impl IndexRecordV2 {
                     physical,
                     build_operation_id,
                 },
-            ) if physical.generation() == last_generation.checked_next()? => {
-                IndexStateV2::Building {
-                    physical: physical.clone(),
-                    build_operation_id: *build_operation_id,
-                }
-            }
+                // Later, not next: a recreated index skips the generations a
+                // dropped-generation entry names.
+            ) if physical.generation() > *last_generation => IndexStateV2::Building {
+                physical: physical.clone(),
+                build_operation_id: *build_operation_id,
+            },
             _ => {
                 return Err(IndexV2ModelError::IllegalStateTransition {
                     from: self.state.name(),
@@ -1968,7 +1968,7 @@ mod tests {
     }
 
     #[test]
-    fn illegal_or_skipped_generation_transition_is_rejected() {
+    fn a_recreated_index_builds_a_later_generation_and_never_an_earlier_one() {
         let building = building_record();
         assert!(matches!(
             building.transition(IndexStateTransition::CompleteDrop),
@@ -1979,15 +1979,41 @@ mod tests {
             .unwrap()
             .transition(IndexStateTransition::CompleteAbort)
             .unwrap();
-        assert!(matches!(
+        let IndexStateV2::Dropped {
+            last_generation, ..
+        } = dropped.state()
+        else {
+            panic!("an aborted build is dropped");
+        };
+        let last = last_generation.get();
+        let recreate = |generation: u64| {
             dropped.transition(IndexStateTransition::Recreate {
                 physical: PhysicalGeneration::Secondary {
-                    generation: IndexGenerationId::new(3).unwrap(),
+                    generation: IndexGenerationId::new(generation).unwrap(),
                 },
                 build_operation_id: IndexOperationId::from_bytes([4; 16]).unwrap(),
-            }),
-            Err(IndexV2ModelError::IllegalStateTransition { .. })
-        ));
+            })
+        };
+        // The last generation's rows may still be stored, so it is never
+        // built again; nor is any before it.
+        for generation in 1..=last {
+            assert!(
+                matches!(
+                    recreate(generation),
+                    Err(IndexV2ModelError::IllegalStateTransition { .. })
+                ),
+                "generation {generation}"
+            );
+        }
+        // The next is, and so is a later one: a recreated index skips the
+        // generations a dropped-generation entry names.
+        for generation in [last + 1, last + 2, last + 9] {
+            let recreated = recreate(generation).unwrap();
+            let IndexStateV2::Building { physical, .. } = recreated.state() else {
+                panic!("a recreated index is building");
+            };
+            assert_eq!(physical.generation().get(), generation);
+        }
     }
 
     #[test]

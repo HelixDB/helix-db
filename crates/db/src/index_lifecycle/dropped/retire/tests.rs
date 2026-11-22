@@ -11,13 +11,98 @@ fn tables(ids: &[u128]) -> HashSet<TableId> {
     ids.iter().copied().map(TableId).collect()
 }
 
+fn waiting<T: Eq + std::hash::Hash>(members: HashSet<T>) -> Waiting<T> {
+    Waiting::new(members).expect("the fixture waits for something")
+}
+
+/// What a pass left: this many entries unproven, draining and tracking.
+fn left(unproven: usize, draining: usize, tracking: usize) -> DroppedIndexStorage {
+    DroppedIndexStorage {
+        unproven,
+        draining,
+        tracking,
+        ..DroppedIndexStorage::default()
+    }
+}
+
+#[test]
+fn the_timer_after_a_pass_follows_what_the_entries_wait_for() {
+    let now = Instant::now();
+    let look = Duration::from_secs(5);
+    let idle = Duration::from_secs(300);
+    let compactions = CompactionActivity {
+        events: 6,
+        running: 0,
+    };
+    let after = |storage: &DroppedIndexStorage, reclaimed: bool| {
+        Timer::after_pass(storage, compactions, reclaimed, now, look, idle)
+    };
+    // Nothing stored, or only quarantined entries: nothing to wait for.
+    for reclaimed in [false, true] {
+        assert_eq!(after(&left(0, 0, 0), reclaimed), Timer::Off);
+        assert_eq!(
+            after(
+                &DroppedIndexStorage {
+                    quarantined: vec![crate::QuarantinedDroppedGeneration {
+                        index_id: 1,
+                        generation: 1,
+                        scope: DataScope::LegacyUnscoped,
+                        rows: crate::DroppedEntryRows::Text,
+                        contradiction: crate::DroppedEntryContradiction::AnotherFamily,
+                        since: std::time::Instant::now(),
+                    }],
+                    ..DroppedIndexStorage::default()
+                },
+                reclaimed
+            ),
+            Timer::Off
+        );
+        // A proof that waits for compactions is looked at again, whatever
+        // else tracks tables and whether or not a reclaim has run.
+        for storage in [left(1, 0, 0), left(0, 1, 0), left(1, 1, 3), left(0, 1, 1)] {
+            assert_eq!(
+                after(&storage, reclaimed),
+                Timer::Look { at: now + look },
+                "{storage:?}"
+            );
+        }
+    }
+    // Every proof tracks tables: a reclaim is due once the store has been
+    // idle, measured from the compactions seen before the pass.
+    assert_eq!(
+        after(&left(0, 0, 2), false),
+        Timer::Reclaim {
+            at: now + idle,
+            compactions
+        }
+    );
+    // One reclaim per idle period.
+    assert_eq!(after(&left(0, 0, 2), true), Timer::Off);
+}
+
+#[test]
+fn a_timer_fires_when_it_says_unless_it_is_off() {
+    let at = Instant::now() + Duration::from_secs(7);
+    assert_eq!(Timer::Off.at(), None);
+    assert_eq!(Timer::Look { at }.at(), Some(at));
+    assert_eq!(Timer::Retry { at }.at(), Some(at));
+    assert_eq!(
+        Timer::Reclaim {
+            at,
+            compactions: CompactionActivity::default()
+        }
+        .at(),
+        Some(at)
+    );
+}
+
 #[test]
 fn an_unproven_entry_waits_for_every_compaction_in_flight() {
     // Whatever tables are stored: none is trusted before the drain.
     for stored in [tables(&[]), tables(&[1, 2])] {
         assert_eq!(
             Proof::Unproven.step(&compactions(&[7, 8]), &stored),
-            Step::Drain(compactions(&[7, 8]))
+            Step::Drain(waiting(compactions(&[7, 8])))
         );
         assert_eq!(Proof::Unproven.step(&compactions(&[]), &stored), Step::Find);
     }
@@ -26,12 +111,18 @@ fn an_unproven_entry_waits_for_every_compaction_in_flight() {
 #[test]
 fn a_draining_entry_waits_only_for_the_compactions_it_started_with() {
     let proof = Proof::Draining {
-        compactions: compactions(&[7, 8]),
+        compactions: waiting(compactions(&[7, 8])),
     };
     for (active, step) in [
-        (compactions(&[7, 8, 9]), Step::Drain(compactions(&[7, 8]))),
-        (compactions(&[8, 9]), Step::Drain(compactions(&[8]))),
-        (compactions(&[7]), Step::Drain(compactions(&[7]))),
+        (
+            compactions(&[7, 8, 9]),
+            Step::Drain(waiting(compactions(&[7, 8]))),
+        ),
+        (
+            compactions(&[8, 9]),
+            Step::Drain(waiting(compactions(&[8]))),
+        ),
+        (compactions(&[7]), Step::Drain(waiting(compactions(&[7])))),
         // Compactions created since the proof started are not waited for:
         // the registry saw every filter of theirs.
         (compactions(&[9, 10]), Step::Find),
@@ -44,15 +135,15 @@ fn a_draining_entry_waits_only_for_the_compactions_it_started_with() {
 #[test]
 fn a_tracked_entry_retires_once_no_suspect_is_stored() {
     let proof = Proof::Tracking {
-        tables: tables(&[1, 2]),
+        tables: waiting(tables(&[1, 2])),
     };
     // Compactions in flight do not hold a tracked entry back: every one
     // created since the drain discards its rows.
     for active in [compactions(&[]), compactions(&[7])] {
         for (stored, step) in [
-            (tables(&[1, 2, 3]), Step::Track(tables(&[1, 2]))),
-            (tables(&[2, 3]), Step::Track(tables(&[2]))),
-            (tables(&[1]), Step::Track(tables(&[1]))),
+            (tables(&[1, 2, 3]), Step::Track(waiting(tables(&[1, 2])))),
+            (tables(&[2, 3]), Step::Track(waiting(tables(&[2])))),
+            (tables(&[1]), Step::Track(waiting(tables(&[1])))),
             (tables(&[3, 4]), Step::Retire),
             (tables(&[]), Step::Retire),
         ] {
@@ -150,4 +241,14 @@ fn a_block_index_points_at_the_one_block_that_can_hide_a_row() {
             "{before} {next:?}"
         );
     }
+}
+
+#[test]
+fn the_background_paces_are_ordered() {
+    // A proof waiting for compactions is looked at more often than an idle
+    // store is reclaimed, and no pass follows another sooner than the gap.
+    assert!(LOOK_GAP <= DRAIN_LOOK_MAX);
+    assert!(DRAIN_LOOK_MAX < IDLE_RECLAIM_AFTER);
+    assert!(RETRY <= MAX_BACKOFF);
+    assert!(IDLE_RECLAIM_AFTER < IDLE_RECLAIM_WAIT);
 }

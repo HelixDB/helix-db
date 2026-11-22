@@ -306,27 +306,26 @@ async fn create_index_operation_in_transaction_with_physical(
                     }
                 };
             }
+            // A recreated index builds the first generation after its last
+            // that no dropped-generation entry names. No entry names a
+            // generation of a fresh index id: its allocation skipped every
+            // id an entry names.
             IndexStateV2::Dropped {
                 last_generation, ..
             } => (
                 ExpectedCanonicalRevision::Exact(index.revision()),
                 index.index_id(),
-                last_generation.checked_next()?,
+                super::dropped::unclaimed_generation(
+                    &transaction,
+                    index.index_id(),
+                    last_generation.checked_next()?,
+                )
+                .await?,
                 index.revision().checked_next()?,
             ),
         },
     };
 
-    // A fresh index id was checked when it was allocated; a recreated index
-    // builds the generation after its last.
-    super::dropped::ensure_generation_unclaimed(
-        &transaction,
-        super::dropped::DroppedGeneration {
-            index_id,
-            generation,
-        },
-    )
-    .await?;
     let operation_id = super::repository::allocate_operation_id(&transaction, scope).await?;
     let physical =
         physical_generation(&transaction, &definition, generation, vector_physical).await?;

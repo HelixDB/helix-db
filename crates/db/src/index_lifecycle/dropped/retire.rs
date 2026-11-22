@@ -1,9 +1,11 @@
 //! Retires dropped-generation entries: deletes each one once no table of the
 //! store can hold a row of it.
 //!
-//! Nothing here compacts. The compactions the scheduler picks discard an
-//! armed entry's rows as they pass, and a [`Retirer`] pass watches the
-//! store's tables until it can prove none holds such a row.
+//! The compactions the scheduler picks discard an armed entry's rows as they
+//! pass, and a [`Retirer`] pass looks at the store's tables until it can
+//! prove none holds such a row. A pass compacts nothing. The background task
+//! that runs the passes asks for a [reclaim](super::reclaim) when the store
+//! is idle and an entry's rows are still in tables; see [`RetireSupervisor`].
 //!
 //! # The proof
 //!
@@ -70,7 +72,11 @@
 //! object storage. Finding suspects reads the block index of every table
 //! whose key range cuts through an owner prefix, and one data block for each
 //! run of prefixes that falls inside a block; a writer that opens onto many
-//! entries pays that once for all of them, in the background.
+//! entries pays that once for all of them, in the background. What a pass
+//! reads of a table it keeps in a cache of [`TABLE_CACHE_BYTES`], so a
+//! proof that starts again reads a table again only once the block indexes
+//! in play outgrow that cache; a block index is a few megabytes for a full
+//! table.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;
@@ -80,11 +86,13 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt};
 use slatedb::admin::Admin;
-use slatedb::manifest::SsTableHandle;
+use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
+use slatedb::manifest::{SsTableHandle, VersionedManifest};
 use slatedb::object_store::ObjectStore;
 use slatedb::{SstReader, WriteBatch};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 use crate::encoding::v2::keys::scope::DataScope;
 use crate::error::{HelixDbError, Result};
@@ -92,12 +100,34 @@ use crate::index_lifecycle::failpoints::{self, IndexOutboxFailpoint};
 use crate::index_lifecycle::DroppedGenerationRows;
 use crate::HelixWriter;
 
-use super::{CompactionId, DroppedGeneration, DroppedIndexStorage, Proof, TableId};
+use super::reclaim::Reclaimer;
+use super::{
+    CompactionActivity, CompactionId, DroppedGeneration, DroppedIndexStorage, Proof, TableId,
+    Unquarantined, Waiting,
+};
 
-/// Interval between background passes.
-const TICK: Duration = Duration::from_secs(30);
-/// Longest wait after passes that fail; each doubles it.
+/// Shortest time between two background passes, so that a burst of changes
+/// costs one look at the store, not one each. Also the first wait before a
+/// background pass looks again at compactions a proof waits for, whose end
+/// this process is not told of; each such look in a row doubles that wait,
+/// up to [`DRAIN_LOOK_MAX`].
+const LOOK_GAP: Duration = Duration::from_secs(5);
+/// Longest wait between two looks at compactions a proof waits for.
+const DRAIN_LOOK_MAX: Duration = Duration::from_secs(30);
+/// First wait after a background pass that fails; each failure in a row
+/// doubles it, up to [`MAX_BACKOFF`].
+const RETRY: Duration = Duration::from_secs(30);
+/// Longest wait after passes that fail.
 const MAX_BACKOFF: Duration = Duration::from_secs(600);
+/// How long the store must have been idle before the background task
+/// reclaims; see [`RetireSupervisor`].
+const IDLE_RECLAIM_AFTER: Duration = Duration::from_secs(300);
+/// Longest an idle reclaim waits for its compactions. One that outlives it
+/// goes on, and the pass after it retires what it discarded.
+const IDLE_RECLAIM_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
+/// Bytes of block indexes and data blocks a retirer keeps of the tables it
+/// has looked into.
+const TABLE_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 /// Partition mappings deleted per write.
 const MAPPING_DELETE_BATCH: usize = 1024;
 /// Tables one pass looks into at a time.
@@ -107,14 +137,13 @@ const TABLE_READS: usize = 16;
 #[derive(Debug, PartialEq, Eq)]
 enum Step {
     /// These compactions, in flight when the proof started, still are.
-    /// Never empty.
-    Drain(HashSet<CompactionId>),
+    Drain(Waiting<CompactionId>),
     /// Every compaction the proof waited for has finished: the tables of the
     /// manifest this look read that hold a row of the entry are its
     /// suspects.
     Find,
-    /// These suspects are still in the manifest. Never empty.
-    Track(HashSet<TableId>),
+    /// These suspects are still in the manifest.
+    Track(Waiting<TableId>),
     /// No table holds a row of the entry.
     Retire,
 }
@@ -125,21 +154,17 @@ impl Proof {
     fn step(&self, active: &HashSet<CompactionId>, stored: &HashSet<TableId>) -> Step {
         let waiting = match self {
             Self::Unproven => active.clone(),
-            Self::Draining { compactions } => compactions.intersection(active).copied().collect(),
+            Self::Draining { compactions } => compactions
+                .members()
+                .intersection(active)
+                .copied()
+                .collect(),
             Self::Tracking { tables } => {
-                let left = tables.intersection(stored).copied().collect::<HashSet<_>>();
-                return if left.is_empty() {
-                    Step::Retire
-                } else {
-                    Step::Track(left)
-                };
+                let left = tables.members().intersection(stored).copied().collect();
+                return Waiting::new(left).map_or(Step::Retire, Step::Track);
             }
         };
-        if waiting.is_empty() {
-            Step::Find
-        } else {
-            Step::Drain(waiting)
-        }
+        Waiting::new(waiting).map_or(Step::Find, Step::Drain)
     }
 }
 
@@ -222,16 +247,32 @@ fn held_by_index(prefix: &[u8], before: usize, next: Option<&[u8]>) -> Held {
     }
 }
 
+/// What removing a quarantined dropped-generation entry on request did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuarantinedEntryRemoval {
+    /// The entry was quarantined and is deleted. Its rows stay stored.
+    Removed,
+    /// The entry is armed: the catalog agrees with it, compactions discard
+    /// its rows, and it retires by itself. Nothing was deleted.
+    Armed,
+    /// No such entry is stored.
+    Absent,
+}
+
 /// Watches one writer's tables and retires its dropped-generation entries,
 /// one pass at a time.
 pub(crate) struct Retirer {
     writer: Arc<HelixWriter>,
     pub(super) admin: Admin,
     pub(super) tables: SstReader,
-    /// Serializes passes and requested reclaims. Holds what the last pass
+    /// Serializes passes, reclaims and removals. Holds what the last pass
     /// logged, so a pass that changes nothing logs nothing.
     pub(super) pass: tokio::sync::Mutex<DroppedIndexStorage>,
     pub(super) closed: watch::Sender<bool>,
+    /// The pace of the background task, once it may run. Contracts step a
+    /// retirer by hand, so under test it waits to be told.
+    #[cfg(test)]
+    background: watch::Sender<Option<(Duration, Duration)>>,
 }
 
 impl Retirer {
@@ -246,10 +287,64 @@ impl Retirer {
         Self {
             writer,
             admin: Admin::builder(path, Arc::clone(&object_store)).build(),
-            tables: SstReader::new(path, object_store, None, None),
+            // A table never changes, so what is read of one stays true.
+            tables: SstReader::new(
+                path,
+                object_store,
+                Some(Arc::new(FoyerCache::new_with_opts(FoyerCacheOptions {
+                    max_capacity: TABLE_CACHE_BYTES,
+                    ..FoyerCacheOptions::default()
+                }))),
+                None,
+            ),
             pass: tokio::sync::Mutex::new(DroppedIndexStorage::default()),
             closed: watch::channel(false).0,
+            #[cfg(test)]
+            background: watch::channel(None).0,
         }
+    }
+
+    /// Lets the background task of this retirer run, with passes at least
+    /// `look_gap` apart and a reclaim once the store has been idle for
+    /// `idle_after`.
+    #[cfg(test)]
+    pub(crate) fn run_in_background(&self, look_gap: Duration, idle_after: Duration) {
+        self.background.send_replace(Some((look_gap, idle_after)));
+    }
+
+    /// Deletes the stored entry of `entry` if the catalog contradicts it,
+    /// as it stands now: the entry is cross-checked again first, and one
+    /// that has become consistent is armed and stays.
+    ///
+    /// Nothing else is deleted. The rows the entry named stay stored, no
+    /// compaction discards them, and no later entry can name them: see
+    /// [`crate::HelixDB::remove_quarantined_dropped_index_entry`].
+    pub(crate) async fn remove_quarantined(
+        &self,
+        entry: DroppedGeneration,
+    ) -> Result<QuarantinedEntryRemoval> {
+        let _pass = self.pass.lock().await;
+        let db = self.writer.db();
+        let registry = self.writer.dropped();
+        registry.refresh(db).await?;
+        // Out of the registry first, as a retirement is: a delete that fails
+        // leaves the entry stored, and the next refresh quarantines it again.
+        Ok(match registry.remove_quarantined(entry) {
+            Unquarantined::Removed => {
+                db.delete(entry.key())
+                    .await
+                    .map_err(HelixDbError::from_storage_commit)?;
+                tracing::warn!(
+                    index_id = entry.index_id.get(),
+                    generation = entry.generation.get(),
+                    "removed a quarantined dropped-generation entry on request: its rows stay \
+                     stored"
+                );
+                QuarantinedEntryRemoval::Removed
+            }
+            Unquarantined::Armed => QuarantinedEntryRemoval::Armed,
+            Unquarantined::Absent => QuarantinedEntryRemoval::Absent,
+        })
     }
 
     /// The writer whose entries this retires.
@@ -269,12 +364,13 @@ impl Retirer {
     /// `logged`. Returns how many entries it retired.
     pub(super) async fn look(&self, logged: &mut DroppedIndexStorage) -> Result<usize> {
         let retired = self.advance().await?;
+        tracing::debug!(retired, "dropped-generation retirement pass");
         let storage = self.writer.dropped().storage();
         if retired > 0 || storage != *logged {
             tracing::info!(
                 retired,
                 unproven = storage.unproven,
-                retained_for_older_readers = storage.retained,
+                kept_by_a_compaction = storage.retained,
                 draining = storage.draining,
                 tracking = storage.tracking,
                 tracked_tables = storage.tracked_tables,
@@ -338,7 +434,7 @@ impl Retirer {
             .collect::<BTreeMap<_, _>>();
         let mut holding = self.holding(tables, prefixes).await?;
         for (entry, armed) in find {
-            match holding.remove(&entry) {
+            match holding.remove(&entry).and_then(Waiting::new) {
                 Some(tables) => {
                     registry.advance(entry, armed.kept, Proof::Tracking { tables });
                 }
@@ -495,8 +591,138 @@ impl Retirer {
     }
 }
 
+/// The id of every table in `manifest`.
+fn table_ids(manifest: &VersionedManifest) -> HashSet<TableId> {
+    manifest
+        .all_sst_views()
+        .map(|view| TableId(view.sst.id.value().0))
+        .collect()
+}
+
+/// What the background task waits for besides being told of a change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Timer {
+    /// Nothing: this process is told of whatever each entry waits for.
+    Off,
+    /// A pass at `at`: a proof waits for compactions that `.compactions`
+    /// showed in flight, whose end this process is not told of.
+    Look { at: Instant },
+    /// A reclaim at `at`, if the store is idle until then: no compaction
+    /// job of this process has started or ended since `compactions` was
+    /// read, and none is running.
+    Reclaim {
+        at: Instant,
+        compactions: CompactionActivity,
+    },
+    /// A pass at `at`, after one that failed.
+    Retry { at: Instant },
+}
+
+impl Timer {
+    /// The timer after a pass that left `storage`.
+    ///
+    /// A proof that is not tracking tables waits for compactions, so the
+    /// store is looked at again after `drain_look`. Once every proof tracks
+    /// tables, only a compaction can move one on: the scheduler's, which
+    /// this process is told of, or a reclaim, which is due after
+    /// `idle_after` of idleness unless one has `reclaimed` since the store
+    /// last changed.
+    fn after_pass(
+        storage: &DroppedIndexStorage,
+        compactions: CompactionActivity,
+        reclaimed: bool,
+        now: Instant,
+        drain_look: Duration,
+        idle_after: Duration,
+    ) -> Self {
+        if storage.unproven + storage.draining > 0 {
+            Self::Look {
+                at: now + drain_look,
+            }
+        } else if storage.tracking > 0 && !reclaimed {
+            Self::Reclaim {
+                at: now + idle_after,
+                compactions,
+            }
+        } else {
+            Self::Off
+        }
+    }
+
+    /// When the timer fires, if it is on.
+    fn at(self) -> Option<Instant> {
+        match self {
+            Self::Off => None,
+            Self::Look { at } | Self::Reclaim { at, .. } | Self::Retry { at } => Some(at),
+        }
+    }
+}
+
+/// What the background task does when it wakes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Wake {
+    /// A retirement pass.
+    Pass,
+    /// A reclaim, which ends with a pass.
+    Reclaim,
+}
+
 /// The background retirement task of one writer, retained by the database
 /// handle and stopped before storage closes.
+///
+/// # When it looks at the store
+///
+/// The task reads object storage only when something a pass depends on has
+/// changed, and it is told of each such change in this process:
+///
+/// - the registry: an index operation ended, which may have stored an entry
+///   or moved the catalog a quarantined entry is checked against; a filter
+///   kept an armed entry's rows; or a compaction of this process ended while
+///   an entry was armed ([`Registry::changed`](super::Registry::changed));
+/// - the manifest: the writer's own copy, which SlateDB keeps current, has
+///   lost a table some proof tracks.
+///
+/// One thing it is not told of is the end of a compaction that was in flight
+/// when a proof started, so while a proof waits for one the task looks again
+/// by a timer, [`LOOK_GAP`] doubling to [`DRAIN_LOOK_MAX`]. That wait ends
+/// with the compaction. A pass that fails is tried again by a timer too.
+/// With every proof tracking tables, or only quarantined entries stored, the
+/// task sleeps until it is told of a change and reads nothing.
+///
+/// # When it reclaims
+///
+/// An entry whose proof tracks tables waits for compactions to rewrite them.
+/// The scheduler compacts only as writes arrive, so on a store that takes
+/// few of them the entry, and the bytes of its rows, would stay. The task
+/// therefore runs the [reclaim](super::reclaim) a caller could ask for once
+/// the store has been *idle* for [`IDLE_RECLAIM_AFTER`] with such an entry.
+///
+/// Idle means that the compactor has had nothing to do for that long: no
+/// compaction job of this process started or ended, and none is running.
+/// Every job creates its filters through this writer's registry, so that is
+/// known without reading object storage. It is the compactor a reclaim
+/// competes with, not writes. The scheduler starts a compaction within
+/// seconds of the flush that makes one due, so a compactor that has rested
+/// for minutes belongs to a store whose writes fill a memtable more slowly
+/// than that, or not at all: such a store is reclaimed, writes or no. A
+/// store under load compacts every few seconds and is never idle, and its
+/// ordinary compactions retire its entries. A reclaim also gives way if
+/// writes resume as it starts; see
+/// [`Reclaimer::IdleStore`](super::reclaim::Reclaimer::IdleStore).
+///
+/// One reclaim runs per idle period. Whatever it achieved, the next waits
+/// until the store has changed and been idle again, so a reclaim that
+/// cannot make progress, for instance while a reader older than the drop
+/// is open, is not repeated on a store that stays still.
+///
+/// # What does not scale
+///
+/// A reclaim rewrites every sorted run and cannot be cancelled. Writes that
+/// start while it runs are not held up: it takes one compaction slot and
+/// the scheduler goes on compacting L0 tables on the others. But the sorted
+/// runs those compactions add are merged only once the reclaim has ended,
+/// so on a large store a long burst of writes during a reclaim leaves reads
+/// more runs to look through until then.
 pub(crate) struct RetireSupervisor {
     retirer: Arc<Retirer>,
     handle: JoinHandle<()>,
@@ -512,32 +738,157 @@ impl Drop for RetireSupervisor {
 }
 
 impl RetireSupervisor {
-    /// Starts the background passes of `retirer`.
+    /// Starts the background task of `retirer`.
     pub(crate) fn start(retirer: Retirer) -> Self {
         let retirer = Arc::new(retirer);
-        let handle = tokio::spawn({
-            let retirer = Arc::clone(&retirer);
-            async move {
-                let mut closed = retirer.closed.subscribe();
-                let mut delay = TICK;
-                while !*closed.borrow() {
-                    tokio::select! {
-                        () = tokio::time::sleep(delay) => {}
-                        _ = closed.changed() => continue,
+        let handle = tokio::spawn(Self::run(Arc::clone(&retirer)));
+        Self { retirer, handle }
+    }
+
+    async fn run(retirer: Arc<Retirer>) {
+        let mut closed = retirer.closed.subscribe();
+        #[cfg(not(test))]
+        let (look_gap, idle_after) = (LOOK_GAP, IDLE_RECLAIM_AFTER);
+        #[cfg(test)]
+        let (look_gap, idle_after) = {
+            let mut background = retirer.background.subscribe();
+            let pace = tokio::select! {
+                pace = background.wait_for(Option::is_some) => pace.ok().and_then(|pace| *pace),
+                _ = closed.wait_for(|closed| *closed) => None,
+            };
+            let Some(pace) = pace else {
+                return;
+            };
+            pace
+        };
+        let registry = retirer.writer.dropped();
+        let mut status = retirer.writer.db().subscribe();
+        // The tables of the manifest the writer holds. Its id is no guide:
+        // the writer changes its copy before it stores it under a new one.
+        let mut stored = table_ids(&status.borrow_and_update().current_manifest);
+        let mut looked = None::<Instant>;
+        let mut drain_look = look_gap;
+        let mut retry = RETRY;
+        // Whether a reclaim has run since the store last changed.
+        let mut reclaimed = false;
+        // The open cross-checked every stored entry, so the first pass is
+        // due at once if one was armed, and not at all otherwise.
+        let mut timer = Timer::after_pass(
+            &registry.storage(),
+            registry.compactions(),
+            reclaimed,
+            Instant::now(),
+            Duration::ZERO,
+            idle_after,
+        );
+        while !*closed.borrow() {
+            // Imperative: waits until this process is told of a change a
+            // pass depends on, or the timer fires.
+            let wake = loop {
+                tokio::select! {
+                    biased;
+                    _ = closed.changed() => return,
+                    () = registry.changed() => {
+                        reclaimed = false;
+                        drain_look = look_gap;
+                        break Wake::Pass;
                     }
-                    delay = match retirer.pass().await {
-                        Ok(_) => TICK,
-                        Err(error) => {
-                            if !*closed.borrow() {
-                                tracing::warn!(%error, "dropped-generation retirement pass failed");
-                            }
-                            (delay * 2).min(MAX_BACKOFF)
+                    changed = status.changed() => {
+                        if changed.is_err() {
+                            return;
                         }
-                    };
+                        let now_stored = table_ids(&status.borrow_and_update().current_manifest);
+                        if now_stored == stored {
+                            continue;
+                        }
+                        stored = now_stored;
+                        reclaimed = false;
+                        if registry.tracked_table_left(&stored) {
+                            drain_look = look_gap;
+                            break Wake::Pass;
+                        }
+                        // The store changed, so a reclaim may make progress
+                        // again. A reclaim already due stays due: a table
+                        // that only enters the manifest gives the compactor
+                        // no work by itself.
+                        if timer == Timer::Off {
+                            timer = Timer::after_pass(
+                                &registry.storage(),
+                                registry.compactions(),
+                                reclaimed,
+                                Instant::now(),
+                                drain_look,
+                                idle_after,
+                            );
+                        }
+                    }
+                    () = async {
+                        match timer.at() {
+                            Some(at) => tokio::time::sleep_until(at).await,
+                            None => std::future::pending().await,
+                        }
+                    } => match timer {
+                        Timer::Off => {}
+                        Timer::Look { .. } => {
+                            drain_look = (drain_look * 2).min(DRAIN_LOOK_MAX);
+                            break Wake::Pass;
+                        }
+                        Timer::Retry { .. } => break Wake::Pass,
+                        Timer::Reclaim { compactions, .. } => {
+                            let now = registry.compactions();
+                            if now == compactions && now.running == 0 {
+                                break Wake::Reclaim;
+                            }
+                            // A compaction ran meanwhile: idle starts again.
+                            timer = Timer::Reclaim {
+                                at: Instant::now() + idle_after,
+                                compactions: now,
+                            };
+                        }
+                    },
+                }
+            };
+            if let Some(looked) = looked {
+                tokio::select! {
+                    () = tokio::time::sleep_until(looked + look_gap) => {}
+                    _ = closed.changed() => return,
                 }
             }
-        });
-        Self { retirer, handle }
+            let compactions = registry.compactions();
+            let outcome = match wake {
+                Wake::Pass => retirer.pass().await,
+                Wake::Reclaim => {
+                    reclaimed = true;
+                    retirer
+                        .reclaim(Instant::now() + IDLE_RECLAIM_WAIT, Reclaimer::IdleStore)
+                        .await
+                        .map(|_| registry.storage())
+                }
+            };
+            let now = Instant::now();
+            looked = Some(now);
+            timer = match outcome {
+                Ok(storage) => {
+                    retry = RETRY;
+                    Timer::after_pass(
+                        &storage,
+                        compactions,
+                        reclaimed,
+                        now,
+                        drain_look,
+                        idle_after,
+                    )
+                }
+                Err(error) => {
+                    if !*closed.borrow() {
+                        tracing::warn!(%error, "dropped-generation retirement pass failed");
+                    }
+                    let at = now + retry;
+                    retry = (retry * 2).min(MAX_BACKOFF);
+                    Timer::Retry { at }
+                }
+            };
+        }
     }
 
     /// The retirer, for a pass or a reclaim on request.

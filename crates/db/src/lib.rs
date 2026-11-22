@@ -99,7 +99,10 @@ use std::time::{Duration, Instant};
 
 pub use config::{DbConfig, HelixConfig};
 pub use index_lifecycle::dropped::reclaim::{DroppedStorageReclaim, ReclaimObstacle};
-pub use index_lifecycle::dropped::{DroppedIndexStorage, QuarantinedDroppedGeneration};
+pub use index_lifecycle::dropped::retire::QuarantinedEntryRemoval;
+pub use index_lifecycle::dropped::{
+    DroppedEntryContradiction, DroppedEntryRows, DroppedIndexStorage, QuarantinedDroppedGeneration,
+};
 pub use index_lifecycle::queue::lag::PublicationLagHistogram;
 pub use index_lifecycle::queue::{BlockedIndexEntity, IndexOperationQueueStats};
 pub use merge_operator::{operation_queue_merge_stats, OperationQueueMergeStats, QueueMergeCost};
@@ -1754,9 +1757,10 @@ impl HelixDB {
             index_lifecycle::outbox::reconcile_operation_queue(&db).await?;
             log_stage("operation_queue_reconciliation", stage_started);
             let stage_started = Instant::now();
-            // Before any compaction of this writer can run: an entry that
-            // names rows a live generation owns is quarantined here, and
-            // never reaches a filter.
+            // No entry reaches a filter before this cross-check: an entry
+            // that names rows a live generation owns is quarantined here. A
+            // compaction that starts earlier finds the registry empty and
+            // discards nothing.
             writer.dropped().refresh(&db).await?;
             log_stage("dropped_generation_cross_check", stage_started);
             let stage_started = Instant::now();
@@ -2238,6 +2242,7 @@ impl HelixDB {
                     config.db().index_lifecycle_throughput().concurrency(),
                     Arc::clone(&index_claim_sequences),
                     index_worker_wake.clone(),
+                    Arc::clone(&writer.dropped),
                     #[cfg(feature = "index-lifecycle-testing")]
                     Arc::clone(&lifecycle_metrics),
                 ))
@@ -2367,17 +2372,22 @@ impl HelixDB {
             .map(index_lifecycle::dropped::retire::RetireSupervisor::retirer)
             .ok_or_else(|| {
                 HelixDbError::Config(
-                    "this writer runs no compaction worker, so it reclaims no dropped index storage"
+                    "this writer runs no compaction worker, so it retires no dropped index entry \
+                     and reclaims no dropped index storage"
                         .to_string(),
                 )
             })
     }
 
     /// Reclaims the storage of dropped indexes now, instead of waiting for
-    /// the compactions the scheduler picks to reach it.
+    /// the compactions the scheduler picks to reach it, or for the store to
+    /// fall idle.
     ///
     /// Dropping an index, or aborting its build, removes it from the catalog
-    /// at once and leaves its rows for compactions to discard. This call
+    /// at once and leaves its rows for compactions to discard. A writer
+    /// reclaims by itself once its compactor has had nothing to do for a few
+    /// minutes, so a store that is busy for long keeps the rows until its
+    /// own compactions reach them. This call
     /// compacts the L0 tables into a sorted run and then every sorted run
     /// into one, and returns once that has finished or `wait` has passed: it
     /// rewrites every stored byte, so its cost grows with the database, not
@@ -2419,7 +2429,88 @@ impl HelixDB {
     ) -> Result<DroppedStorageReclaim> {
         self.dropped_generation_retirer()
             .await?
-            .reclaim(tokio::time::Instant::now() + wait)
+            .reclaim(
+                tokio::time::Instant::now() + wait,
+                index_lifecycle::dropped::reclaim::Reclaimer::Caller,
+            )
+            .await
+    }
+
+    /// Deletes the entry of one dropped index generation that the catalog
+    /// contradicts, on an operator's explicit request.
+    ///
+    /// A dropped index leaves an entry that lets compactions discard its
+    /// rows. An entry the catalog contradicts, because it names an index
+    /// generation that is still in use or was never built, is *quarantined*:
+    /// compactions keep its rows, and [`Self::dropped_index_storage`] lists
+    /// it with what contradicts it. A quarantined entry harms nothing: no
+    /// index loses a row to it and no index is refused an id it names. It
+    /// only stays listed. This call is for an operator who has looked at
+    /// such an entry and wants it gone; `index_id` and `generation` are the
+    /// ones the listing gives.
+    ///
+    /// The entry is cross-checked once more first. Only an entry that is
+    /// still quarantined is deleted; one that has become consistent is armed
+    /// and retires by itself.
+    ///
+    /// # What it leaves behind
+    ///
+    /// Only the entry row is deleted. Left stored, for good:
+    ///
+    /// - every row the entry named as the generation's: those keyed by the
+    ///   index id and generation, and for a vector generation those keyed by
+    ///   its vector physical index ids. With the entry gone no compaction
+    ///   discards them, and nothing reads them unless that generation is,
+    ///   or comes to be, in use, which is what a contradiction can mean;
+    /// - for a partitioned vector generation, its partition mappings;
+    /// - the index record, untouched.
+    ///
+    /// The bytes of those rows are not reclaimed by any later compaction or
+    /// reclaim. A generation number the entry named may be built again by a
+    /// recreated index once the entry is gone.
+    ///
+    /// # Errors
+    ///
+    /// [`HelixDbError::WriterModeRequired`] on a read-only handle,
+    /// [`HelixDbError::Config`] on a writer configured without a compaction
+    /// worker, and a failed read or write.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # tokio_test::block_on(async {
+    /// use db::{HelixDB, HelixDbSource, QuarantinedEntryRemoval};
+    ///
+    /// let db = HelixDB::open(HelixDbSource::InMemory {
+    ///     database: "helix-db-quarantine-removal-example".to_string(),
+    /// }).await.unwrap();
+    /// // Nothing is quarantined, so there is nothing to remove.
+    /// assert!(db.dropped_index_storage().quarantined.is_empty());
+    /// assert_eq!(
+    ///     db.remove_quarantined_dropped_index_entry(1, 1).await.unwrap(),
+    ///     QuarantinedEntryRemoval::Absent,
+    /// );
+    /// db.close().await.unwrap();
+    /// # });
+    /// ```
+    pub async fn remove_quarantined_dropped_index_entry(
+        &self,
+        index_id: u64,
+        generation: u64,
+    ) -> Result<QuarantinedEntryRemoval> {
+        let retirer = self.dropped_generation_retirer().await?;
+        let (Ok(index_id), Ok(generation)) = (
+            index_lifecycle::IndexId::new(index_id),
+            index_lifecycle::IndexGenerationId::new(generation),
+        ) else {
+            // No entry names the id zero.
+            return Ok(QuarantinedEntryRemoval::Absent);
+        };
+        retirer
+            .remove_quarantined(index_lifecycle::dropped::DroppedGeneration {
+                index_id,
+                generation,
+            })
             .await
     }
 
@@ -2714,13 +2805,19 @@ impl HelixDB {
         let writer = Arc::clone(writer);
         let run_step = async move {
             let _step = step;
-            index_lifecycle::worker::process_secondary_once(
+            let stepped = index_lifecycle::worker::process_secondary_once(
                 writer.db(),
                 &inner.index_capabilities,
                 writer_epoch,
                 &inner.index_claim_sequences,
             )
-            .await
+            .await?;
+            // The step may have ended an operation; see
+            // `index_lifecycle::dropped::Registry::catalog_changed`.
+            if stepped {
+                writer.dropped().catalog_changed();
+            }
+            Ok(stepped)
         };
         self.inner.commit_completions.run(run_step)?.await
     }

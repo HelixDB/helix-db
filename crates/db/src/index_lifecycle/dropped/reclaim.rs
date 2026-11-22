@@ -1,11 +1,11 @@
-//! Reclaims the storage of dropped generations on request.
+//! Reclaims the storage of dropped generations.
 //!
 //! Compactions the scheduler picks discard the rows of an armed entry as they
 //! pass, and [`super::retire`] deletes the entry once they have. That gives
 //! the bytes back whenever the scheduler gets to the tables that hold them,
-//! which for the oldest sorted run can be a long time. A caller who wants
-//! them sooner asks for a *reclaim*, which submits up to two compactions and
-//! waits for them, within the time the caller allows:
+//! which for the oldest sorted run can be a long time, and on a store that
+//! takes few writes is never. A *reclaim* submits up to two compactions and
+//! waits for them, within the time its [`Reclaimer`] allows:
 //!
 //! 1. every L0 table into a new sorted run, unless a compaction of L0 tables
 //!    is already in flight;
@@ -54,8 +54,9 @@ const STATUS_POLL: Duration = Duration::from_secs(1);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReclaimObstacle {
     /// A compaction of sorted runs was already in flight, or the store has
-    /// no sorted run while a compaction of its L0 tables is in flight.
-    /// Nothing was submitted.
+    /// no sorted run while a compaction of its L0 tables is in flight, or a
+    /// reclaim of an idle store found the store no longer idle. No
+    /// compaction of sorted runs was submitted.
     Busy,
     /// SlateDB refused the compaction, or one the scheduler started first
     /// replaced its sources.
@@ -105,6 +106,20 @@ pub enum DroppedStorageReclaim {
     },
 }
 
+/// Who runs a reclaim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reclaimer {
+    /// A caller who asked for the bytes now, whatever else the store is
+    /// doing.
+    Caller,
+    /// The background task, because the store has been idle. It gives way:
+    /// when L0 tables are left once the first compaction is done with,
+    /// writes have resumed or the scheduler is compacting them, and the
+    /// reclaim ends [`ReclaimObstacle::Busy`] before it rewrites a sorted
+    /// run.
+    IdleStore,
+}
+
 /// How an awaited compaction ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Ended {
@@ -116,9 +131,13 @@ impl Retirer {
     /// Compacts the store so that the rows of every discardable dropped
     /// generation are gone, waiting no later than `deadline`, then runs a
     /// retirement pass. Logs what it did.
-    pub(crate) async fn reclaim(&self, deadline: Instant) -> Result<DroppedStorageReclaim> {
+    pub(crate) async fn reclaim(
+        &self,
+        deadline: Instant,
+        reclaimer: Reclaimer,
+    ) -> Result<DroppedStorageReclaim> {
         let mut logged = self.pass.lock().await;
-        let outcome = self.compact(deadline).await?;
+        let outcome = self.compact(deadline, reclaimer).await?;
         let outcome = match outcome {
             DroppedStorageReclaim::Compacted { dropped_bytes, .. } => {
                 let retired = self.look(&mut logged).await?;
@@ -132,11 +151,19 @@ impl Retirer {
             | DroppedStorageReclaim::Retained { .. }
             | DroppedStorageReclaim::Incomplete { .. }) => outcome,
         };
-        tracing::info!(?outcome, "requested reclaim of dropped index storage ended");
+        tracing::info!(
+            ?outcome,
+            ?reclaimer,
+            "reclaim of dropped index storage ended"
+        );
         Ok(outcome)
     }
 
-    async fn compact(&self, deadline: Instant) -> Result<DroppedStorageReclaim> {
+    async fn compact(
+        &self,
+        deadline: Instant,
+        reclaimer: Reclaimer,
+    ) -> Result<DroppedStorageReclaim> {
         let db = self.writer().db();
         let registry = self.writer().dropped();
         registry.refresh(db).await?;
@@ -210,6 +237,14 @@ impl Retirer {
         }
 
         let manifest = self.manifest().await?;
+        match reclaimer {
+            Reclaimer::Caller => {}
+            Reclaimer::IdleStore => {
+                if !manifest.l0().is_empty() {
+                    return Ok(incomplete(ReclaimObstacle::Busy));
+                }
+            }
+        }
         let runs = manifest
             .compacted()
             .iter()

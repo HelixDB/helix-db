@@ -5203,7 +5203,7 @@ pub(super) async fn a_refresh_quarantines_an_entry_the_catalog_contradicts() {
             let [quarantined] = &storage.quarantined[..] else {
                 panic!("{name}: one entry is wrong: {storage:?}");
             };
-            assert_eq!(quarantined.contradiction, reason, "{name}");
+            assert_eq!(quarantined.contradiction.to_string(), reason, "{name}");
             assert!(
                 !armed
                     .iter()
@@ -5270,14 +5270,29 @@ pub(super) async fn a_refresh_quarantines_an_entry_whose_drop_has_not_completed(
     let registry = dropped::Registry::default();
     registry.refresh(&db).await.expect("the refresh reads");
     assert_eq!(registry.armed(), vec![]);
+    let storage = registry.storage();
+    let [quarantined] = &storage.quarantined[..] else {
+        panic!("the entry is wrong: {storage:?}");
+    };
     assert_eq!(
-        registry.storage().quarantined,
-        vec![crate::QuarantinedDroppedGeneration {
-            index_id: entry.index_id.get(),
-            generation: entry.generation.get(),
-            contradiction: "names a generation its index record still owns",
-        }]
+        (
+            quarantined.index_id,
+            quarantined.generation,
+            quarantined.scope,
+            quarantined.rows,
+            quarantined.contradiction,
+        ),
+        (
+            entry.index_id.get(),
+            entry.generation.get(),
+            scope,
+            crate::DroppedEntryRows::UnpartitionedVector {
+                physical_index_id: physical_index_id.get(),
+            },
+            crate::DroppedEntryContradiction::GenerationStillOwned,
+        )
     );
+    assert_eq!(storage.waiting_since, None);
     db.close().await.expect("vector test database closes");
 }
 
@@ -5304,71 +5319,156 @@ pub(super) async fn a_refresh_that_fails_before_its_flush_arms_nothing() {
     db.close().await.expect("vector test database closes");
 }
 
-/// Proves no logical id an entry names is allocated: a new index does not
-/// take an index id, nor a recreated index a generation, that a stored entry
-/// gives up to compactions. Each refusal leaves the catalog as it was.
+/// Proves no logical id an entry names is allocated, and that no entry fails
+/// an allocation: a new index takes the first index id, and a recreated
+/// index the first generation, that no stored entry names, however many
+/// entries it skips. An entry that names a skipped id can then claim no row:
+/// none is ever written under it.
 ///
-/// A vector physical id is not checked when it is allocated. An entry that
+/// A vector physical id is not skipped when it is allocated. An entry that
 /// names an unallocated one is quarantined instead, and stays quarantined
 /// once a build has taken the id: the build's record owns it.
 pub(super) async fn an_id_an_entry_names_is_never_allocated_or_never_discarded() {
     let scope = DataScope::LegacyUnscoped;
-    let refused = |result: Result<IndexDdlReceipt>, reason: &str| {
-        let error = result.expect_err(reason);
-        assert!(
-            matches!(&error, HelixDbError::IndexCatalogCorruption(message) if message.contains(reason)),
-            "{reason}: {error}"
-        );
+    let contradictions = |registry: &dropped::Registry| {
+        registry
+            .storage()
+            .quarantined
+            .iter()
+            .map(|entry| (entry.index_id, entry.generation, entry.contradiction))
+            .collect::<Vec<_>>()
     };
 
     let db = test_db("vector-driver-dropped-unallocated-index").await;
     dropped::admit_fixture(&db).await;
-    let watermark = crate::index_lifecycle::repository::load_logical_index_watermark(&db)
+    let next = crate::index_lifecycle::repository::load_logical_index_watermark(&db)
         .await
-        .unwrap();
-    put_entry(
-        &db,
-        dropped::DroppedGeneration {
-            index_id: watermark.next_id,
-            generation: IndexGenerationId::initial(),
-        },
-        DroppedGenerationValue {
-            scope: DataScope::Tenant(crate::encoding::v2::keys::scope::TenantId::from_u128(9)),
-            rows: DroppedGenerationRows::Text,
-        },
-    )
-    .await;
-    refused(create_unpartitioned(&db).await, "which was never allocated");
+        .unwrap()
+        .next_id
+        .get();
+    // Entries name two generations of the next id and of the one after,
+    // and the id three on; the id between is free.
+    let text = DroppedGenerationValue {
+        scope: DataScope::Tenant(crate::encoding::v2::keys::scope::TenantId::from_u128(9)),
+        rows: DroppedGenerationRows::Text,
+    };
+    for (index_id, generation) in [
+        (next, 1),
+        (next, 3),
+        (next + 1, 1),
+        (next + 1, 4),
+        (next + 3, 2),
+    ] {
+        put_entry(
+            &db,
+            dropped::DroppedGeneration {
+                index_id: IndexId::new(index_id).unwrap(),
+                generation: IndexGenerationId::new(generation).unwrap(),
+            },
+            text,
+        )
+        .await;
+    }
+    let registry = dropped::Registry::default();
+    registry.refresh(&db).await.expect("the refresh reads");
+    assert_eq!(registry.armed(), vec![]);
+    let above = crate::DroppedEntryContradiction::IndexAboveWatermark;
+    assert_eq!(
+        contradictions(&registry),
+        vec![
+            (next, 1, above),
+            (next, 3, above),
+            (next + 1, 1, above),
+            (next + 1, 4, above),
+            (next + 3, 2, above)
+        ]
+    );
+    create_unpartitioned(&db)
+        .await
+        .expect("an index is created past the ids entries name");
+    let created = read_index(&db, scope, &definition(None)).await;
+    assert_eq!(created.index_id().get(), next + 2);
     assert_eq!(
         crate::index_lifecycle::repository::load_logical_index_watermark(&db)
             .await
             .unwrap()
-            .next_id,
-        watermark.next_id
+            .next_id
+            .get(),
+        next + 3
+    );
+    // The skipped ids were never given to an index, so their entries stay
+    // quarantined, and no entry names the index that was created.
+    registry.refresh(&db).await.expect("the refresh reads");
+    assert_eq!(registry.armed(), vec![]);
+    let unrecorded = crate::DroppedEntryContradiction::IndexWithoutRecord;
+    assert_eq!(
+        contradictions(&registry),
+        vec![
+            (next, 1, unrecorded),
+            (next, 3, unrecorded),
+            (next + 1, 1, unrecorded),
+            (next + 1, 4, unrecorded),
+            (next + 3, 2, above)
+        ]
     );
     db.close().await.expect("vector test database closes");
 
     let db = test_db("vector-driver-dropped-unallocated-generation").await;
     let driver = driver();
     let (entry, value, _, _) = completed_drop(&db, &driver).await;
-    let dropped_record = read_index(&db, scope, &definition(None)).await;
-    put_entry(
-        &db,
-        dropped::DroppedGeneration {
-            generation: entry.generation.checked_next().unwrap(),
-            ..entry
-        },
-        value,
-    )
-    .await;
-    refused(
-        create_unpartitioned(&db).await,
-        "names a generation that was never built",
-    );
+    let last = entry.generation.get();
+    // Entries name the next two generations and the one four on.
+    for generation in [last + 1, last + 2, last + 4] {
+        put_entry(
+            &db,
+            dropped::DroppedGeneration {
+                generation: IndexGenerationId::new(generation).unwrap(),
+                ..entry
+            },
+            value,
+        )
+        .await;
+    }
+    let registry = dropped::Registry::default();
+    registry.refresh(&db).await.expect("the refresh reads");
+    let unreached = crate::DroppedEntryContradiction::GenerationNotReached;
+    let index_id = entry.index_id.get();
     assert_eq!(
-        read_index(&db, scope, &definition(None)).await,
-        dropped_record
+        contradictions(&registry),
+        vec![
+            (index_id, last + 1, unreached),
+            (index_id, last + 2, unreached),
+            (index_id, last + 4, unreached)
+        ]
     );
+    create_unpartitioned(&db)
+        .await
+        .expect("the index is recreated past the generations entries name");
+    let recreated = read_index(&db, scope, &definition(None)).await;
+    assert_eq!(recreated.index_id(), entry.index_id);
+    let IndexStateV2::Building { physical, .. } = recreated.state() else {
+        panic!("the index is building again");
+    };
+    assert_eq!(physical.generation().get(), last + 3);
+    // The generations the build skipped were never built and never will be,
+    // so their entries now name rows nothing owns and are armed; the one
+    // above the build's generation is one the live index has yet to pass.
+    registry.refresh(&db).await.expect("the refresh reads");
+    assert_eq!(
+        contradictions(&registry),
+        vec![(
+            index_id,
+            last + 4,
+            crate::DroppedEntryContradiction::GenerationStillOwned
+        )]
+    );
+    let mut armed = registry
+        .armed()
+        .into_iter()
+        .map(|(entry, _)| entry.generation.get())
+        .collect::<Vec<_>>();
+    armed.sort_unstable();
+    assert_eq!(armed, vec![last, last + 1, last + 2]);
     db.close().await.expect("vector test database closes");
 
     let db = test_db("vector-driver-dropped-unallocated-physical").await;
@@ -5397,7 +5497,7 @@ pub(super) async fn an_id_an_entry_names_is_never_allocated_or_never_discarded()
     registry.refresh(&db).await.expect("the refresh reads");
     assert_eq!(
         quarantined(&registry),
-        "names a vector physical index id above the watermark"
+        crate::DroppedEntryContradiction::PhysicalIndexAboveWatermark
     );
     create_unpartitioned(&db)
         .await
@@ -5420,7 +5520,7 @@ pub(super) async fn an_id_an_entry_names_is_never_allocated_or_never_discarded()
         registry.refresh(&db).await.expect("the refresh reads");
         assert_eq!(
             quarantined(&registry),
-            "names a vector physical index an index record still owns"
+            crate::DroppedEntryContradiction::PhysicalIndexStillOwned
         );
     }
     db.close().await.expect("vector test database closes");

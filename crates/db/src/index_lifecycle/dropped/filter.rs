@@ -37,9 +37,25 @@ impl CompactionFilterSupplier for DroppedRowsFilterSupplier {
         &self,
         context: &CompactionJobContext,
     ) -> Result<Box<dyn CompactionFilter>, CompactionFilterError> {
-        Ok(Box::new(DroppedRowsFilter::new(
-            self.registry.discardable(context),
-        )))
+        Ok(Box::new(Counted {
+            filter: DroppedRowsFilter::new(self.registry.discardable(context)),
+            registry: Arc::clone(&self.registry),
+        }))
+    }
+}
+
+/// A filter the registry counts as alive until it is dropped, which is how a
+/// writer knows without reading object storage whether a compaction of its
+/// process is running. SlateDB drops a filter when its job ends, fails or
+/// is abandoned.
+struct Counted {
+    filter: DroppedRowsFilter,
+    registry: Arc<Registry>,
+}
+
+impl Drop for Counted {
+    fn drop(&mut self) {
+        self.registry.filter_dropped();
     }
 }
 
@@ -83,14 +99,14 @@ impl DroppedRowsFilter {
 }
 
 #[async_trait]
-impl CompactionFilter for DroppedRowsFilter {
+impl CompactionFilter for Counted {
     async fn filter(
         &mut self,
         entry: &RowEntry,
     ) -> Result<CompactionFilterDecision, CompactionFilterError> {
         // Dropped outright whatever the row holds: a value, a merge operand
         // or a tombstone of a dropped generation is equally unread.
-        Ok(if self.discards(&entry.key) {
+        Ok(if self.filter.discards(&entry.key) {
             CompactionFilterDecision::Drop
         } else {
             CompactionFilterDecision::Keep
