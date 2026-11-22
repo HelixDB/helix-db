@@ -4890,6 +4890,7 @@ enum Contradiction {
     PhysicalIndexAboveWatermark,
     MetadataRowPresent,
     MappedByAnotherGeneration,
+    MappedByItsOwnAndAnotherGeneration,
     MappingOfAnotherGeneration,
     PartitionsShareAPhysicalIndex,
     GenerationStillLive,
@@ -4981,6 +4982,12 @@ pub(super) async fn a_refresh_quarantines_an_entry_the_catalog_contradicts() {
         (
             "mapped-by-another-generation",
             Contradiction::MappedByAnotherGeneration,
+            "names a vector physical index another generation's partition maps to",
+            false,
+        ),
+        (
+            "mapped-by-its-own-and-another-generation",
+            Contradiction::MappedByItsOwnAndAnotherGeneration,
             "names a vector physical index another generation's partition maps to",
             false,
         ),
@@ -5093,6 +5100,16 @@ pub(super) async fn a_refresh_quarantines_an_entry_the_catalog_contradicts() {
                     generation: entry.generation.checked_next().unwrap(),
                     ..entry
                 };
+                put_mapping(&db, scope, later, later, b"tenant", physical_index_id).await;
+            }
+            // The entry's own mapping sorts first, and does not vouch for
+            // the one after it.
+            Contradiction::MappedByItsOwnAndAnotherGeneration => {
+                let later = dropped::DroppedGeneration {
+                    generation: entry.generation.checked_next().unwrap(),
+                    ..entry
+                };
+                put_mapping(&db, scope, entry, entry, b"own", physical_index_id).await;
                 put_mapping(&db, scope, later, later, b"tenant", physical_index_id).await;
             }
             // The two below list the entry's physical ids through mappings,
