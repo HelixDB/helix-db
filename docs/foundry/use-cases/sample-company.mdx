@@ -1,0 +1,143 @@
+---
+title: "Use cases on the sample company"
+description: "Three questions worth money or time, answered from the Acme Corp sample ontology: renewal risk, account research before a call, and support triage with the customer's full context"
+sidebarTitle: "Sample company use cases"
+pageType: "Guide"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
+
+Each use case below is one question the [sample company](/foundry/start-here/sample-company)
+answers, Acme Corp, a made-up company that sells scheduling software. For each: the
+question, the types and links of the **Acme Corp customers** ontology that answer it,
+and how to ask it in the Analyst or from an agent. Run the sample first, then ask along.
+
+## What the sample holds
+
+The ontology is built from six tables of Acme Corp's PostgreSQL database and nine
+documents: three contracts, call notes, a support escalation, an incident report and a
+price list.
+
+| Type | From | Key |
+| --- | --- | --- |
+| `Account` | `accounts`, plus `notice_days` and `service_credit_terms` from contracts | `account_id` |
+| `Contact` | `contacts` | `contact_id` |
+| `Subscription` | `subscriptions` | `subscription_id` |
+| `Plan` | `subscriptions.plan` | its name |
+| `Invoice` | `invoices` | `invoice_id` |
+| `Ticket` | `support_tickets` | `ticket_id` |
+| `MonthlyUsage` | `product_usage` | the account and `month` |
+| `Conversation` | Call notes and emails: `held_on`, `summary`, `risks` | its title |
+| `Commitment` | What documents say Acme Corp promised or owes: `amount_usd`, `due_on` | what it promises |
+
+Links tie them together: `subscription_of`, `contact_at`, `ticket_for` and `usage_of`
+lead to an `Account`; `invoice_for` from an `Invoice` to its `Subscription`; `on_plan`
+to a `Plan`; `requested_by` from a `Ticket` to its `Contact`. From the documents,
+`conversation_with`, `attended_by`, `discussed` and `promised_to` tie conversations and
+commitments to accounts, contacts and tickets. The rule `renewal_due` marks a
+subscription that isn't canceled and whose term ends within 90 days.
+
+Tables and documents name the same things: a call note names an account, a contact
+and a ticket number, and the load matches them to the records the tables made. That's
+what lets one question read across all of them.
+
+## Renewal risk
+
+**What it's worth:** revenue kept. A renewal at risk shows only when you read the
+subscription, the invoices, the usage, the tickets and the last call together.
+
+**The question:**
+
+> Which renewals are at risk in the next 90 days, and why?
+
+**What answers it:**
+
+- `renewal_due` finds the subscriptions coming up, each with its `status`, `seats`,
+  `discount_pct` and `current_term_end`, and `subscription_of` gives the account.
+- `invoice_for` reaches its invoices, with their `status` and `paid_on`.
+- `usage_of` gives the account's `MonthlyUsage`, so a fall in `active_users` shows.
+- `ticket_for` gives its open tickets; `conversation_with` gives its calls, with their
+  `risks`; `notice_days` says how much notice its contract needs.
+
+In the sample, Brightmoor Facilities is the account to find. Its subscription
+`SUB-2028` is `past_due` with its term ending 30 November 2026. Invoice `INV-30350` is
+`overdue`. Its active users fell from 104 in April to 71 in September. Tickets `T-4393`
+and `T-4414` ask to cut seats and keep the discount, and the renewal call's notes say its
+champion is leaving. No single table says any of this is a risk; together they do.
+
+## Account research before a call
+
+**What it's worth:** rep time saved. The brief comes with sources, rather than an hour
+across the CRM, billing, support and old notes.
+
+**The question:**
+
+> Brief me on Halvorsen Freight before my call: who they are, what they pay, how they
+> use the product, open issues and what we've promised.
+
+**What answers it:**
+
+- The `Account` and its `Contact`s through `contact_at`, with each contact's `title`
+  and `role`.
+- Its `Subscription` through `subscription_of`, with its `Plan`, `seats`,
+  `price_per_seat_usd` and `current_term_end`; its invoices through `invoice_for`.
+- Its `MonthlyUsage` over the months, and its tickets through `ticket_for`.
+- Its conversations through `conversation_with`, who took part through `attended_by`,
+  and its commitments through `promised_to`.
+
+In the sample, Halvorsen Freight is on Enterprise with 600 seats, its term ending
+31 January 2027, and had 584 active users in September. Its expansion call asks for 150
+more seats and a lower per-seat price, and its ticket `T-4402` came from the
+7 October incident.
+
+## Support triage with full customer context
+
+**What it's worth:** faster resolution. Whoever takes the ticket sees who raised it,
+what the customer pays for, what else went wrong and what was already offered.
+
+**The question:**
+
+> T-4404 is urgent. Who raised it, what's the customer's context, and what have we
+> already told them?
+
+**What answers it:**
+
+- The `Ticket`'s `priority`, `status`, `category` and `subject`.
+- `requested_by` gives the `Contact` who raised it, and `ticket_for` the `Account`.
+- The account's `Subscription` and `Plan`, and its `service_credit_terms` from its
+  contract.
+- The account's other tickets, and the conversations that `discussed` this one.
+
+In the sample, `T-4404` is Sable Solar's, raised by its operations director during the
+7 October incident, with a second ticket, `T-4401`, from the same morning. The
+escalation thread and the incident report name both tickets, which is what lets the
+load link them to the conversations about them.
+
+## Ask in the Analyst
+
+Open **Analyst** on **Acme Corp customers**, write the question, and select the arrow.
+The answer cites each record, row and quote it used: select a citation to open the
+entity's page, the table row or the sentence in its document. Follow up in the same
+thread. See [Ask the Analyst](/foundry/ask/ask-questions).
+
+On an entity's page, such as an account's, **Ask about this** asks about that record.
+
+## Ask from an agent
+
+Connect your agent to the [Helix MCP](/foundry/agents/query-from-agents), then ask it in
+plain words, such as "Using Helix Foundry, which renewals are at risk in the next 90
+days, and why?". The agent finds the ontology with `helix_foundry_list_ontologies`,
+reads its schema with `helix_foundry_get_context`, asks with `helix_foundry_ask` and
+follows the answer with `helix_foundry_get_question`. For an exact list, such as every
+overdue invoice, it reads the graph with `helix_foundry_read_graph`.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Run a pilot" icon="flag-checkered" href="/foundry/use-cases/run-a-pilot">
+    Answer five questions like these on your own data.
+  </Card>
+  <Card title="Why an ontology instead of RAG" icon="diagram-project" href="/foundry/start-here/ontology-vs-rag">
+    Why one connected graph answers what search can't.
+  </Card>
+</CardGroup>

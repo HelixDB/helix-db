@@ -1,0 +1,89 @@
+---
+title: "Why an ontology instead of RAG"
+description: "Search finds what looks relevant; Helix Foundry's ontology follows what's connected. How matching records across sources, keeping every value's source and reviewing conflicts answer questions retrieval can't"
+sidebarTitle: "Why an ontology"
+pageType: "Concept"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="purple" size="sm">Concept</Badge></div>
+
+Search finds what looks relevant. Foundry follows what's connected.
+
+[Retrieval-augmented generation](/learn/ai-memory/what-is-rag) (RAG) answers a question by finding the passages that
+look most like it and handing them to a model. That works when the answer sits in a
+passage. Most business questions don't: their answer is spread across systems, and
+only the links between records hold it. This page explains what Foundry's ontology adds.
+
+## Questions that span systems
+
+Take "Which renewals are at risk in the next 90 days, and why?" on the
+[sample company](/foundry/use-cases/sample-company#renewal-risk). The answer needs a
+subscription's term end from the database, its unpaid invoice from billing, a fall in
+usage, two open tickets, and a call note that says the champion is leaving. Few of
+those rows contain the word "renewal", and none of them says "at risk".
+
+Search ranks passages by how close they are to the question, so it returns the ones
+that talk about renewals. An ontology starts from the subscriptions whose term ends
+soon and follows their links: to the account, its invoices, its usage, its tickets and
+its calls. It reads what is connected, whether or not it looks like the question.
+
+| | Search over passages | Foundry's ontology |
+| --- | --- | --- |
+| What it reads | The passages most like the question | The records the question's types and links reach |
+| Counts and totals | What the passages it found happen to mention | Queries over every record of a type |
+| The same customer in two systems | Two unrelated passages | One entity, matched by its key, email or ID |
+| Where an answer came from | The passages it was given | The row or quote behind each value and link |
+| Two sources that disagree | Whichever passage ranks higher | A review for a person to settle |
+
+## One entity across sources
+
+An ontology names the kinds of things in your business, their properties, how they
+link and the rules they follow. A [load](/foundry/ontologies/load-data) writes your
+tables and documents into it as entities:
+
+- **Tables** become entities by their keys. The sample's `contacts` and
+  `support_tickets` rows link to the same `Account` because they carry its
+  `account_id`.
+- **Documents** are read for the names and facts they hold. A call note that names an
+  account, a contact's email or a ticket number is matched to the record the tables
+  made, so its facts land on that record, not beside it.
+- **Names that match nothing**, or more than one record, aren't guessed. They wait for
+  review: **Names something that isn't in your data** or **Could mean more than one
+  entity**. See [Settle a review](/foundry/explore/records-and-entities#settle-a-review).
+
+## Every value keeps its source
+
+Each value and link a load writes keeps where it came from: a table row, or a quote in
+a document. An entity's page shows each property with the row or quote that states it.
+The [Analyst](/foundry/ask/ask-questions) cites each record, row, quote and rule it
+used, and your agents get the same citations through the
+[Helix MCP](/foundry/agents/query-from-agents). A person can check any claim in one
+click, and an agent can show its work.
+
+A version's rules derive facts, such as the sample's `renewal_due`, and an entity's
+**Derived** tab says why each one holds.
+
+## Conflicts go to a person
+
+When documents state a value differently, or differently from a table, Foundry doesn't
+pick one silently. The value waits under **Needs review**: keep one, or replace the
+table's value with the document's. A claim the model wasn't sure of is held until
+someone approves or rejects it. Each decision is kept and applied to later loads too,
+so the same conflict isn't settled twice.
+
+## When search is enough
+
+Search is the right tool for "find the paragraph about X": a question one passage
+answers. Foundry is for questions about your customers, accounts, contracts and
+operations, whose answers are in the links between records in different systems.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Use cases on the sample company" icon="lightbulb" href="/foundry/use-cases/sample-company">
+    Three cross-system questions, and what answers them.
+  </Card>
+  <Card title="Records and entities" icon="table" href="/foundry/explore/records-and-entities">
+    Read each value's source, and settle reviews.
+  </Card>
+</CardGroup>
