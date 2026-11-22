@@ -39,7 +39,7 @@
 //! says so:
 //!
 //! - the run is at most a gibibyte, which one compaction slot rewrites in
-//!   seconds; or
+//!   about a quarter of a minute; or
 //! - the dropped rows are at least an eighth of it.
 //!
 //! Dropped rows in any other run are *left in place*
@@ -113,8 +113,9 @@ pub(crate) struct Worth {
 impl Worth {
     /// The rule a writer follows by itself. Contracts make smaller ones.
     ///
-    /// One compaction slot rewrites a gibibyte in a few seconds, so for a
-    /// run that small retiring the entry is worth it by itself.
+    /// One compaction slot rewrites a gibibyte in about a quarter of a
+    /// minute against object storage, so for a run that small retiring the
+    /// entry is worth it by itself.
     ///
     /// For a larger run: a rewritten byte costs its read and its write, and
     /// a second copy in object storage until the old tables are collected,

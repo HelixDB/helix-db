@@ -3683,11 +3683,22 @@ async fn supersede(
     compact_every_table(&db).await;
     assert_eq!(pass(&db).await, DroppedIndexStorage::default());
     assert_eq!(stored_entries(&db).await, vec![]);
-    let rows_left_behind = rows(writer(&db).db())
-        .await
-        .into_keys()
-        .filter(|key| prefixes.iter().any(|prefix| key.starts_with(prefix)))
-        .count();
+    let owned = || async {
+        rows(writer(&db).db())
+            .await
+            .into_keys()
+            .filter(|key| prefixes.iter().any(|prefix| key.starts_with(prefix)))
+            .count()
+    };
+    // A writer applies the result of its compactor's job at its next
+    // manifest poll, so rows a job discarded stay readable for a moment:
+    // rows are left behind only if they are still there well after it.
+    let mut rows_left_behind = owned().await;
+    let read = Instant::now();
+    while rows_left_behind > 0 && read.elapsed() < WAIT / 4 {
+        tokio::time::sleep(SETTLE).await;
+        rows_left_behind = owned().await;
+    }
     db.close().await.expect("the writer closes");
     Superseded {
         ran_under_the_superseded_writer,

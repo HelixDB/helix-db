@@ -270,14 +270,15 @@ fn blocks_under(from: usize, to: usize) -> std::ops::Range<usize> {
 /// `ranges`, which are in the order of their starts, with those that
 /// overlap joined: every block they cover, once.
 fn disjoint(ranges: Vec<std::ops::Range<usize>>) -> Vec<std::ops::Range<usize>> {
-    let mut joined = Vec::<std::ops::Range<usize>>::with_capacity(ranges.len());
-    for range in ranges {
-        match joined.last_mut() {
-            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
-            Some(_) | None => joined.push(range),
-        }
-    }
-    joined
+    ranges
+        .into_iter()
+        .fold(Vec::<std::ops::Range<usize>>::new(), |mut joined, range| {
+            match joined.last_mut() {
+                Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+                Some(_) | None => joined.push(range),
+            }
+            joined
+        })
 }
 
 /// Decides [`Held`] from a table's block index: `before` blocks have an
@@ -639,19 +640,22 @@ impl Retirer {
         let offset = |block| index.get(block).map_or(data_end, |(offset, _)| offset);
         // The blocks of each held entry, in key order. Two prefixes of one
         // entry can share a block, which counts once.
-        let mut blocks = HashMap::<_, Vec<std::ops::Range<usize>>>::new();
-        for (prefix, entry) in overlapping(prefixes, first, last) {
-            if !held.contains(&entry) {
-                continue;
-            }
-            let from = index.partition_point(|start| start < &prefix[..]);
-            let to = index
-                .partition_point(|start| start < &prefix[..] || start.starts_with(&prefix[..]));
-            blocks
-                .entry(entry)
-                .or_default()
-                .push(blocks_under(from, to));
-        }
+        let blocks = overlapping(prefixes, first, last)
+            .filter(|(_, entry)| held.contains(entry))
+            .fold(
+                HashMap::<_, Vec<std::ops::Range<usize>>>::new(),
+                |mut blocks, (prefix, entry)| {
+                    let from = index.partition_point(|start| start < &prefix[..]);
+                    let to = index.partition_point(|start| {
+                        start < &prefix[..] || start.starts_with(&prefix[..])
+                    });
+                    blocks
+                        .entry(entry)
+                        .or_default()
+                        .push(blocks_under(from, to));
+                    blocks
+                },
+            );
         Ok(blocks
             .into_iter()
             .map(|(entry, blocks)| {

@@ -1226,25 +1226,23 @@ impl Registry {
     /// for the entries whose gate is at or below `retention`: the rows a
     /// compaction planned now would discard.
     pub(crate) fn discardable_tracked(&self, retention: u64) -> HashMap<TableId, u64> {
-        let state = self.state.lock();
-        let mut tracked = HashMap::new();
-        for state in state.entries.values() {
-            let Entry::Armed(Armed {
-                gate,
-                proof: Proof::Tracking { tables },
-                ..
-            }) = state
-            else {
-                continue;
-            };
-            if *gate > retention {
-                continue;
-            }
-            for (table, bytes) in tables.tables() {
+        self.state
+            .lock()
+            .entries
+            .values()
+            .filter_map(|state| match state {
+                Entry::Armed(Armed {
+                    gate,
+                    proof: Proof::Tracking { tables },
+                    ..
+                }) if *gate <= retention => Some(tables),
+                Entry::Armed(_) | Entry::Quarantined(_) => None,
+            })
+            .flat_map(|tables| tables.tables())
+            .fold(HashMap::new(), |mut tracked, (table, bytes)| {
                 *tracked.entry(*table).or_default() += bytes;
-            }
-        }
-        tracked
+                tracked
+            })
     }
 
     /// Whether a table some armed entry's proof tracks is missing from
