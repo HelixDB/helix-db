@@ -131,15 +131,15 @@ fn a_tables_key_range_decides_only_what_it_can() {
 #[test]
 fn a_block_index_points_at_the_one_block_that_can_hide_a_row() {
     for (before, next, verdict) in [
-        // The first block at or after the prefix starts under it.
+        // The first block indexed at or after the prefix starts under it.
         (0, Some(&b"m"[..]), Held::Yes),
         (0, Some(&b"ma"[..]), Held::Yes),
         (3, Some(b"mz"), Held::Yes),
-        // Every block starts above the prefix's keys.
+        // Every block is indexed above the prefix's keys.
         (0, Some(b"n"), Held::No),
         (0, None, Held::No),
-        // Rows under the prefix can only follow the first key of the last
-        // block that starts below it.
+        // Rows under the prefix can only be in the last block indexed below
+        // it.
         (1, Some(b"n"), Held::InBlock(0)),
         (3, Some(b"n"), Held::InBlock(2)),
         (3, None, Held::InBlock(2)),

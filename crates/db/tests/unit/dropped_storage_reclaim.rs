@@ -9,6 +9,7 @@ use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+use futures::stream::BoxStream;
 use helix_ast::batch::{read_batch, write_batch};
 use helix_ast::error_code::QueryErrorCode;
 use helix_ast::expr::Predicate;
@@ -20,7 +21,12 @@ use slatedb::compactor::{Compaction, CompactionSpec, CompactionStatus, SourceId}
 use slatedb::config::{
     FlushOptions, FlushType, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
 };
-use slatedb::{DbReadOps, IsolationLevel};
+use slatedb::object_store::path::Path;
+use slatedb::object_store::{
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
+    PutMultipartOptions, PutOptions, PutPayload, PutResult, Result as ObjectStoreResult,
+};
+use slatedb::{CompactionJobContext, DbReadOps, IsolationLevel};
 
 use super::*;
 use crate::encoding::v2::keys::scope::TenantId;
@@ -894,6 +900,250 @@ fn a_pass_that_fails_at_any_point_is_finished_by_the_next() {
             }
         }
     });
+}
+
+/// An object store through which every read makes a compaction filter keep
+/// the rows of every armed entry of `writer`, as a job whose retention
+/// sequence is below their gates does when its filter is created.
+struct KeepingStore {
+    inner: Arc<dyn ObjectStore>,
+    writer: Arc<HelixWriter>,
+}
+
+impl std::fmt::Debug for KeepingStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("KeepingStore")
+            .field("inner", &self.inner)
+            .finish_non_exhaustive()
+    }
+}
+
+impl KeepingStore {
+    fn keep(&self) {
+        let discardable = self.writer.dropped().discardable(&CompactionJobContext {
+            destination: 0,
+            is_dest_last_run: true,
+            compaction_clock_tick: 0,
+            retention_min_seq: None,
+        });
+        assert!(discardable.is_empty());
+    }
+}
+
+impl std::fmt::Display for KeepingStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "keeping({})", self.inner)
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for KeepingStore {
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        options: PutOptions,
+    ) -> ObjectStoreResult<PutResult> {
+        self.inner.put_opts(location, payload, options).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        options: PutMultipartOptions,
+    ) -> ObjectStoreResult<Box<dyn MultipartUpload>> {
+        self.inner.put_multipart_opts(location, options).await
+    }
+
+    async fn get_opts(&self, location: &Path, options: GetOptions) -> ObjectStoreResult<GetResult> {
+        self.keep();
+        self.inner.get_opts(location, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, ObjectStoreResult<Path>>,
+    ) -> BoxStream<'static, ObjectStoreResult<Path>> {
+        self.inner.delete_stream(locations)
+    }
+
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, ObjectStoreResult<ObjectMeta>> {
+        self.keep();
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> ObjectStoreResult<ListResult> {
+        self.keep();
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> ObjectStoreResult<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}
+
+/// Proves a pass deletes nothing for an entry a filter kept after the pass
+/// read the entry's proof, though every table it then reads is free of the
+/// entry's rows: the stored entry and its partition mappings stay, the proof
+/// starts again, and the next undisturbed pass retires the entry.
+#[tokio::test]
+async fn a_filter_that_keeps_an_entry_while_a_pass_reads_the_store_voids_its_retirement() {
+    let db =
+        open_quiet(ProcessLocalDatabaseToken::new("dropped-retire-kept-mid-pass").unwrap()).await;
+    db.wait_for_background_migrations().await;
+    let scope = DataScope::LegacyUnscoped;
+    for seed in 0..24 {
+        add_document(&db, scope, "Gone", seed).await;
+    }
+    // The partitioned vector index of the family: a retirement would delete
+    // its partition mappings before its entry.
+    let [vector, ..] = family("Gone");
+    applied(&db, scope, g().create_index_if_not_exists(vector.clone())).await;
+    applied(&db, scope, g().drop_index(vector)).await;
+    let entries = stored_entries(&db).await;
+    let [entry] = entries[..] else {
+        panic!("one drop leaves one entry: {entries:?}");
+    };
+    let mappings = dropped::partition_mappings_prefix(scope, entry);
+    let mapped =
+        |rows: BTreeMap<Bytes, Bytes>| rows.keys().filter(|key| key.starts_with(&mappings)).count();
+    let prefixes = armed_prefixes(&db).await;
+    compact_every_table(&db).await;
+    assert_discarded(&db, &prefixes).await;
+    assert_eq!(armed_entry(&db).kept, 0);
+
+    // The pass reads the entry's proof, then the store: no table holds a row
+    // of the entry, and a filter has kept the entry by then.
+    let HelixStorage::Writer(shared) = db.storage() else {
+        panic!("the contract opens a writer");
+    };
+    let disturbed = Retirer::new(
+        Arc::clone(shared),
+        db.inner.storage.path(),
+        Arc::new(KeepingStore {
+            inner: Arc::clone(db.inner.storage.object_store()),
+            writer: Arc::clone(shared),
+        }),
+    );
+    let storage = disturbed.pass().await.expect("the pass runs");
+    assert_eq!(
+        storage,
+        DroppedIndexStorage {
+            unproven: 1,
+            retained: 1,
+            ..DroppedIndexStorage::default()
+        }
+    );
+    assert!(armed_entry(&db).kept > 0);
+    assert_eq!(armed_entry(&db).proof, Proof::Unproven);
+    assert_eq!(stored_entries(&db).await, entries);
+    assert_eq!(mapped(rows(writer(&db).db()).await), 3);
+
+    assert_eq!(pass(&db).await, DroppedIndexStorage::default());
+    assert_eq!(stored_entries(&db).await, vec![]);
+    assert_eq!(mapped(rows(writer(&db).db()).await), 0);
+    db.close().await.expect("the writer closes");
+}
+
+/// Proves a table is found to hold an entry's row that starts a block whose
+/// index key is shorter than the entry's prefix: SlateDB indexes a block by a
+/// shortened key, which then sorts below the prefix, so only reading the
+/// block tells. An entry whose prefix falls in the same block without a row
+/// is not held.
+#[tokio::test]
+async fn a_row_that_starts_a_block_under_a_shortened_index_key_is_found() {
+    let db = open("dropped-retire-block-start").await;
+    let HelixStorage::Writer(shared) = db.storage() else {
+        panic!("the contract opens a writer");
+    };
+    // A store of its own, so that the rows below are the whole table.
+    let store: Arc<dyn ObjectStore> = Arc::new(slatedb::object_store::memory::InMemory::new());
+    let path = "dropped-retire-block-start-rows";
+    let rows = slatedb::Db::builder(path, Arc::clone(&store))
+        .build()
+        .await
+        .expect("the row store opens");
+    let owner = |physical_index_id| OwnerKey::PhysicalIndex {
+        scope: DataScope::LegacyUnscoped,
+        physical_index_id,
+    };
+    let [held_prefix, ..] = &owner(7).prefixes()[..] else {
+        panic!("a physical index owns a prefix");
+    };
+    let [empty_prefix, ..] = &owner(8).prefixes()[..] else {
+        panic!("a physical index owns a prefix");
+    };
+    let held_row = Bytes::from([&held_prefix[..], b"row"].concat());
+    // The first row fills its block, so the second starts the next one.
+    rows.put(b"a", vec![0u8; 6000])
+        .await
+        .expect("the row writes");
+    rows.put(&held_row, b"dropped")
+        .await
+        .expect("the row writes");
+    rows.put([0xFFu8], b"last").await.expect("the row writes");
+    rows.flush_with_options(FlushOptions {
+        flush_type: FlushType::MemTable,
+    })
+    .await
+    .expect("the rows flush");
+    let manifest = Admin::builder(path, Arc::clone(&store))
+        .build()
+        .read_manifest(None)
+        .await
+        .expect("the manifest reads")
+        .expect("an open store has a manifest");
+    let tables = manifest
+        .all_sst_views()
+        .map(|view| view.sst.clone())
+        .collect::<Vec<_>>();
+    let [table] = &tables[..] else {
+        panic!("one flush leaves one table: {}", tables.len());
+    };
+    assert_eq!(table.info.first_entry.as_deref(), Some(&b"a"[..]));
+    assert_eq!(table.info.last_entry.as_deref(), Some(&[0xFFu8][..]));
+
+    let retirer = Retirer::new(Arc::clone(shared), path, store);
+    let index = retirer
+        .tables
+        .open_with_handle(table.clone())
+        .expect("the table opens")
+        .index()
+        .await
+        .expect("the block index reads");
+    assert_eq!(index.len(), 2);
+    let (_, second) = index.get(1).expect("the table has a second block");
+    assert!(
+        second.len() < held_prefix.len() && held_prefix.starts_with(second),
+        "the second block is indexed by a key shorter than the prefix: {second:?}"
+    );
+
+    let prefixes = BTreeMap::from([
+        (held_prefix.clone(), generation_entry(1)),
+        (empty_prefix.clone(), generation_entry(2)),
+    ]);
+    assert_eq!(
+        retirer
+            .held(table, &prefixes)
+            .await
+            .expect("the table is looked into"),
+        HashSet::from([generation_entry(1)])
+    );
+    rows.close().await.expect("the row store closes");
+    db.close().await.expect("the writer closes");
+}
+
+fn generation_entry(index_id: u64) -> DroppedGeneration {
+    DroppedGeneration {
+        index_id: IndexId::new(index_id).unwrap(),
+        generation: IndexGenerationId::initial(),
+    }
 }
 
 /// Proves a writer that opens trusts no table it finds: an entry another

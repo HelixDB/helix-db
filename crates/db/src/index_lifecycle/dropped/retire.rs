@@ -145,13 +145,19 @@ impl Proof {
 
 /// Whether a table holds a row under one prefix, as far as its block index
 /// tells.
+///
+/// SlateDB does not index a block by its first key but by a shortened one:
+/// a leading part of the first key, just long enough to sort above every key
+/// of the block before. So an index key under the prefix means the block's
+/// first row is under it, while an index key below the prefix says nothing
+/// of the block's rows, its first included.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Held {
     /// A row under the prefix starts a block.
     Yes,
-    /// The block starts leave no room for one.
+    /// The index keys leave no room for one.
     No,
-    /// Only the block at this index can hold one, after its first key.
+    /// Only the block at this index can hold one, as any of its rows.
     InBlock(usize),
 }
 
@@ -200,14 +206,16 @@ fn held_by_range<'a>(
     (held, inside)
 }
 
-/// Decides [`Held`] from a table's block index: `before` blocks start at a
-/// key below `prefix`, and the next block, if any, starts at `next`.
+/// Decides [`Held`] from a table's block index: `before` blocks have an
+/// index key below `prefix`, and the next block, if any, has `next`.
 fn held_by_index(prefix: &[u8], before: usize, next: Option<&[u8]>) -> Held {
     if next.is_some_and(|next| next.starts_with(prefix)) {
         return Held::Yes;
     }
-    // Every later block starts above the prefix's keys, so a row under the
-    // prefix can only follow the first key of the last block before them.
+    // Every later block's index key, which no row of the block sorts below,
+    // is above the prefix's keys. Every earlier block ends below the index
+    // key of the last block before them, which is below the prefix. So a row
+    // under the prefix can only be in that last block.
     match before.checked_sub(1) {
         Some(block) => Held::InBlock(block),
         None => Held::No,
