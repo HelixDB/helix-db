@@ -70,6 +70,39 @@ fn removed_commands_return_friendly_errors() {
 }
 
 #[test]
+fn init_rejects_invalid_target_without_creating_project_files() {
+    let fixture = CliFixture::new();
+    let project = fixture.root().join("rejected-project").join("nested");
+
+    for target_args in [
+        &["local", "--name", "bad name", "--no-skills"][..],
+        &["local", "--s3-region", "us-east-1", "--no-skills"][..],
+    ] {
+        fixture
+            .command()
+            .args(["init", "--path"])
+            .arg(&project)
+            .args(target_args)
+            .assert()
+            .failure();
+        assert!(
+            !fixture.root().join("rejected-project").exists(),
+            "init {target_args:?} left the project directory behind"
+        );
+    }
+
+    let current = fixture.root().join("current-dir");
+    fs::create_dir_all(&current).unwrap();
+    fixture
+        .command()
+        .current_dir(&current)
+        .args(["init", "local", "--name", "bad name", "--no-skills"])
+        .assert()
+        .failure();
+    assert!(!current.join(".helix").exists());
+}
+
+#[test]
 fn init_and_add_generate_expected_project_files() {
     let fixture = CliFixture::new();
     let project = fixture.root().join("sample-project");
