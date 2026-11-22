@@ -135,11 +135,6 @@ fn a_reclaim_timer_reclaims_an_idle_store_or_one_that_has_waited_long_enough() {
         running: 0,
     };
     let overdue = now + Duration::from_secs(1_800);
-    let timer = Timer::Reclaim {
-        at: now,
-        compactions: seen,
-        overdue,
-    };
     let idle = Due::Reclaim(Reclaimer::IdleStore(Worth::WRITER));
     let busy = Due::Reclaim(Reclaimer::BusyStore(Worth::WRITER));
     let started = CompactionActivity {
@@ -165,8 +160,8 @@ fn a_reclaim_timer_reclaims_an_idle_store_or_one_that_has_waited_long_enough() {
         (overdue + Duration::from_secs(1), ended, busy),
     ] {
         assert_eq!(
-            timer.due(at, activity, Worth::WRITER),
-            Some(due),
+            Due::at(at, seen, activity, overdue, Worth::WRITER),
+            due,
             "{activity:?}"
         );
     }
@@ -176,22 +171,22 @@ fn a_reclaim_timer_reclaims_an_idle_store_or_one_that_has_waited_long_enough() {
         running: 1,
     };
     assert_eq!(
-        Timer::Reclaim {
-            at: now,
-            compactions: running,
-            overdue,
-        }
-        .due(now, running, Worth::WRITER),
-        Some(Due::Later)
+        Due::at(now, running, running, overdue, Worth::WRITER),
+        Due::Later
     );
-    // No other timer reclaims.
-    for timer in [
-        Timer::Off,
-        Timer::Look { at: now },
-        Timer::Retry { at: now },
-    ] {
-        assert_eq!(timer.due(overdue, seen, Worth::WRITER), None);
-    }
+    // The rule it reclaims by is the one it is given.
+    let rule = Worth {
+        small_run_bytes: 1,
+        rewritten_per_dropped_byte: 2,
+    };
+    assert_eq!(
+        Due::at(now, seen, seen, overdue, rule),
+        Due::Reclaim(Reclaimer::IdleStore(rule))
+    );
+    assert_eq!(
+        Due::at(overdue, seen, ended, overdue, rule),
+        Due::Reclaim(Reclaimer::BusyStore(rule))
+    );
 }
 
 #[test]

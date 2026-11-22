@@ -587,7 +587,7 @@ impl Retirer {
                 active.iter().any(|compaction| {
                     let spec = compaction.spec();
                     spec.sources().contains(source)
-                        || matches!(source, SourceId::SortedRun(run) if spec.destination() == Some(*run))
+                        || spec.destination().map(SourceId::SortedRun) == Some(*source)
                 })
             };
             let destination = match &rewrite {
@@ -749,7 +749,6 @@ impl Retirer {
                         // Whether or not this call is the one that cancels
                         // it, the next read tells how it ended.
                         gave_way = self.admin.cancel_compaction(id).await? || gave_way;
-                        continue;
                     }
                 }
             }

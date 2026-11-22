@@ -786,26 +786,6 @@ impl Timer {
             Self::Look { at } | Self::Reclaim { at, .. } | Self::Retry { at } => Some(at),
         }
     }
-
-    /// What a reclaim timer that fires at `now` does, given what the
-    /// compactor has done by then; `None` of any other timer.
-    fn due(self, now: Instant, activity: CompactionActivity, worth: Worth) -> Option<Due> {
-        let Self::Reclaim {
-            compactions,
-            overdue,
-            ..
-        } = self
-        else {
-            return None;
-        };
-        Some(if activity == compactions && activity.running == 0 {
-            Due::Reclaim(Reclaimer::IdleStore(worth))
-        } else if now >= overdue {
-            Due::Reclaim(Reclaimer::BusyStore(worth))
-        } else {
-            Due::Later
-        })
-    }
 }
 
 /// What a reclaim timer that fires does.
@@ -816,6 +796,29 @@ enum Due {
     /// Nothing yet: a compaction ran meanwhile and the proofs have not
     /// tracked tables for long enough, so idle starts again.
     Later,
+}
+
+impl Due {
+    /// What a reclaim timer armed when the compactor had done `seen` does
+    /// when it fires at `now`, the compactor having done `activity` by then:
+    /// the reclaim of an idle store if nothing started or ended in between
+    /// and nothing runs, that of a busy store if `now` has reached
+    /// `overdue`, and nothing otherwise.
+    fn at(
+        now: Instant,
+        seen: CompactionActivity,
+        activity: CompactionActivity,
+        overdue: Instant,
+        worth: Worth,
+    ) -> Self {
+        if activity == seen && activity.running == 0 {
+            Self::Reclaim(Reclaimer::IdleStore(worth))
+        } else if now >= overdue {
+            Self::Reclaim(Reclaimer::BusyStore(worth))
+        } else {
+            Self::Later
+        }
+    }
 }
 
 /// What the background task does when it wakes.
@@ -1049,12 +1052,12 @@ impl RetireSupervisor {
                             break Wake::Pass;
                         }
                         Timer::Retry { .. } => break Wake::Pass,
-                        Timer::Reclaim { overdue, .. } => {
+                        Timer::Reclaim { compactions, overdue, .. } => {
                             let now = Instant::now();
                             let activity = registry.compactions();
-                            match timer.due(now, activity, Worth::WRITER) {
-                                Some(Due::Reclaim(reclaimer)) => break Wake::Reclaim(reclaimer),
-                                Some(Due::Later) | None => {
+                            match Due::at(now, compactions, activity, overdue, Worth::WRITER) {
+                                Due::Reclaim(reclaimer) => break Wake::Reclaim(reclaimer),
+                                Due::Later => {
                                     timer = Timer::Reclaim {
                                         at: (now + idle_after).min(overdue),
                                         compactions: activity,
