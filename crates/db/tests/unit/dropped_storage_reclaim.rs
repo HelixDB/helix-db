@@ -2238,9 +2238,10 @@ async fn a_background_task_reads_nothing_while_nothing_changes() {
     db.close().await.expect("the writer closes");
 }
 
-/// Proves a store whose compactor has work is not idle: while a compaction
-/// job of this process is running, however long, the background task does
-/// not reclaim, and once the job has ended it waits the idle time again.
+/// Proves a store whose compactor has work is not idle: the background task
+/// does not reclaim while a compaction job of this process is running,
+/// however long, nor while jobs keep starting and ending, and it reclaims
+/// once they have stopped for the idle time.
 #[tokio::test]
 async fn a_store_whose_compactor_has_work_is_not_reclaimed() {
     let db = open_quiet(ProcessLocalDatabaseToken::new("dropped-idle-not-yet").unwrap()).await;
@@ -2267,16 +2268,23 @@ async fn a_store_whose_compactor_has_work_is_not_reclaimed() {
     retirer(&db).await.run_in_background(GAP, idle_after);
     tokio::time::sleep(idle_after * 5).await;
     assert_eq!(stored_entries(&db).await.len(), 1);
+    assert_eq!(owned_rows(&db).await, held);
+
+    // It ends, and short jobs follow one another more often than the idle
+    // time: none is running whenever the task looks, yet it is not idle.
+    registry.filter_dropped();
+    let busy = Instant::now();
+    while busy.elapsed() < idle_after * 5 {
+        registry.discardable(&job);
+        registry.filter_dropped();
+        tokio::time::sleep(idle_after / 4).await;
+    }
+    assert_eq!(stored_entries(&db).await.len(), 1);
     assert_eq!(db.dropped_index_storage().tracking, 1);
     assert_eq!(owned_rows(&db).await, held);
 
-    // It ends just as the idle time is up: the store has not been idle.
-    registry.discardable(&job);
-    registry.filter_dropped();
-    let ended = Instant::now();
-    registry.filter_dropped();
+    // The compactor rests: the store is reclaimed.
     retired(&db).await;
-    assert!(ended.elapsed() >= idle_after, "{:?}", ended.elapsed());
     assert_discarded(&db, &prefixes).await;
     db.close().await.expect("the writer closes");
 }
