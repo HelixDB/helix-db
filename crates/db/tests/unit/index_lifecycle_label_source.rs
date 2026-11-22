@@ -538,6 +538,38 @@ async fn small_rows_then_large_ones_read_about_one_limit() {
     }
 }
 
+/// A point step that has read many small rows, whose mean would size a
+/// chunk of hundreds of large ones, reads at most [`POINT_CHUNK_IDS`] rows
+/// past its limit.
+#[tokio::test]
+async fn many_small_rows_then_large_ones_read_at_most_a_point_chunk_past_the_limit() {
+    const LIMIT: u64 = 8 << 20;
+    let scope = DataScope::LegacyUnscoped;
+    let node = IndexElementKind::Node;
+    let db = test_db("label-source-many-small-then-large").await;
+    for member in 0..264 {
+        let filler = if member < 200 { 100 } else { 512 << 10 };
+        testing::put_source_row(&db, scope, node, member * 3, &row("User", filler)).await;
+    }
+    let read = snapshot(&db).await;
+    let progress = progress(scope, node, None, 263 * 3);
+    assert!(!scans_range(&read, node, "User", &progress, limits(1024, LIMIT)).await);
+    let step_read = admit(&read, &progress, limits(1024, LIMIT)).await;
+    assert_eq!(
+        step_read.ids,
+        (0..215).map(|member| member * 3).collect::<Vec<_>>()
+    );
+    // Chunks of up to 256 ids read 56 large rows here: 28 MiB.
+    let chunk = u64::try_from(POINT_CHUNK_IDS).expect("chunk fits");
+    assert!(
+        step_read.read <= LIMIT + chunk * step_read.largest,
+        "{} read for {} admitted",
+        step_read.read,
+        step_read.bytes
+    );
+    db.close().await.expect("database closes");
+}
+
 #[tokio::test]
 async fn edge_builds_resume_after_a_retired_pair_key_cursor() {
     let db = test_db("label-source-legacy-edge-cursor").await;

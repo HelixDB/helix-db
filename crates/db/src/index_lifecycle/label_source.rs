@@ -38,20 +38,20 @@
 //! row label built in 30 s by point reads against the prefix scan's 25 s,
 //! and in 25 s this way. Such a step reads at most the rows the prefix scan
 //! read for the same ids, and at most twice the label's. Otherwise
-//! rows are read with `multi_get`, in chunks of at most
-//! [`helix_planner::cost::RECORD_BATCH_ROWS`] ids, each read only once the
-//! previous one is consumed. Either way no row is read once the step has
-//! read its input-byte limit, counting every row read, of the label or not.
-//! A chunk takes at most as many ids as the step has read so far
-//! ([`FIRST_CHUNK_IDS`] first), so a step's reads at most double a chunk at
-//! a time, and once a row is read, no more ids than reach the input bytes
-//! the step has left at the mean bytes per id read so far. A label of large
-//! rows therefore reads about its limit and a row or two more per step,
-//! rather than a whole chunk of rows the next step reads again, and a step
-//! whose first rows are small reads no more large rows past its limit than
-//! it had read before them. A scan starts at the step's first id, so a row
-//! of another label it read is never read again by a later step. Like the
-//! prefix scan before them, a build's reads do not fill the block cache.
+//! rows are read with `multi_get`, in chunks of at most [`POINT_CHUNK_IDS`]
+//! ids, each read only once the previous one is consumed. Either way no row
+//! is read once the step has read its input-byte limit, counting every row
+//! read, of the label or not, so a scanning step reads at most one row past
+//! its limit and a point step at most [`POINT_CHUNK_IDS`] rows past it,
+//! whatever their sizes. Within that bound a chunk takes at most as many
+//! ids as the step has read so far ([`FIRST_CHUNK_IDS`] first), and once a
+//! row is read, no more ids than reach the input bytes the step has left at
+//! the mean bytes per id read so far, so a label of rows of one size reads
+//! about its limit and a row or two more per step, rather than a whole chunk
+//! of rows the next step reads again. A scan starts at the step's first id,
+//! so a row of another label it read is never read again by a later step.
+//! Like the prefix scan before them, a build's reads do not fill the block
+//! cache.
 
 use bytes::Bytes;
 use slatedb::DbReadOps;
@@ -63,13 +63,17 @@ use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::repository::{LabelRowLayout, LabelRowWrites};
 use crate::index_lifecycle::{IndexCursor, IndexElementKind, IndexEntityId, SourceScanProgress};
 
-/// The most ids one `multi_get` reads.
-const CHUNK_IDS: usize = helix_planner::cost::RECORD_BATCH_ROWS as usize;
+/// The most ids one `multi_get` reads. A step reads no chunk once it has
+/// read its input-byte limit, so it reads at most this many rows past that
+/// limit, whatever their sizes. The bound costs calls: a 50k-member label
+/// among 1M small rows built by point in 4.0 s, against 2.8 s at 64 ids and
+/// 2.45 s at 256, whose chunks read up to 256 rows past the limit.
+const POINT_CHUNK_IDS: usize = 16;
 
 /// The ids a step reads before it knows how large the label's rows are: one
 /// such chunk of the largest rows a step admits stays near its byte limit.
 const FIRST_CHUNK_IDS: usize = 4;
-const _: () = assert!(FIRST_CHUNK_IDS <= CHUNK_IDS);
+const _: () = assert!(FIRST_CHUNK_IDS <= POINT_CHUNK_IDS);
 
 /// A step scans its ids' key range when the range holds at most this many
 /// keys per id it took: a dense label then reads no more than this many
@@ -369,11 +373,11 @@ impl PointReads {
         Ok(true)
     }
 
-    /// How many ids the next chunk reads: as many as were read so far
-    /// (starting at [`FIRST_CHUNK_IDS`]), and once a row was read, at most
-    /// enough to reach the input-byte limit at the mean bytes per id read so
-    /// far. The first bound keeps a mean taken over small rows from sizing a
-    /// whole chunk of large ones.
+    /// How many ids the next chunk reads: at most [`POINT_CHUNK_IDS`] and as
+    /// many as were read so far (starting at [`FIRST_CHUNK_IDS`]), and once
+    /// a row was read, at most enough to reach the input-byte limit at the
+    /// mean bytes per id read so far. A mean taken over small rows can still
+    /// size a chunk of large ones, which [`POINT_CHUNK_IDS`] bounds.
     fn chunk_ids(&self, read: &Read) -> usize {
         let grown = u128::from(self.ids_read).max(FIRST_CHUNK_IDS as u128);
         let ids = match read.bytes {
@@ -387,7 +391,7 @@ impl PointReads {
         };
         usize::try_from(ids)
             .unwrap_or(usize::MAX)
-            .clamp(1, CHUNK_IDS)
+            .clamp(1, POINT_CHUNK_IDS)
     }
 }
 
