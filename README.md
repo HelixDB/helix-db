@@ -25,6 +25,10 @@ full-text search, built in Rust on object storage. Store entities, relationships
 and text in one transactional engine and query them together from Rust, TypeScript, Go, or
 Python.
 
+Want a graph of your business without writing the schema? [Helix Foundry](https://foundry.helix-db.com/login?return_to=%2Fontology%2Fsample&utm_source=helixdb_readme&utm_medium=readme&utm_campaign=intro)
+builds an ontology over your databases, apps and documents and loads it into HelixDB. Try it
+on a sample company.
+
 | Graph | Vector | Full-text |
 | --- | --- | --- |
 | Model entities, relationships, and typed properties as a labeled property graph. | Approximate nearest-neighbor search, prefiltered by graph traversal. | BM25 keyword search over node and edge properties. |
