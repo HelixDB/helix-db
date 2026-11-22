@@ -61,33 +61,70 @@ fn a_tracked_entry_retires_once_no_suspect_is_stored() {
     }
 }
 
+fn entry(index_id: u64) -> DroppedGeneration {
+    DroppedGeneration {
+        index_id: crate::index_lifecycle::IndexId::new(index_id).unwrap(),
+        generation: crate::index_lifecycle::IndexGenerationId::initial(),
+    }
+}
+
 #[test]
 fn a_tables_key_range_decides_only_what_it_can() {
-    let held = |first: Option<&[u8]>, last: Option<&[u8]>| held_by_range(b"m", first, last);
-    for (first, last, verdict) in [
-        // An end of the table is itself a row under the prefix.
-        (Some(&b"m"[..]), Some(&b"z"[..]), Some(true)),
-        (Some(b"ma"), Some(b"z"), Some(true)),
-        (Some(b"a"), Some(b"m"), Some(true)),
-        (Some(b"a"), Some(b"mz"), Some(true)),
-        (Some(b"ma"), Some(b"mz"), Some(true)),
-        (None, Some(b"mz"), Some(true)),
-        (Some(b"ma"), None, Some(true)),
-        // The table ends before the prefix, or starts after its keys.
-        (Some(b"a"), Some(b"l"), Some(false)),
-        (Some(b"a"), Some(b"lz"), Some(false)),
-        (Some(b"n"), Some(b"z"), Some(false)),
-        (None, Some(b"l"), Some(false)),
-        (Some(b"n"), None, Some(false)),
-        // The prefix sorts strictly inside the table.
-        (Some(b"a"), Some(b"z"), None),
-        (Some(b"l"), Some(b"n"), None),
-        (Some(b"lz"), Some(b"n"), None),
-        (None, Some(b"z"), None),
-        (Some(b"a"), None, None),
-        (None, None, None),
+    // Entry 1 owns `b` and `x`, entry 2 owns `m`, entry 3 owns `p`.
+    let prefixes = BTreeMap::from([
+        (Bytes::from_static(b"b"), entry(1)),
+        (Bytes::from_static(b"m"), entry(2)),
+        (Bytes::from_static(b"p"), entry(3)),
+        (Bytes::from_static(b"x"), entry(1)),
+    ]);
+    for (first, last, held, inside) in [
+        // The table starts under a prefix: its first key is a row of it.
+        (Some(&b"m"[..]), Some(&b"n"[..]), vec![2], vec![]),
+        (Some(b"ma"), Some(b"mz"), vec![2], vec![]),
+        (Some(b"ma"), Some(b"o"), vec![2], vec![]),
+        (Some(b"ma"), None, vec![2], vec![&b"p"[..], b"x"]),
+        // The table ends under a prefix: its last key is a row of it.
+        (Some(b"c"), Some(b"m"), vec![2], vec![]),
+        (Some(b"c"), Some(b"mz"), vec![2], vec![]),
+        (None, Some(b"mz"), vec![2], vec![b"b"]),
+        // Both, of two entries, with a third strictly inside.
+        (Some(b"bz"), Some(b"xa"), vec![1], vec![b"m", b"p"]),
+        // A prefix strictly inside is left to the block index, unless the
+        // range already shows a row of its entry.
+        (Some(b"a"), Some(b"z"), vec![], vec![b"b", b"m", b"p", b"x"]),
+        (Some(b"c"), Some(b"n"), vec![], vec![b"m"]),
+        (Some(b"lz"), Some(b"n"), vec![], vec![b"m"]),
+        (Some(b"a"), Some(b"xa"), vec![1], vec![b"m", b"p"]),
+        (None, None, vec![], vec![b"b", b"m", b"p", b"x"]),
+        // The table sorts outside every prefix: the one before its first key
+        // does not cover it, and the ones after its last key are past it.
+        (Some(b"c"), Some(b"l"), vec![], vec![]),
+        (Some(b"n"), Some(b"o"), vec![], vec![]),
+        (Some(b"a"), Some(b"az"), vec![], vec![]),
+        (Some(b"y"), Some(b"z"), vec![], vec![]),
+        (Some(b"y"), None, vec![], vec![]),
+        (None, Some(b"a"), vec![], vec![]),
     ] {
-        assert_eq!(held(first, last), verdict, "{first:?}..={last:?}");
+        let (decided, undecided) = held_by_range(&prefixes, first, last);
+        assert_eq!(
+            decided,
+            held.into_iter().map(entry).collect::<HashSet<_>>(),
+            "{first:?}..={last:?}"
+        );
+        assert_eq!(
+            undecided
+                .iter()
+                .map(|(prefix, _)| &prefix[..])
+                .collect::<Vec<_>>(),
+            inside,
+            "{first:?}..={last:?}"
+        );
+        assert!(
+            undecided
+                .iter()
+                .all(|(prefix, owner)| prefixes[*prefix] == *owner),
+            "{first:?}..={last:?}"
+        );
     }
 }
 

@@ -155,24 +155,49 @@ enum Held {
     InBlock(usize),
 }
 
-/// Whether a table whose first and last keys are `first` and `last` holds a
-/// row under `prefix`, or `None` when its keys alone do not tell: the prefix
-/// sorts strictly inside them.
+/// Sorts out, from the first and last keys of a table alone, the `prefixes`
+/// it can hold a row under. Returns the entries that own a prefix the table
+/// starts or ends under, which it therefore holds a row of, and the prefixes
+/// of other entries that sort strictly inside the table, which only its block
+/// index can decide. Every other prefix sorts outside the table.
 ///
 /// A table without a first key is treated as starting below every prefix,
 /// and one without a last key as ending above every prefix.
-fn held_by_range(prefix: &[u8], first: Option<&[u8]>, last: Option<&[u8]>) -> Option<bool> {
-    if first.is_some_and(|first| first.starts_with(prefix))
-        || last.is_some_and(|last| last.starts_with(prefix))
-    {
-        return Some(true);
-    }
-    // Neither end is under the prefix, so an end that does not sort before
-    // the prefix sorts after every key under it.
-    if first.is_some_and(|first| first > prefix) || last.is_some_and(|last| last < prefix) {
-        return Some(false);
-    }
-    None
+fn held_by_range<'a>(
+    prefixes: &'a BTreeMap<Bytes, DroppedGeneration>,
+    first: Option<&[u8]>,
+    last: Option<&[u8]>,
+) -> (
+    HashSet<DroppedGeneration>,
+    Vec<(&'a Bytes, DroppedGeneration)>,
+) {
+    // No owner prefix is a prefix of another, so the only prefix at or below
+    // `first` that can cover it is its predecessor.
+    let covering = first.and_then(|first| {
+        prefixes
+            .range::<[u8], _>((Bound::Unbounded, Bound::Included(first)))
+            .next_back()
+            .filter(|(prefix, _)| first.starts_with(prefix))
+    });
+    // A prefix above `first` and at or below `last` covers `last`, or every
+    // key under it sorts strictly between the two.
+    let (ending, inside): (Vec<_>, Vec<_>) = prefixes
+        .range::<[u8], _>((
+            first.map_or(Bound::Unbounded, Bound::Excluded),
+            last.map_or(Bound::Unbounded, Bound::Included),
+        ))
+        .partition(|(prefix, _)| last.is_some_and(|last| last.starts_with(prefix)));
+    let held = covering
+        .into_iter()
+        .chain(ending)
+        .map(|(_, entry)| *entry)
+        .collect::<HashSet<_>>();
+    let inside = inside
+        .into_iter()
+        .filter(|(_, entry)| !held.contains(entry))
+        .map(|(prefix, entry)| (prefix, *entry))
+        .collect();
+    (held, inside)
 }
 
 /// Decides [`Held`] from a table's block index: `before` blocks start at a
@@ -390,33 +415,11 @@ impl Retirer {
         sst: &SsTableHandle,
         prefixes: &BTreeMap<Bytes, DroppedGeneration>,
     ) -> Result<HashSet<DroppedGeneration>> {
-        let first = sst.info.first_entry.as_deref();
-        let last = sst.info.last_entry.as_deref();
-        // No owner prefix is a prefix of another, so the only prefix at or
-        // below `first` that can cover it is its predecessor.
-        let covering = first
-            .and_then(|first| {
-                prefixes
-                    .range::<[u8], _>((Bound::Unbounded, Bound::Included(first)))
-                    .next_back()
-            })
-            .into_iter();
-        let within = prefixes.range::<[u8], _>((
-            first.map_or(Bound::Unbounded, Bound::Excluded),
-            last.map_or(Bound::Unbounded, Bound::Included),
-        ));
-        let mut held = HashSet::new();
-        let mut inside = Vec::new();
-        for (prefix, entry) in covering.chain(within) {
-            match held_by_range(prefix, first, last) {
-                Some(true) => {
-                    held.insert(*entry);
-                }
-                Some(false) => {}
-                None => inside.push((prefix, *entry)),
-            }
-        }
-        inside.retain(|(_, entry)| !held.contains(entry));
+        let (mut held, inside) = held_by_range(
+            prefixes,
+            sst.info.first_entry.as_deref(),
+            sst.info.last_entry.as_deref(),
+        );
         if inside.is_empty() {
             return Ok(held);
         }
