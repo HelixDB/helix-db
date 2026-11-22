@@ -633,8 +633,11 @@ fn dropped_index_storage_reports_progress_and_warns_on_quarantined_entries() {
         draining: 3,
         tracking: 4,
         tracked_tables: 1,
+        waiting_since: None,
         quarantined: Vec::new(),
     };
+    let counts = "2 not yet tracked (1 kept by a compaction whose retention sequence was behind \
+                  the drop), 3 waiting for compactions in flight, 4 with rows in 1 table.";
     let reclaiming = dropped_index_storage(&waiting);
     assert_eq!(
         reclaiming.summary,
@@ -643,20 +646,55 @@ fn dropped_index_storage_reports_progress_and_warns_on_quarantined_entries() {
     assert_eq!(
         reclaiming.outcome,
         Outcome::Pass {
-            detail: "9 dropped index generations await compaction: 2 not yet tracked (1 kept \
-                     for a reader older than the drop), 3 waiting for compactions in flight, 4 \
-                     with rows in 1 table."
-                .into()
+            detail: format!(
+                "9 dropped index generations await compaction: {counts} Compactions discard \
+                 the rows as they reach them, and the server compacts for them itself once it \
+                 has been idle for a few minutes."
+            )
         }
     );
 
+    // The age of the oldest wait is reported once there is one.
+    let two_hours_ago = std::time::Instant::now()
+        .checked_sub(Duration::from_secs(2 * 3_600 + 5))
+        .expect("the clock is more than two hours past its origin");
+    let aged = dropped_index_storage(&db::DroppedIndexStorage {
+        waiting_since: Some(two_hours_ago),
+        ..waiting.clone()
+    });
+    let Outcome::Pass { detail } = &aged.outcome else {
+        panic!("waiting generations pass: {aged:?}");
+    };
+    assert!(
+        detail.starts_with(&format!(
+            "9 dropped index generations await compaction, the oldest for 2 h: {counts}"
+        )),
+        "{detail}"
+    );
+
+    let tenant =
+        db::encoding::v2::keys::scope::TenantId::from_ulid_str("0000000000000000000000005B")
+            .expect("a canonical tenant id");
     let quarantined = |count: u64| {
         dropped_index_storage(&db::DroppedIndexStorage {
             quarantined: (1..=count)
                 .map(|index_id| db::QuarantinedDroppedGeneration {
                     index_id,
                     generation: 7,
-                    contradiction: "names a generation its index record still owns",
+                    scope: match index_id {
+                        1 => db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                        _ => db::encoding::v2::keys::scope::DataScope::Tenant(tenant),
+                    },
+                    rows: match index_id {
+                        1 => db::DroppedEntryRows::UnpartitionedVector {
+                            physical_index_id: 42,
+                        },
+                        2 => db::DroppedEntryRows::PartitionedVector,
+                        3 => db::DroppedEntryRows::Text,
+                        _ => db::DroppedEntryRows::Secondary,
+                    },
+                    contradiction: db::DroppedEntryContradiction::GenerationStillOwned,
+                    since: two_hours_ago,
                 })
                 .collect(),
             ..waiting.clone()
@@ -669,20 +707,37 @@ fn dropped_index_storage_reports_progress_and_warns_on_quarantined_entries() {
     };
     assert!(
         detail.starts_with(
-            "The catalog contradicts this entry: index 1 generation 7 names a generation its \
-             index record still owns. Compactions keep their rows"
+            "The catalog contradicts this entry: index 1 generation 7 (vector, physical index \
+             42, no tenant) names a generation its index record still owns, quarantined for 2 \
+             h. Compactions keep their rows"
         ),
         "{detail}"
     );
     assert!(detail.ends_with("with rows in 1 table."), "{detail}");
     assert!(fix.contains("armed again by itself"));
+    assert!(fix.contains("`HelixDB::remove_quarantined_dropped_index_entry`"));
+    assert!(fix.contains("the rows it named stay stored and are never reclaimed"));
 
     let many = quarantined(12);
     assert_eq!(many.summary, "12 dropped index entries are quarantined");
     let Outcome::Warn { detail, .. } = &many.outcome else {
         panic!("quarantined entries warn: {many:?}");
     };
-    assert!(detail.contains("index 10 generation 7"), "{detail}");
+    assert!(
+        detail.contains(
+            "index 2 generation 7 (partitioned vector, tenant \
+             000000000000000000000000000000ab)"
+        ),
+        "{detail}"
+    );
+    assert!(
+        detail.contains("index 3 generation 7 (text, tenant"),
+        "{detail}"
+    );
+    assert!(
+        detail.contains("index 10 generation 7 (secondary, tenant"),
+        "{detail}"
+    );
     assert!(!detail.contains("index 11 generation 7"), "{detail}");
     assert!(detail.contains("; and 2 more. Compactions"), "{detail}");
 }

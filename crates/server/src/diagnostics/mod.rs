@@ -1058,9 +1058,14 @@ fn index_publication(stats: &db::IndexOperationQueueStats) -> Check {
 fn dropped_index_storage(storage: &db::DroppedIndexStorage) -> Check {
     let waiting = storage.unproven + storage.draining + storage.tracking;
     let progress = format!(
-        "{waiting} dropped index {} compaction: {} not yet tracked ({} kept for a reader older \
-         than the drop), {} waiting for compactions in flight, {} with rows in {} {}.",
+        "{waiting} dropped index {} compaction{}: {} not yet tracked ({} kept by a compaction \
+         whose retention sequence was behind the drop), {} waiting for compactions in flight, {} \
+         with rows in {} {}.",
         plural(waiting as u64, "generation awaits", "generations await"),
+        storage
+            .waiting_since
+            .map(|since| format!(", the oldest for {}", elapsed(since.elapsed())))
+            .unwrap_or_default(),
         storage.unproven,
         storage.retained,
         storage.draining,
@@ -1075,8 +1080,18 @@ fn dropped_index_storage(storage: &db::DroppedIndexStorage) -> Check {
             .take(LISTED_QUARANTINED)
             .map(|entry| {
                 format!(
-                    "index {} generation {} {}",
-                    entry.index_id, entry.generation, entry.contradiction
+                    "index {} generation {} ({}, {}) {}, quarantined for {}",
+                    entry.index_id,
+                    entry.generation,
+                    entry.rows,
+                    match entry.scope {
+                        db::encoding::v2::keys::scope::DataScope::LegacyUnscoped =>
+                            "no tenant".to_string(),
+                        db::encoding::v2::keys::scope::DataScope::Tenant(tenant) =>
+                            format!("tenant {:032x}", tenant.as_u128()),
+                    },
+                    entry.contradiction,
+                    elapsed(entry.since.elapsed()),
                 )
             })
             .collect::<Vec<_>>()
@@ -1104,9 +1119,15 @@ fn dropped_index_storage(storage: &db::DroppedIndexStorage) -> Check {
                     }
                 ),
                 fix: "An entry is quarantined when it names an index generation that is still \
-                      in use or was never built. It is armed again by itself once the catalog \
-                      agrees with it, for instance after that index is dropped. Report an entry \
-                      that stays, with the server log line that quarantined it."
+                      in use or was never built. It costs nothing while it stays: its rows are \
+                      kept, and no index is refused an id it names. It is armed again by itself \
+                      once the catalog agrees with it, for instance after that index is \
+                      dropped. To delete one that will not be, call \
+                      `HelixDB::remove_quarantined_dropped_index_entry` with its index id and \
+                      generation from a process that opens the database as its writer; the \
+                      server has no route for it. That deletes the entry only: the rows it \
+                      named stay stored and are never reclaimed. Report an entry you cannot \
+                      explain, with the server log line that quarantined it."
                     .into(),
             },
         );
@@ -1120,7 +1141,10 @@ fn dropped_index_storage(storage: &db::DroppedIndexStorage) -> Check {
         Outcome::Pass {
             detail: match waiting {
                 0 => "Every dropped index has given its storage back.".into(),
-                _ => progress,
+                _ => format!(
+                    "{progress} Compactions discard the rows as they reach them, and the \
+                     server compacts for them itself once it has been idle for a few minutes."
+                ),
             },
         },
     )
