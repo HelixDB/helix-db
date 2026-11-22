@@ -1370,3 +1370,183 @@ async fn batched_projections_respect_the_deadline() {
         }
     }
 }
+
+/// Endpoint records follow the metadata batch, without point reads, including
+/// shared nodes, self loops, absent endpoints and a second record batch.
+#[tokio::test]
+async fn endpoint_projections_batch_node_records() {
+    let db = test_support::open_db("projection-endpoint-node-batches").await;
+    let mut edges = Vec::new();
+    let mut users = Vec::new();
+    for index in 0..16 {
+        let from = test_support::add_user(&db, &format!("from-{index}")).await;
+        let to = test_support::add_user(&db, &format!("to-{index}")).await;
+        users.extend([from, to]);
+        edges.push(test_support::add_edge(&db, from, to, "LINK").await);
+        if index == 0 {
+            edges.push(test_support::add_edge(&db, from, from, "LINK").await);
+        }
+    }
+    edges.push(u64::MAX);
+    let rows = std::iter::once(ExecutionRow::current(ElementRef::Node(users[0])))
+        .chain(
+            edges
+                .iter()
+                .cycle()
+                .take(crate::execution::interpreter::stream::RECORD_BATCH_ROWS + 1)
+                .map(|id| ExecutionRow::current(ElementRef::Edge(*id))),
+        )
+        .chain([ExecutionRow::empty()])
+        .collect::<Vec<_>>();
+    let names = property_names(vec!["$from.name", "$to.name", "$from.$id", "$to.$id"]);
+    let serial = ExecutionContext::new(&db, context::ParamBindings::default());
+    let mut expected = Vec::new();
+    for row in &rows {
+        let mut object = BTreeMap::new();
+        for property in names.as_ref() {
+            if let Some(value) = serial.row_property(row, property).await.unwrap() {
+                object.insert(property.as_ref().to_string(), value);
+            }
+        }
+        expected.push(ExecutionScalar::Object(object));
+    }
+    for plan in [
+        ir::ProjectionPlan::Values(names.clone()),
+        ir::ProjectionPlan::ValueMap(ir::PropertySelection::Selected(names.clone())),
+        ir::ProjectionPlan::Project(projection_items(
+            names
+                .as_ref()
+                .iter()
+                .map(|source| ir::ProjectionItem::Property {
+                    source: source.clone(),
+                    alias: source.clone(),
+                })
+                .collect(),
+        )),
+    ] {
+        let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        let expected = expected
+            .iter()
+            .filter(|value| {
+                !matches!(plan, ir::ProjectionPlan::Values(_))
+                    || !matches!(value, ExecutionScalar::Object(object) if object.is_empty())
+            })
+            .cloned()
+            .collect();
+        assert_eq!(
+            ctx.project(ExecutionValue::Stream(rows.clone()), &plan)
+                .await
+                .unwrap(),
+            ExecutionValue::Scalars(expected),
+            "{plan:?}"
+        );
+        let work = ctx.pull_work.snapshot();
+        assert_eq!(work.raw_gets, 0, "{plan:?}: no individual node reads");
+        assert!(
+            work.multi_get_keys < rows.len(),
+            "shared records are deduplicated"
+        );
+        assert_eq!(
+            ctx.projection_read_snapshot().property_gets,
+            ctx.projection_read_snapshot().property_decodes
+        );
+    }
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn endpoint_prefetch_keeps_budget_admission_and_decode_error_order() {
+    use crate::encoding::keys;
+    let db = test_support::open_db("projection-endpoint-prefetch-errors").await;
+    let from = test_support::add_user(&db, "from").await;
+    let to = test_support::add_user(&db, "to").await;
+    let edge = test_support::add_edge(&db, from, to, "LINK").await;
+    let rows = || ExecutionValue::Stream(vec![ExecutionRow::current(ElementRef::Edge(edge))]);
+    let names = property_names(vec!["$from.name", "$to.name"]);
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    let budget = crate::query_resources::Budget::new(4096);
+    ctx.row_memory = Some(budget.clone());
+    ctx.project(rows(), &ir::ProjectionPlan::Values(names.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        ctx.pull_work.snapshot().raw_gets,
+        2,
+        "budgeted nodes stay lazy"
+    );
+    assert_eq!(budget.available(), 4096);
+    for successful_checks in 0..7 {
+        let mut deadline = ExecutionContext::new(&db, context::ParamBindings::default());
+        deadline.fail_deadline_after(successful_checks);
+        assert!(matches!(
+            deadline
+                .project(rows(), &ir::ProjectionPlan::Values(names.clone()))
+                .await,
+            Err(HelixDbError::QueryDeadlineExceeded)
+        ));
+    }
+
+    let to_key = keys::DataKey::Data {
+        scope: keys::scope::DataScope::LegacyUnscoped,
+        kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(to)),
+    }
+    .to_bytes();
+    db.inner_db().delete(to_key.clone()).await.unwrap();
+    let mut absent = ExecutionContext::new(&db, context::ParamBindings::default());
+    assert_eq!(
+        absent
+            .project(rows(), &ir::ProjectionPlan::Values(names.clone()))
+            .await
+            .unwrap(),
+        ExecutionValue::Scalars(vec![ExecutionScalar::Object(BTreeMap::from([(
+            "$from.name".to_string(),
+            DbPropertyValue::from("from")
+        ),]))])
+    );
+
+    db.inner_db()
+        .put(to_key, bytes::Bytes::from_static(b"corrupt node record"))
+        .await
+        .unwrap();
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    let error_first = ir::ProjectionPlan::Project(projection_items(vec![
+        ir::ProjectionItem::Expr {
+            alias: name("error"),
+            expr: ir::ExprPlan::new(Expr::param("missing")).unwrap(),
+        },
+        ir::ProjectionItem::Property {
+            source: name("$to.name"),
+            alias: name("to"),
+        },
+    ]));
+    assert!(matches!(
+        ctx.project(rows(), &error_first).await,
+        Err(HelixDbError::UnboundParameter { .. })
+    ));
+    for _ in 0..2 {
+        assert!(matches!(
+            ctx.project(rows(), &ir::ProjectionPlan::Values(names.clone()))
+                .await,
+            Err(HelixDbError::Encoding(_))
+        ));
+        ctx.project(
+            rows(),
+            &ir::ProjectionPlan::Values(property_names(vec!["$from.name"])),
+        )
+        .await
+        .unwrap();
+    }
+    let before = ctx.projection_read_snapshot().property_gets;
+    ctx.project(
+        rows(),
+        &ir::ProjectionPlan::Values(property_names(vec!["$from", "$to.$id"])),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        ctx.projection_read_snapshot().property_gets,
+        before,
+        "IDs skip node records"
+    );
+    db.close().await.unwrap();
+}
