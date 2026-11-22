@@ -720,12 +720,21 @@ enum Wake {
 ///
 /// # What does not scale
 ///
-/// A reclaim rewrites every sorted run and cannot be cancelled. Writes that
-/// start while it runs are not held up: it takes one compaction slot and
-/// the scheduler goes on compacting L0 tables on the others. But the sorted
-/// runs those compactions add are merged only once the reclaim has ended,
-/// so on a large store a long burst of writes during a reclaim leaves reads
-/// more runs to look through until then.
+/// A reclaim rewrites every sorted run, so what an idle store pays for a
+/// drop grows with the store, not with the rows the drop left: every stored
+/// byte is read and written again, however small the dropped index was.
+///
+/// A reclaim cannot be cancelled. Writes that start while it runs are not
+/// held up: it takes one compaction slot and the scheduler goes on
+/// compacting L0 tables on the others. But the sorted runs those compactions
+/// add are merged only once the reclaim has ended, so on a large store a
+/// long burst of writes during a reclaim leaves reads more runs to look
+/// through until then.
+///
+/// A store that is never idle is never reclaimed: its entries wait for the
+/// scheduler to rewrite the tables that hold their rows, the oldest sorted
+/// run last, which under a steady load can take many minutes and under a
+/// load too light to grow the newer runs much longer.
 pub(crate) struct RetireSupervisor {
     retirer: Arc<Retirer>,
     handle: JoinHandle<()>,
