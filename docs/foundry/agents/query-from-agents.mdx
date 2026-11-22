@@ -1,6 +1,6 @@
 ---
 title: "Query Foundry from your agents"
-description: "Have Claude Code, Cursor or your own agent answer questions from a loaded Helix Foundry ontology through the Helix MCP, with every claim cited to the record, row or quote it came from"
+description: "Have Claude Code or your own agent answer questions from a loaded Helix Foundry ontology through the Helix MCP, with every claim cited to the record, row or quote it came from"
 sidebarTitle: "Query from your agents"
 pageType: "Guide"
 ---
@@ -28,22 +28,6 @@ browser, with the account you use for Foundry, and acts with your role and right
 
     Then run `/mcp` in Claude Code and sign in.
   </Tab>
-  <Tab title="Cursor">
-    Add the server to `.cursor/mcp.json` in your project, or `~/.cursor/mcp.json` for
-    every project:
-
-```json
-{
-  "mcpServers": {
-    "helix": {
-      "url": "https://mcp.helix-db.com/mcp"
-    }
-  }
-}
-```
-
-    Then open Cursor's MCP settings and complete the browser sign-in for `helix`.
-  </Tab>
   <Tab title="Your own agent">
     Any MCP client that speaks streamable HTTP works, including an agent built on the
     [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk). Add
@@ -59,7 +43,7 @@ browser, with the account you use for Foundry, and acts with your role and right
 
 ## Ask a question
 
-A typical agent makes four calls.
+A typical agent works in four steps.
 
 <Steps>
   <Step title="Find the ontology">
@@ -134,8 +118,8 @@ you under [Access](/foundry/workspace/access). A service credential needs
 
 ## On your own computer
 
-Foundry's open-source install serves the same tools at `http://localhost:8081/mcp`,
-on this computer's loopback only. It has no sign-in: the agent sends the install's
+Foundry's open-source install serves the same query tools at
+`http://localhost:8081/mcp`, on this computer's loopback only. It has no sign-in: the agent sends the install's
 owner token as a bearer. Load it into your environment without printing it, from the
 repository's root:
 
@@ -180,7 +164,7 @@ Hosted Foundry doesn't serve these HTTP routes yet. Use the MCP.
 
 <CardGroup cols={2}>
   <Card title="Use cases on the sample company" icon="lightbulb" href="/foundry/use-cases/sample-company">
-    Three questions worth money or time, and how an agent asks them.
+    Four questions worth money or time, and how an agent asks them.
   </Card>
   <Card title="Security and data handling" icon="shield" href="/foundry/reference/security-and-data">
     What Foundry stores, and what reaches AI models.
