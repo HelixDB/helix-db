@@ -77,8 +77,7 @@
 //! A cleanup an older image had started row by row, before the store was
 //! admitted, is handed to an entry at its next step on an admitted store,
 //! whatever it had deleted: the entry covers what is left. Rows are deleted
-//! one by one in two cases only, and each family's cleanup says so where it
-//! does it:
+//! one by one in three cases only, and each says so where it does it:
 //!
 //! - **A store that does not admit entries.** Images that do not know the
 //!   entries can still open it, so nothing but the drop would remove the
@@ -89,6 +88,19 @@
 //!   by one. The abort of its build deletes the directory and the
 //!   generation-keyed rows the build added, one by one, and hands the
 //!   legacy rows back untouched.
+//! - **An abandoned attempt of a bulk vector build.** A process that finds
+//!   a build at the bulk stage and holds no graph for it deletes what the
+//!   attempt stored, applied state first and then the physical rows, before
+//!   the build goes on (see "Crashes" in the module documentation of
+//!   `index_lifecycle/vector/driver/bulk.rs`). The generation is still
+//!   building and will be built again under the same physical id, so
+//!   it cannot be given an entry: the cross-check would refuse one, and a
+//!   filter armed for it would discard the rows of the next attempt. On an
+//!   admitted store too, that deletion removes every row itself, the lanes a
+//!   filter may match included. An abort that arrives while it runs, or
+//!   while an attempt writes, goes through the ordinary abort: it deletes
+//!   the rows no filter matches and its entry covers whatever else the
+//!   attempts stored, since they write only the rows a serial build writes.
 //!
 //! Whether a drop leaves an entry depends on the store alone, not on the
 //! writer that runs it. A writer that runs no compaction worker in its own
