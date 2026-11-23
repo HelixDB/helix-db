@@ -840,6 +840,65 @@ async fn an_entry_whose_rows_are_gone_retires_at_the_first_pass_after_a_reopen()
     db.close().await.expect("the writer closes");
 }
 
+/// Proves the background task reports a pass that fails and tries again by
+/// itself: the handle shows the failure with what it failed with, nothing is
+/// armed meanwhile, and the next pass, which nothing but the task's own
+/// timer starts, arms the entry and is reported as having read the store.
+#[test]
+fn a_background_pass_that_fails_is_reported_and_tried_again() {
+    isolated(|| async {
+        let db = open_quiet(ProcessLocalDatabaseToken::new("dropped-pass-failure").unwrap()).await;
+        db.wait_for_background_migrations().await;
+        for seed in 0..24 {
+            add(&db, "Gone", seed).await;
+        }
+        create_index(&db, "Gone").await;
+        drop_index(&db, "Gone").await;
+        assert_eq!(stored_entries(&db).await.len(), 1);
+        assert_eq!(db.dropped_index_storage().last_pass, None);
+
+        failpoints::inject_once(IndexOutboxFailpoint::DroppedEntryArmBefore).unwrap();
+        // Idle for longer than the contract runs: the task never reclaims.
+        retirer(&db)
+            .await
+            .run_in_background(idle_pace(Duration::from_secs(3_600)));
+        let (at, since, error) = tokio::time::timeout(WAIT, async {
+            loop {
+                match db.dropped_index_storage().last_pass {
+                    Some(crate::DroppedStoragePass::Failed { at, since, error }) => {
+                        break (at, since, error);
+                    }
+                    Some(crate::DroppedStoragePass::Completed { .. }) | None => {
+                        tokio::time::sleep(POLL).await;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("the task's first pass fails");
+        assert!(failpoints::was_triggered());
+        assert_eq!(at, since, "the first failure of a row");
+        assert!(!error.is_empty());
+        assert_eq!(writer(&db).dropped().armed(), vec![]);
+        assert_eq!(stored_entries(&db).await.len(), 1);
+
+        // No operation commits and no table changes: the task's retry timer
+        // alone starts the pass that works.
+        tokio::time::timeout(WAIT, async {
+            while !matches!(
+                db.dropped_index_storage().last_pass,
+                Some(crate::DroppedStoragePass::Completed { .. })
+            ) {
+                tokio::time::sleep(POLL).await;
+            }
+        })
+        .await
+        .expect("the task tries again by itself");
+        assert_eq!(writer(&db).dropped().armed().len(), 1);
+        db.close().await.expect("the writer closes");
+    });
+}
+
 /// Proves a pass that fails at each point around arming and deleting leaves
 /// a store the next pass, of this writer or of the next, finishes: no entry
 /// is deleted before its rows are gone, and none is left once they are.
@@ -3865,8 +3924,11 @@ async fn supersede(
     })
     .await
     .expect("a writer opens");
+    // A writer opens with an empty registry: a pass arms whatever entry is
+    // left before the compaction that is to discard its rows.
+    pass(&db).await;
     compact_every_table(&db).await;
-    assert_eq!(pass(&db).await, DroppedIndexStorage::default());
+    assert_eq!(clockless(pass(&db).await), DroppedIndexStorage::default());
     assert_eq!(stored_entries(&db).await, vec![]);
     let owned = || async {
         rows(writer(&db).db())
