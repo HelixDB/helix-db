@@ -4373,6 +4373,17 @@ impl HelixDB {
         &self,
         definition: ValidatedDynamicIndexDefinition,
     ) -> Result<()> {
+        self.install_index_in_scope_for_tests(DataScope::LegacyUnscoped, definition)
+            .await
+    }
+
+    /// Creates `definition` in `scope` and waits until it is Active.
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) async fn install_index_in_scope_for_tests(
+        &self,
+        scope: DataScope,
+        definition: ValidatedDynamicIndexDefinition,
+    ) -> Result<()> {
         let HelixStorage::Writer(writer) = self.storage() else {
             return Err(HelixDbError::WriterModeRequired {
                 actual: self.mode().as_str(),
@@ -4380,23 +4391,19 @@ impl HelixDB {
         };
         let receipt = index_lifecycle::lifecycle::create_index_operation_from_current_source(
             writer.db(),
-            DataScope::LegacyUnscoped,
+            scope,
             definition,
             ir::IndexCreateMode::IfNotExists,
         )
         .await?;
         let Some(operation_id) = receipt.operation_id() else {
-            self.refresh_runtime_catalog(DataScope::LegacyUnscoped)
-                .await?;
+            self.refresh_runtime_catalog(scope).await?;
             return Ok(());
         };
         self.wake_index_worker().await;
         tokio::time::timeout(std::time::Duration::from_secs(60), async {
             loop {
-                match self
-                    .get_index_operation(DataScope::LegacyUnscoped, operation_id)
-                    .await?
-                {
+                match self.get_index_operation(scope, operation_id).await? {
                     index_lifecycle::IndexOperationStatus::Succeeded { .. } => break,
                     index_lifecycle::IndexOperationStatus::Blocked { .. }
                     | index_lifecycle::IndexOperationStatus::Aborted { .. } => {
@@ -4416,8 +4423,7 @@ impl HelixDB {
         .map_err(|_| {
             HelixDbError::InvariantViolation("test index lifecycle timed out".to_string())
         })??;
-        self.refresh_runtime_catalog(DataScope::LegacyUnscoped)
-            .await
+        self.refresh_runtime_catalog(scope).await
     }
 
     /// Returns the descriptor-bound managed vector cache registry.

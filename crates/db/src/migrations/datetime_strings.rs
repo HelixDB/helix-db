@@ -19,9 +19,24 @@
 //!    building) is maintained exactly as for a user write, and a replayed batch
 //!    is a no-op because its guards no longer match.
 //!
+//! A property a text or vector index of its scope covers (a Building or Active
+//! generation whose indexed property it is, of its element kind and label)
+//! keeps its strings: those indexes accept no datetime, so converting it would
+//! fail every batch holding it (see
+//! [`crate::index_lifecycle::mutation_catalog::MutationIndexCatalog::datetime_refusal`]).
+//! Detection checks the scope's indexes once it has a verdict, and every
+//! conversion batch checks them again before it writes, dropping a candidate
+//! an index now covers. So a job stored mid-conversion by a binary that did not
+//! check (its candidates still name such a property), or an index created after
+//! detection, ends with the property left as stored rather than a batch failing
+//! forever. An index created between a batch's check and its write fails that
+//! one batch, which the worker retries and the retry's check skips. Values a
+//! batch converted before the index appeared stay converted.
+//!
 //! Progress is one JSON row in the unscoped metadata namespace, committed after
-//! every batch, so the job resumes after a restart. Older binaries never read
-//! that row. A value whose conversion would collide in a unique index keeps its
+//! every batch, so the job resumes after a restart. Binaries before the job
+//! never read that row; binaries with the job but without the index check
+//! cannot decode a row that reports a property skipped for an index. A value whose conversion would collide in a unique index keeps its
 //! string and is counted, as is every skipped property.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -43,6 +58,8 @@ use crate::encoding::property::property_value::PropertyValue;
 use crate::encoding::property::{decode_properties, Property};
 use crate::encoding::v1::keys::{Key, KeyPrefix};
 use crate::error::{HelixDbError, Result};
+use crate::index_lifecycle::mutation_catalog::{DatetimeRefusingIndex, MutationIndexCatalog};
+use crate::index_lifecycle::IndexElementKind;
 use crate::{HelixDB, HelixStorage};
 
 /// Unscoped metadata row holding the job.
@@ -71,6 +88,13 @@ impl Element {
         match self {
             Self::Node => KeyPrefix::NodeProperty.as_slice(),
             Self::Edge => KeyPrefix::EdgePropertyById.as_slice(),
+        }
+    }
+
+    const fn index_kind(self) -> IndexElementKind {
+        match self {
+            Self::Node => IndexElementKind::Node,
+            Self::Edge => IndexElementKind::Edge,
         }
     }
 }
@@ -127,6 +151,20 @@ pub(crate) enum SkipReason {
     NotRfc3339,
     /// An RFC3339 string finer than milliseconds; converting it would lose digits.
     SubMillisecond,
+    /// A text index covers the property; it indexes strings, never datetimes.
+    TextIndexed,
+    /// A vector index covers the property; it indexes numeric arrays, never
+    /// datetimes.
+    VectorIndexed,
+}
+
+impl From<DatetimeRefusingIndex> for SkipReason {
+    fn from(index: DatetimeRefusingIndex) -> Self {
+        match index {
+            DatetimeRefusingIndex::Text => Self::TextIndexed,
+            DatetimeRefusingIndex::Vector => Self::VectorIndexed,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,7 +190,10 @@ pub(crate) struct SkippedProperty {
     pub(crate) scope: ScopeCursor,
     pub(crate) property: PropertyKey,
     pub(crate) reason: SkipReason,
-    pub(crate) rfc3339_strings: u64,
+    /// Convertible RFC3339 strings detection counted; `None` for a property
+    /// skipped during conversion, whose stored job keeps no count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) rfc3339_strings: Option<u64>,
 }
 
 /// Cumulative outcome across every finished scope and the current one.
@@ -297,6 +338,32 @@ fn observe(tracked: &mut BTreeMap<PropertyKey, Tracked>, key: PropertyKey, value
         (Verdict::Datetimes, Ok(())) if is_string => Verdict::Convertible,
         (verdict, Ok(())) => verdict,
     };
+}
+
+/// Why the scope's indexes refuse a datetime in `property`, if they do.
+fn index_refusal(
+    catalog: &MutationIndexCatalog,
+    property: &PropertyKey,
+) -> Result<Option<SkipReason>> {
+    Ok(catalog
+        .datetime_refusal(
+            property.element.index_kind(),
+            &property.label,
+            &property.name,
+        )?
+        .map(SkipReason::from))
+}
+
+fn warn_skipped(skipped: &SkippedProperty) {
+    tracing::warn!(
+        scope = ?skipped.scope,
+        element = ?skipped.property.element,
+        label = %skipped.property.label,
+        property = %skipped.property.name,
+        reason = ?skipped.reason,
+        rfc3339_strings = skipped.rfc3339_strings,
+        "datetime string migration leaves a property with RFC3339 strings as stored"
+    );
 }
 
 /// Rows of one element after `resume_after`, at most `limit` of them.
@@ -459,26 +526,26 @@ async fn detect(
             report,
         });
     }
+    let catalog = MutationIndexCatalog::load(store, data_scope).await?;
     let mut candidates = Vec::new();
     for (property, entry) in tracked {
-        match entry.verdict {
+        let verdict = match entry.verdict {
+            Verdict::Convertible => {
+                index_refusal(&catalog, &property)?.map_or(Verdict::Convertible, Verdict::Skipped)
+            }
+            verdict @ (Verdict::Datetimes | Verdict::Skipped(_)) => verdict,
+        };
+        match verdict {
             Verdict::Convertible => candidates.push(property),
             Verdict::Skipped(reason) if entry.rfc3339_strings > 0 => {
-                tracing::warn!(
-                    scope = ?scope,
-                    element = ?property.element,
-                    label = %property.label,
-                    property = %property.name,
-                    reason = ?reason,
-                    rfc3339_strings = entry.rfc3339_strings,
-                    "datetime string migration leaves a property with RFC3339 strings as stored"
-                );
-                report.skip(SkippedProperty {
+                let skipped = SkippedProperty {
                     scope,
                     property,
                     reason,
-                    rfc3339_strings: entry.rfc3339_strings,
-                });
+                    rfc3339_strings: Some(entry.rfc3339_strings),
+                };
+                warn_skipped(&skipped);
+                report.skip(skipped);
             }
             Verdict::Datetimes | Verdict::Skipped(_) => {}
         }
@@ -595,6 +662,28 @@ async fn convert(
     tuning: MigrationTuning,
 ) -> Result<Job> {
     let data_scope = scope.data_scope();
+    // Before the rows, so a candidate an index covers is dropped even on the
+    // batch that ends the element.
+    let catalog = MutationIndexCatalog::load(store, data_scope).await?;
+    let mut kept = Vec::with_capacity(candidates.len());
+    for property in candidates {
+        let Some(reason) = index_refusal(&catalog, &property)? else {
+            kept.push(property);
+            continue;
+        };
+        let skipped = SkippedProperty {
+            scope,
+            property,
+            reason,
+            rfc3339_strings: None,
+        };
+        warn_skipped(&skipped);
+        report.skip(skipped);
+    }
+    let candidates = kept;
+    if candidates.is_empty() {
+        return finish_scope(store, scope, report).await;
+    }
     let rows = read_rows(store, data_scope, element, resume_after.as_deref(), tuning).await?;
     let Some((last, _)) = rows.last() else {
         if element == Element::Node {
