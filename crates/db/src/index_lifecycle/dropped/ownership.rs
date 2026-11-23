@@ -474,6 +474,186 @@ mod tests {
         }
     }
 
+    /// Every scoped key the store can hold, encoded by its own encoder, is
+    /// matched under its generation's prefix exactly when its kind is owned
+    /// by a generation: a new key kind, or a change to an encoder, cannot
+    /// move rows into or out of a dropped generation's reach unseen.
+    #[test]
+    fn every_scoped_key_encoder_agrees_with_the_filter() {
+        use std::collections::BTreeSet;
+
+        use crate::encoding::v2::keys::wire_fixtures;
+
+        let fixtures = wire_fixtures::scoped_fixtures();
+        // Every record kind a generation owns has a fixture, so a kind that
+        // becomes owned without one fails here, before its encoder can go
+        // unchecked. A kind without a fixture is one no generation owns.
+        let encoded = fixtures
+            .iter()
+            .map(|(_, key)| key.record_kind().as_u8())
+            .collect::<BTreeSet<_>>();
+        for kind in (0..=u8::MAX).filter_map(|kind| RecordKind::try_from_u8(kind).ok()) {
+            assert!(
+                encoded.contains(&kind.as_u8())
+                    || RowOwner::of_record_kind(kind) == RowOwner::Never,
+                "{kind:?} is owned by a generation and has no encoder fixture"
+            );
+        }
+        let mut owned = BTreeSet::new();
+        for scope in SCOPES {
+            for (name, key) in fixtures.clone() {
+                let kind = key.record_kind();
+                let encoded = ManagedIndexKey::Data { scope, kind: key }.to_bytes();
+                match RowOwner::of_record_kind(kind) {
+                    RowOwner::Generation => {
+                        let row = owned_row(&encoded)
+                            .unwrap_or_else(|| panic!("{name}: a generation-keyed row is owned"));
+                        assert_eq!(
+                            row.owner,
+                            OwnerKey::Generation {
+                                scope,
+                                index_id: wire_fixtures::index_id().get(),
+                                generation: wire_fixtures::generation().get(),
+                            },
+                            "{name}"
+                        );
+                        assert_eq!(
+                            row.prefix,
+                            ManagedIndexKey::data_prefix(
+                                scope,
+                                ScopedKey::generation_prefix(
+                                    kind,
+                                    wire_fixtures::index_id(),
+                                    wire_fixtures::generation(),
+                                ),
+                            )
+                            .as_ref(),
+                            "{name}"
+                        );
+                        owned.insert(kind.as_u8());
+                    }
+                    RowOwner::Never => assert_eq!(owned_row(&encoded), None, "{name}"),
+                    RowOwner::PhysicalIndex => unreachable!("no record kind names a physical id"),
+                }
+            }
+        }
+        // All eleven generation-keyed kinds were encoded and matched.
+        assert_eq!(
+            owned,
+            GENERATION_RECORD_KINDS
+                .into_iter()
+                .map(RecordKind::as_u8)
+                .collect::<BTreeSet<_>>()
+        );
+        assert_eq!(owned.len(), 11);
+    }
+
+    /// Every vector key the store can hold, encoded by its own encoder, is
+    /// matched under its physical index's lane prefix exactly when its lane
+    /// is one compactions may discard, both of them, and never in the core
+    /// lane.
+    #[test]
+    fn every_vector_key_encoder_agrees_with_the_filter() {
+        use std::collections::BTreeSet;
+
+        use crate::encoding::v2::keys::indexes::vector::*;
+        use crate::encoding::v2::keys::{DataKey, DataKeyKind};
+        use crate::encoding::v2::legacy::vector::transaction_guard::LegacyVectorTxnGuardKey;
+
+        const ID: u64 = 0x0102_0304_0506_0708;
+        const NODE: u64 = 0x2122_2324_2526_2728;
+        const OTHER: u64 = 0x3132_3334_3536_3738;
+        const ORDER: u64 = 0x1112_1314_1516_1718;
+        const LAYER: u16 = 0x4243;
+        // No wildcard: a vector key variant added to the enum does not
+        // compile until it is given a place here, and a fixture below.
+        fn variant(key: &VectorKey) -> usize {
+            match key {
+                VectorKey::IndexMetadata(_) => 0,
+                VectorKey::IndexPrefix(_) => 1,
+                VectorKey::TxnGuard(_) => 2,
+                VectorKey::Layer0Neighbors(_) => 3,
+                VectorKey::VectorPrefix(_) => 4,
+                VectorKey::Vector(_) => 5,
+                VectorKey::SimHashDirectoryPrefix(_) => 6,
+                VectorKey::SimHashDirectory(_) => 7,
+                VectorKey::EntryCandidatePrefix(_) => 8,
+                VectorKey::EntryCandidateSorted(_) => 9,
+                VectorKey::EntryCandidateNode(_) => 10,
+                VectorKey::MemoryPrefix(_) => 11,
+                VectorKey::L0Prefix(_) => 12,
+                VectorKey::UpperNeighbors(_) => 13,
+                VectorKey::SimHash(_) => 14,
+                VectorKey::UpperVector(_) => 15,
+                VectorKey::ReverseEdgePrefix(_) => 16,
+                VectorKey::ReverseEdge(_) => 17,
+            }
+        }
+        let keys = [
+            VectorKey::IndexMetadata(VectorIndexMetadataKey::new(ID)),
+            VectorKey::IndexPrefix(VectorIndexPrefixKey::new(ID)),
+            VectorKey::TxnGuard(LegacyVectorTxnGuardKey::new(ID)),
+            VectorKey::Layer0Neighbors(VectorLayer0NeighborsKey::new(ID, NODE)),
+            VectorKey::VectorPrefix(VectorItemPrefixKey::new(ID)),
+            VectorKey::Vector(VectorItemKey::new(ID, ORDER, NODE)),
+            VectorKey::SimHashDirectoryPrefix(VectorSimHashDirectoryPrefixKey::new(ID)),
+            VectorKey::SimHashDirectory(VectorSimHashDirectoryKey::new(ID, ORDER, NODE)),
+            VectorKey::EntryCandidatePrefix(VectorEntryCandidatePrefixKey::new(ID)),
+            VectorKey::EntryCandidateSorted(VectorEntryCandidateKey::new(ID, LAYER, NODE)),
+            VectorKey::EntryCandidateNode(VectorEntryCandidateNodeKey::new(ID, NODE)),
+            VectorKey::MemoryPrefix(VectorMemoryPrefixKey::new(ID)),
+            VectorKey::L0Prefix(VectorL0PrefixKey::new(ID)),
+            VectorKey::UpperNeighbors(VectorUpperNeighborsKey::new(ID, LAYER, NODE)),
+            VectorKey::SimHash(VectorSimHashKey::new(ID, NODE)),
+            VectorKey::UpperVector(VectorUpperVectorKey::new(ID, NODE)),
+            VectorKey::ReverseEdgePrefix(VectorReverseEdgePrefixKey::new(ID, NODE)),
+            VectorKey::ReverseEdge(VectorReverseEdgeKey::new(ID, NODE, LAYER, OTHER)),
+        ];
+        assert_eq!(
+            keys.iter().map(variant).collect::<BTreeSet<_>>(),
+            (0..18).collect::<BTreeSet<_>>()
+        );
+        let mut discarded = BTreeSet::new();
+        for scope in SCOPES {
+            for key in keys {
+                assert_eq!(key.index_id(), ID);
+                let lane = key.storage_lane();
+                let encoded = DataKey::Data {
+                    scope,
+                    kind: DataKeyKind::Vector(key),
+                }
+                .to_bytes();
+                match RowOwner::of_vector_lane(lane) {
+                    RowOwner::PhysicalIndex => {
+                        let row = owned_row(&encoded)
+                            .unwrap_or_else(|| panic!("{key:?}: a lane row is owned"));
+                        assert_eq!(
+                            row.owner,
+                            OwnerKey::PhysicalIndex {
+                                scope,
+                                physical_index_id: ID,
+                            },
+                            "{key:?}"
+                        );
+                        assert_eq!(
+                            row.prefix,
+                            scoped(scope, &lane.prefix_key(ID).to_bytes()).as_slice(),
+                            "{key:?}"
+                        );
+                        discarded.insert(lane.scan_prefix().to_vec());
+                    }
+                    RowOwner::Never => {
+                        assert_eq!(lane, VectorStorageLane::Core, "{key:?}");
+                        assert_eq!(owned_row(&encoded), None, "{key:?}");
+                    }
+                    RowOwner::Generation => unreachable!("no lane is keyed by generation"),
+                }
+            }
+        }
+        // Both lanes compactions may discard, and no other.
+        assert_eq!(discarded, BTreeSet::from([vec![0xF0], vec![0xF1]]));
+    }
+
     #[test]
     fn global_rows_and_truncated_keys_are_never_matched() {
         let entry = ManagedIndexKey::Global {

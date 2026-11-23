@@ -789,7 +789,7 @@ impl<'a> KeyDecoder<'a> {
 }
 
 #[cfg(test)]
-mod wire_fixtures {
+pub(crate) mod wire_fixtures {
     use std::fmt::Write;
 
     use super::*;
