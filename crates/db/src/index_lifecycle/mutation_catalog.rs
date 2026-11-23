@@ -42,6 +42,16 @@ pub(super) enum MutationCatalogEntry<'a> {
     },
 }
 
+/// An index family whose source projection accepts no datetime value (see
+/// [`MutationIndexCatalog::datetime_refusal`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DatetimeRefusingIndex {
+    /// A text index: strings and string lists only.
+    Text,
+    /// A vector index: numeric arrays only.
+    Vector,
+}
+
 /// Closed family projections derived from one serializable catalog range read.
 pub(crate) struct MutationIndexCatalog {
     active: ActiveMutationCatalog,
@@ -424,6 +434,46 @@ impl MutationIndexCatalog {
         })
     }
 
+    /// The index that fails a write storing a datetime in `property` of
+    /// `label`, if one does.
+    ///
+    /// Answers from the routes ordinary writes take, so it names exactly the
+    /// Building and Active text and vector generations whose indexed property
+    /// this is: their source projections accept no datetime (text takes
+    /// strings and string lists, a vector numeric arrays), so the write fails
+    /// with `invalid_index_source_data` or a query error. Aborting, Dropping
+    /// and Dropped generations receive no mutation work. A text or vector
+    /// tenant property partitions by any non-null value, and secondary
+    /// indexes order and compare datetimes, so neither refuses one.
+    pub(crate) fn datetime_refusal(
+        &self,
+        element_kind: super::IndexElementKind,
+        label: &str,
+        property: &str,
+    ) -> Result<Option<DatetimeRefusingIndex>> {
+        let Some(targets) = self.routes.property_targets(element_kind, label, property) else {
+            return Ok(None);
+        };
+        targets
+            .iter()
+            .map(|&target| {
+                let (indexed, index) = match target {
+                    MutationRouteTarget::Secondary(_) => return Ok(None),
+                    MutationRouteTarget::Vector(ordinal) => (
+                        self.vector.queued_target(ordinal)?.definition.property(),
+                        DatetimeRefusingIndex::Vector,
+                    ),
+                    MutationRouteTarget::TextBuilding(_) | MutationRouteTarget::TextActive(_) => (
+                        self.text.queued_target(target)?.definition.property(),
+                        DatetimeRefusingIndex::Text,
+                    ),
+                };
+                Ok((indexed.as_str() == property).then_some(index))
+            })
+            .find_map(Result::transpose)
+            .transpose()
+    }
+
     /// Transfers every family view into the request-owned mutation context.
     pub(crate) fn into_components(
         self,
@@ -679,6 +729,138 @@ mod tests {
             assert_eq!(active.handle(handle.identity()), Some(handle));
         }
         transaction.rollback();
+        db.close().await.expect("fixture database closes");
+    }
+
+    /// Only the indexed property of a Building or Active text or vector
+    /// generation of the same element kind and label refuses a datetime; a
+    /// text tenant property, a secondary index and every retiring or retired
+    /// state do not.
+    #[tokio::test]
+    async fn datetime_refusals_follow_mutation_routing_states() {
+        let scope = DataScope::LegacyUnscoped;
+        let db = Db::builder("mutation-catalog-datetime", Arc::new(InMemory::new()))
+            .build()
+            .await
+            .expect("fixture database opens");
+        let text_tenant = |label: &str| -> ValidatedDynamicIndexDefinition {
+            TextIndexDefinition::new_node(label, "body")
+                .and_then(|definition| definition.with_tenant_property("tenant"))
+                .expect("text fixture validates")
+                .try_into()
+                .expect("text fixture enters V2")
+        };
+        let edge_text: ValidatedDynamicIndexDefinition =
+            TextIndexDefinition::new_edge("Edge", "body")
+                .expect("edge text fixture validates")
+                .try_into()
+                .expect("edge text fixture enters V2");
+        let active = |record: IndexRecordV2| {
+            record
+                .transition(IndexStateTransition::Activate)
+                .expect("fixture activates")
+        };
+        let dropping = |record: IndexRecordV2| {
+            active(record)
+                .transition(IndexStateTransition::BeginDrop {
+                    drop_operation_id: IndexOperationId::new_v4(),
+                })
+                .expect("fixture begins dropping")
+        };
+        let aborting = |record: IndexRecordV2| {
+            record
+                .transition(IndexStateTransition::BeginAbort)
+                .expect("fixture begins aborting")
+        };
+        let records = [
+            building_record(1, text_tenant("TextBuilding")),
+            active(building_record(2, text_tenant("TextActive"))),
+            aborting(building_record(3, text("TextAborting"))),
+            dropping(building_record(4, text("TextDropping"))),
+            dropping(building_record(5, text("TextDropped")))
+                .transition(IndexStateTransition::CompleteDrop)
+                .expect("fixture drops"),
+            aborting(building_record(6, text("TextAbortDropped")))
+                .transition(IndexStateTransition::CompleteAbort)
+                .expect("fixture completes abort"),
+            building_record(7, vector("VectorBuilding")),
+            active(building_record(8, vector("VectorActive"))),
+            dropping(building_record(9, vector("VectorDropping"))),
+            active(building_record(10, secondary("SecondaryActive"))),
+            active(building_record(11, edge_text)),
+        ];
+        let seed = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .expect("seed transaction opens");
+        for record in &records {
+            seed.put(
+                ManagedIndexKey::Data {
+                    scope,
+                    kind: ScopedKey::index_record(record.identity().clone()),
+                }
+                .to_bytes(),
+                encode_index_record(record),
+            )
+            .expect("canonical record stages");
+        }
+        seed.commit().await.expect("canonical records commit");
+
+        let catalog = MutationIndexCatalog::load(&db, scope)
+            .await
+            .expect("catalog loads");
+        let node = super::super::IndexElementKind::Node;
+        let edge = super::super::IndexElementKind::Edge;
+        let cases = [
+            (
+                node,
+                "TextBuilding",
+                "body",
+                Some(DatetimeRefusingIndex::Text),
+            ),
+            (
+                node,
+                "TextActive",
+                "body",
+                Some(DatetimeRefusingIndex::Text),
+            ),
+            (node, "TextBuilding", "tenant", None),
+            (node, "TextActive", "tenant", None),
+            (node, "TextActive", "other", None),
+            (node, "TextAborting", "body", None),
+            (node, "TextDropping", "body", None),
+            (node, "TextDropped", "body", None),
+            (node, "TextAbortDropped", "body", None),
+            (
+                node,
+                "VectorBuilding",
+                "embedding",
+                Some(DatetimeRefusingIndex::Vector),
+            ),
+            (
+                node,
+                "VectorActive",
+                "embedding",
+                Some(DatetimeRefusingIndex::Vector),
+            ),
+            (node, "VectorActive", "other", None),
+            (node, "VectorDropping", "embedding", None),
+            (node, "SecondaryActive", "value", None),
+            (node, "Unindexed", "body", None),
+            // Element kind and label must both match.
+            (edge, "Edge", "body", Some(DatetimeRefusingIndex::Text)),
+            (node, "Edge", "body", None),
+            (edge, "TextActive", "body", None),
+        ];
+        for (kind, label, property, expected) in cases {
+            assert_eq!(
+                catalog
+                    .datetime_refusal(kind, label, property)
+                    .expect("refusal resolves"),
+                expected,
+                "{kind:?} {label}.{property}"
+            );
+        }
         db.close().await.expect("fixture database closes");
     }
 }

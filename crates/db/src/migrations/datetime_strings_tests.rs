@@ -13,13 +13,15 @@ use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 
 use super::*;
-use crate::config::{self, DbConfig, SecondaryIndexDefinition};
+use crate::config::{self, DbConfig, SecondaryIndexDefinition, TextIndexDefinition};
 use crate::encoding::indexes::range::RangeIndexDirection;
 use crate::encoding::v2::keys::{ManagedIndexKey, ScopedKey, SecondaryEntryLane};
 use crate::encoding::v2::values::property::range_index_value::{
     project_range_value, RangeValueProjection,
 };
-use crate::index_lifecycle::{ActiveIndexHandle, ValidatedSecondaryIndexDefinition};
+use crate::index_lifecycle::{
+    ActiveIndexHandle, ValidatedDynamicIndexDefinition, ValidatedSecondaryIndexDefinition,
+};
 
 tokio::task_local! {
     /// Holds a conversion batch between its reads and its write: the batch
@@ -251,8 +253,8 @@ async fn converts_only_properties_whose_values_are_all_datetimes() {
     assert_eq!(
         skipped,
         [
-            ("Mixed", "at", SkipReason::MixedTypes, 1),
-            ("Note", "text", SkipReason::NotRfc3339, 1),
+            ("Mixed", "at", SkipReason::MixedTypes, Some(1)),
+            ("Note", "text", SkipReason::NotRfc3339, Some(1)),
         ],
         "a skipped property is reported only when it holds convertible strings"
     );
@@ -1172,4 +1174,580 @@ async fn converting_several_indexed_properties_of_one_row_maintains_each_index()
         assert_indexes_match_rows(&db, property, &probes).await;
     }
     db.close().await.unwrap();
+}
+
+// Properties a text or vector index covers.
+
+fn text_index(label: &str, property: &str) -> ValidatedDynamicIndexDefinition {
+    TextIndexDefinition::new_node(label, property)
+        .unwrap()
+        .try_into()
+        .unwrap()
+}
+
+/// Nodes of `label` a text search of `property` for `text` finds, by name.
+async fn text_hits(
+    db: &HelixDB,
+    scope: DataScope,
+    label: &str,
+    property: &str,
+    text: &str,
+) -> Vec<String> {
+    let response = db
+        .query_scoped(
+            QueryRequest::read(
+                read_batch()
+                    .var_as(
+                        "hits",
+                        g().text_search_nodes(label, property, text, 100, None)
+                            .values(vec!["name"]),
+                    )
+                    .returning(["hits"]),
+            ),
+            scope,
+        )
+        .await
+        .unwrap();
+    let mut names = response["hits"]
+        .as_array()
+        .unwrap_or_else(|| panic!("text search returned {response}"))
+        .iter()
+        .map(|hit| hit["name"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+/// One skipped property: scope, element, label, name, reason and count.
+type Skip<'a> = (
+    ScopeCursor,
+    Element,
+    &'a str,
+    &'a str,
+    SkipReason,
+    Option<u64>,
+);
+
+fn skips(report: &Report) -> Vec<Skip<'_>> {
+    report
+        .skipped_properties
+        .iter()
+        .map(|skip| {
+            (
+                skip.scope,
+                skip.property.element,
+                skip.property.label.as_str(),
+                skip.property.name.as_str(),
+                skip.reason,
+                skip.rfc3339_strings,
+            )
+        })
+        .collect()
+}
+
+fn cursor(scope: DataScope) -> ScopeCursor {
+    match scope {
+        DataScope::LegacyUnscoped => ScopeCursor::Unscoped,
+        DataScope::Tenant(tenant) => ScopeCursor::Tenant(tenant.as_u128()),
+    }
+}
+
+const AT: &str = "2026-01-01T00:00:00Z";
+const AT_DATETIME: &str = "2026-01-01T00:00:00.000Z";
+
+/// Two `Doc` nodes with an RFC3339 `at` and `until` in `scope`.
+async fn add_docs(db: &HelixDB, scope: DataScope) {
+    for name in ["d1", "d2"] {
+        add_node(
+            db,
+            scope,
+            "Doc",
+            vec![("name", s(name)), ("at", s(AT)), ("until", s(AT))],
+        )
+        .await;
+    }
+}
+
+/// A text index keeps exactly the property it covers in exactly its scope,
+/// element kind and label as stored, reported, and still searchable; every
+/// other convertible property converts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_text_indexed_property_keeps_its_strings_in_its_scope_kind_and_label() {
+    let db = open(2).await;
+    let u = DataScope::LegacyUnscoped;
+    let a = tenant("01HZY3VQ6Y5Q7Z9M8K2N4P6R8T");
+    let b = tenant("01HZY3VQ6Y5Q7Z9M8K2N4P6R9V");
+    for scope in [u, a, b] {
+        add_docs(&db, scope).await;
+        // The same property name on another label.
+        add_node(&db, scope, "Event", vec![("name", s("e")), ("at", s(AT))]).await;
+    }
+    db.query(QueryRequest::write(
+        write_batch()
+            .var_as("x", g().add_n("Person", vec![("name", s("x"))]))
+            .var_as("y", g().add_n("Person", vec![("name", s("y"))]))
+            .var_as(
+                "links",
+                g().n(NodeRef::var("x"))
+                    .add_e("LINKS", NodeRef::var("y"), vec![("since", s(AT))]),
+            ),
+    ))
+    .await
+    .unwrap();
+    // Unscoped: `Doc.at` on nodes, `LINKS.since` on edges, and an edge index
+    // named like the node property `Doc.until`, which covers no node.
+    for definition in [
+        text_index("Doc", "at"),
+        TextIndexDefinition::new_edge("LINKS", "since")
+            .unwrap()
+            .try_into()
+            .unwrap(),
+        TextIndexDefinition::new_edge("Doc", "until")
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    ] {
+        db.install_index_for_tests(definition).await.unwrap();
+    }
+    // Tenant `a`: `Doc.until` only. Tenant `b`: none.
+    db.install_index_in_scope_for_tests(a, text_index("Doc", "until"))
+        .await
+        .unwrap();
+
+    let report = run_to_completion(&db).await;
+
+    let node = Element::Node;
+    assert_eq!(
+        skips(&report),
+        [
+            (
+                cursor(u),
+                node,
+                "Doc",
+                "at",
+                SkipReason::TextIndexed,
+                Some(2)
+            ),
+            (
+                cursor(u),
+                Element::Edge,
+                "LINKS",
+                "since",
+                SkipReason::TextIndexed,
+                Some(1)
+            ),
+            (
+                cursor(a),
+                node,
+                "Doc",
+                "until",
+                SkipReason::TextIndexed,
+                Some(2)
+            ),
+        ]
+    );
+    // u: Doc.until 2 + Event.at; a: Doc.at 2 + Event.at; b: everything.
+    assert_eq!(report.converted_values, 3 + 3 + 5, "{report:?}");
+    let docs = |at: &str, until: &str| {
+        ["d1", "d2"].map(|name| json!({ "name": name, "at": at, "until": until }))
+    };
+    assert_eq!(values(&db, u, "Doc").await, docs(AT, AT_DATETIME));
+    assert_eq!(values(&db, a, "Doc").await, docs(AT_DATETIME, AT));
+    assert_eq!(values(&db, b, "Doc").await, docs(AT_DATETIME, AT_DATETIME));
+    for scope in [u, a, b] {
+        assert_eq!(
+            values(&db, scope, "Event").await,
+            [json!({ "name": "e", "at": AT_DATETIME })]
+        );
+    }
+    // The covered strings are still what their indexes find.
+    assert_eq!(text_hits(&db, u, "Doc", "at", "2026").await, ["d1", "d2"]);
+    assert_eq!(
+        text_hits(&db, a, "Doc", "until", "2026").await,
+        ["d1", "d2"]
+    );
+    db.close().await.unwrap();
+}
+
+/// A vector index whose build is blocked on string values stays Building, and
+/// a datetime would fail its writes as the strings do: the property keeps them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_vector_indexed_property_keeps_its_strings() {
+    let db = open(1024).await;
+    let u = DataScope::LegacyUnscoped;
+    add_docs(&db, u).await;
+    let blocked = db
+        .install_index_for_tests(
+            crate::config::VectorIndexDefinition::new_node(
+                "Doc",
+                "at",
+                3,
+                crate::search::vector::VectorDistanceMetric::Cosine,
+            )
+            .unwrap()
+            .try_into()
+            .unwrap(),
+        )
+        .await;
+    assert!(
+        matches!(&blocked, Err(HelixDbError::InvariantViolation(reason)) if reason.contains("did not succeed")),
+        "{blocked:?}"
+    );
+
+    let report = run_to_completion(&db).await;
+
+    assert_eq!(
+        skips(&report),
+        [(
+            cursor(u),
+            Element::Node,
+            "Doc",
+            "at",
+            SkipReason::VectorIndexed,
+            Some(2)
+        )]
+    );
+    assert_eq!(report.converted_values, 2, "{report:?}");
+    assert_eq!(
+        values(&db, u, "Doc").await,
+        ["d1", "d2"].map(|name| json!({ "name": name, "at": AT, "until": AT_DATETIME }))
+    );
+    db.close().await.unwrap();
+}
+
+/// A dropped text index no longer covers its property, which converts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dropped_text_index_covers_nothing() {
+    let db = open(1024).await;
+    let u = DataScope::LegacyUnscoped;
+    add_docs(&db, u).await;
+    db.install_index_for_tests(text_index("Doc", "at"))
+        .await
+        .unwrap();
+    let receipt = db
+        .enqueue_index_drop(
+            u,
+            &helix_planner::ir::IndexDdlDropSpec::NodeText {
+                key: helix_planner::catalog::ScopedPropertyKey::try_new("Doc", "at").unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+    let operation = receipt.operation_id().expect("the drop runs an operation");
+    db.wake_index_worker().await;
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        while !matches!(
+            db.get_index_operation(u, operation).await.unwrap(),
+            crate::index_lifecycle::IndexOperationStatus::Succeeded { .. }
+        ) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the drop completes");
+
+    let report = run_to_completion(&db).await;
+
+    assert!(report.skipped_properties.is_empty(), "{report:?}");
+    assert_eq!(report.converted_values, 4);
+    assert_eq!(
+        values(&db, u, "Doc").await,
+        ["d1", "d2"].map(|name| json!({ "name": name, "at": AT_DATETIME, "until": AT_DATETIME }))
+    );
+    db.close().await.unwrap();
+}
+
+/// The job row a binary that did not check text indexes stored after detecting
+/// a text-indexed property in a tenant, as that binary encodes it: the
+/// candidates name `Doc.at`, which its every conversion batch failed on.
+fn stuck_job_json(tenant: u128) -> String {
+    format!(
+        concat!(
+            r#"{{"running":{{"scope":{{"tenant":"{tenant:032x}"}},"#,
+            r#""phase":{{"convert":{{"element":"node","resume_after":null,"candidates":["#,
+            r#"{{"element":"node","label":"Doc","name":"at"}},"#,
+            r#"{{"element":"node","label":"Doc","name":"until"}}]}}}},"#,
+            r#""report":{{"converted_values":3,"unique_conflicts":0,"skipped_properties":["#,
+            r#"{{"scope":"unscoped","property":{{"element":"node","label":"Precise","name":"at"}},"#,
+            r#""reason":"sub_millisecond","rfc3339_strings":1}}],"#,
+            r#""unlisted_skipped_properties":0,"skipped_scopes":[],"undecodable_rows":0}}}}}}"#
+        ),
+        tenant = tenant
+    )
+}
+
+/// A store whose job a binary without the check left failing on a
+/// text-indexed candidate resumes on this one: the property keeps its strings
+/// and stays searchable, the scope's other candidate and every later tenant
+/// convert, and the job completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_job_stuck_on_a_text_indexed_candidate_resumes_and_completes() {
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let db = open_on(&store, 1).await;
+    let stuck = tenant("01HZY3VQ6Y5Q7Z9M8K2N4P6R8T");
+    let later = tenant("01HZY3VQ6Y5Q7Z9M8K2N4P6R9V");
+    add_docs(&db, stuck).await;
+    add_docs(&db, later).await;
+    db.install_index_in_scope_for_tests(stuck, text_index("Doc", "at"))
+        .await
+        .unwrap();
+    let DataScope::Tenant(stuck_id) = stuck else {
+        unreachable!()
+    };
+    let json = stuck_job_json(stuck_id.as_u128());
+    // The stored form is unchanged: this binary reads and writes it byte for byte.
+    let job = decode_json::<Job>(json.as_bytes()).unwrap();
+    assert_eq!(encode_json(&job).unwrap(), json.as_bytes());
+    let HelixStorage::Writer(writer) = db.storage() else {
+        panic!("writer");
+    };
+    writer
+        .db()
+        .put(job_key(), Bytes::from(json.clone()))
+        .await
+        .unwrap();
+    // What that binary's batch wrote fails: the text index takes no datetime.
+    let [d1, _] = ids(&db, stuck, "Doc").await;
+    let failed = execute(
+        &db,
+        stuck,
+        conversion_request(
+            Element::Node,
+            &[RowConversion {
+                id: d1,
+                values: vec![(
+                    "at".to_owned(),
+                    AT.to_owned(),
+                    parse_millis(AT).unwrap().unwrap(),
+                )],
+            }],
+        ),
+    )
+    .await;
+    assert!(
+        matches!(&failed, Err(HelixDbError::InvalidIndexSourceData { reason }) if reason.contains("Doc:at")),
+        "{failed:?}"
+    );
+    db.close().await.unwrap();
+
+    let db = open_on(&store, 1).await;
+    let report = run_to_completion(&db).await;
+
+    assert_eq!(
+        skips(&report),
+        [
+            (
+                ScopeCursor::Unscoped,
+                Element::Node,
+                "Precise",
+                "at",
+                SkipReason::SubMillisecond,
+                Some(1)
+            ),
+            (
+                cursor(stuck),
+                Element::Node,
+                "Doc",
+                "at",
+                SkipReason::TextIndexed,
+                None
+            ),
+        ]
+    );
+    // 3 before, `Doc.until` in the stuck tenant, both properties in the later one.
+    assert_eq!(report.converted_values, 3 + 2 + 4, "{report:?}");
+    assert_eq!(
+        values(&db, stuck, "Doc").await,
+        ["d1", "d2"].map(|name| json!({ "name": name, "at": AT, "until": AT_DATETIME }))
+    );
+    assert_eq!(
+        values(&db, later, "Doc").await,
+        ["d1", "d2"].map(|name| json!({ "name": name, "at": AT_DATETIME, "until": AT_DATETIME }))
+    );
+    assert_eq!(
+        text_hits(&db, stuck, "Doc", "at", "2026").await,
+        ["d1", "d2"]
+    );
+    db.close().await.unwrap();
+}
+
+/// Ids of the nodes of `label` in `scope`, by name.
+async fn ids<const N: usize>(db: &HelixDB, scope: DataScope, label: &str) -> [u64; N] {
+    let response = db
+        .query_scoped(
+            QueryRequest::read(
+                read_batch()
+                    .var_as(
+                        "rows",
+                        g().n_with_label(label).value_map(None::<Vec<String>>),
+                    )
+                    .returning(["rows"]),
+            ),
+            scope,
+        )
+        .await
+        .unwrap();
+    let mut rows = response["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["name"].as_str().unwrap().to_owned(),
+                row["$id"].as_u64().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    rows.sort();
+    rows.into_iter()
+        .map(|(_, id)| id)
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap()
+}
+
+/// A text index created after detection drops its property at the next
+/// conversion batch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_text_index_created_after_detection_is_skipped_at_conversion() {
+    let db = open(1024).await;
+    let u = DataScope::LegacyUnscoped;
+    add_docs(&db, u).await;
+    let HelixStorage::Writer(writer) = db.storage() else {
+        panic!("writer");
+    };
+    while !matches!(
+        load(writer.db()).await.unwrap(),
+        Some(Job::Running {
+            phase: Phase::Convert { .. },
+            ..
+        })
+    ) {
+        assert!(process_once(&db, tuning(&db)).await.unwrap());
+    }
+    db.install_index_for_tests(text_index("Doc", "at"))
+        .await
+        .unwrap();
+
+    let report = run_to_completion(&db).await;
+
+    assert_eq!(
+        skips(&report),
+        [(
+            cursor(u),
+            Element::Node,
+            "Doc",
+            "at",
+            SkipReason::TextIndexed,
+            None
+        )]
+    );
+    assert_eq!(report.converted_values, 2);
+    assert_eq!(
+        values(&db, u, "Doc").await,
+        ["d1", "d2"].map(|name| json!({ "name": name, "at": AT, "until": AT_DATETIME }))
+    );
+    assert_eq!(text_hits(&db, u, "Doc", "at", "2026").await, ["d1", "d2"]);
+    db.close().await.unwrap();
+}
+
+/// A text index created between a batch's check and its write fails that
+/// batch, writing nothing; the next batch skips the property.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_text_index_created_mid_batch_fails_only_that_batch() {
+    let db = open(1024).await;
+    let u = DataScope::LegacyUnscoped;
+    add_docs(&db, u).await;
+    let HelixStorage::Writer(writer) = db.storage() else {
+        panic!("writer");
+    };
+    while !matches!(
+        load(writer.db()).await.unwrap(),
+        Some(Job::Running {
+            phase: Phase::Convert { .. },
+            ..
+        })
+    ) {
+        assert!(process_once(&db, tuning(&db)).await.unwrap());
+    }
+    let pause = (
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(tokio::sync::Notify::new()),
+    );
+    let (reached, resume) = (Arc::clone(&pause.0), Arc::clone(&pause.1));
+    let (stepped, ()) = tokio::join!(
+        BEFORE_CONVERSION.scope(pause, process_once(&db, tuning(&db))),
+        async {
+            reached.notified().await;
+            // Building from its commit on: writes route to the build at once.
+            crate::index_lifecycle::lifecycle::create_index_operation_from_current_source(
+                writer.db(),
+                u,
+                text_index("Doc", "at"),
+                helix_planner::ir::IndexCreateMode::IfNotExists,
+            )
+            .await
+            .unwrap();
+            resume.notify_one();
+        }
+    );
+    assert!(
+        matches!(&stepped, Err(HelixDbError::InvalidIndexSourceData { .. })),
+        "{stepped:?}"
+    );
+    assert_eq!(
+        values(&db, u, "Doc").await,
+        ["d1", "d2"].map(|name| json!({ "name": name, "at": AT, "until": AT })),
+        "the failed batch wrote nothing"
+    );
+
+    let report = run_to_completion(&db).await;
+
+    assert_eq!(
+        skips(&report),
+        [(
+            cursor(u),
+            Element::Node,
+            "Doc",
+            "at",
+            SkipReason::TextIndexed,
+            None
+        )]
+    );
+    assert_eq!(report.converted_values, 2);
+    assert_eq!(
+        values(&db, u, "Doc").await,
+        ["d1", "d2"].map(|name| json!({ "name": name, "at": AT, "until": AT_DATETIME }))
+    );
+    db.close().await.unwrap();
+}
+
+#[test]
+fn new_skip_reasons_round_trip_through_json() {
+    let skipped = SkippedProperty {
+        scope: ScopeCursor::Unscoped,
+        property: PropertyKey {
+            element: Element::Edge,
+            label: "LINKS".to_owned(),
+            name: "since".to_owned(),
+        },
+        reason: SkipReason::TextIndexed,
+        rfc3339_strings: None,
+    };
+    let encoded = encode_json(&skipped).unwrap();
+    assert_eq!(
+        std::str::from_utf8(&encoded).unwrap(),
+        r#"{"scope":"unscoped","property":{"element":"edge","label":"LINKS","name":"since"},"reason":"text_indexed"}"#
+    );
+    assert_eq!(decode_json::<SkippedProperty>(&encoded).unwrap(), skipped);
+    let vector = SkippedProperty {
+        reason: SkipReason::VectorIndexed,
+        rfc3339_strings: Some(4),
+        ..skipped
+    };
+    let encoded = encode_json(&vector).unwrap();
+    assert!(std::str::from_utf8(&encoded)
+        .unwrap()
+        .ends_with(r#""reason":"vector_indexed","rfc3339_strings":4}"#));
+    assert_eq!(decode_json::<SkippedProperty>(&encoded).unwrap(), vector);
 }
