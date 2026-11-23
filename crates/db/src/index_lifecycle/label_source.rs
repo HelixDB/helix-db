@@ -52,6 +52,11 @@
 //! so a row of another label it read is never read again by a later step.
 //! Like the prefix scan before them, a build's reads do not fill the block
 //! cache.
+//!
+//! A reader that takes the label's ids itself ([`LabelSource::over`], which
+//! a bulk vector build reads its whole label through, from one snapshot and
+//! one bitmap) reads their rows the same two ways, under the bounds it names
+//! ([`ReadBounds`]) instead of one step's.
 
 use bytes::Bytes;
 use slatedb::DbReadOps;
@@ -69,7 +74,7 @@ use crate::index_lifecycle::{IndexCursor, IndexElementKind, IndexEntityId, Sourc
 /// every 20th of 1M rows of about 140 B, built by point on an m6id.16xlarge
 /// with local NVMe, took 4.0 s, against 2.8 s at 64 ids and 2.45 s at 256,
 /// whose chunks read up to 256 rows past the limit.
-const POINT_CHUNK_IDS: usize = 16;
+pub(crate) const POINT_CHUNK_IDS: usize = 16;
 
 /// The ids a step reads before it knows how large the label's rows are: one
 /// such chunk of the largest rows a step admits stays near its byte limit.
@@ -89,6 +94,28 @@ pub(crate) struct SourceRow {
     pub(crate) key: Bytes,
     /// The row's stored properties.
     pub(crate) value: Bytes,
+}
+
+/// How much a source reads before it pauses, and at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReadBounds {
+    /// Key and value bytes after which no further row is read.
+    pub(crate) input_bytes: u64,
+    /// The most ids one `multi_get` reads: at most this many rows are read
+    /// past `input_bytes`, whatever their sizes.
+    pub(crate) point_chunk_ids: std::num::NonZeroUsize,
+}
+
+impl ReadBounds {
+    /// The bounds of one lifecycle step: its input-byte limit, and
+    /// [`POINT_CHUNK_IDS`] ids a point read.
+    pub(crate) fn of_step(limits: SearchIndexBatchLimits) -> Self {
+        Self {
+            input_bytes: limits.max_input_bytes().get(),
+            point_chunk_ids: std::num::NonZeroUsize::new(POINT_CHUNK_IDS)
+                .expect("a point chunk holds an id"),
+        }
+    }
 }
 
 /// What [`LabelSource::next`] found.
@@ -131,6 +158,8 @@ struct PointReads {
     chunk: std::vec::IntoIter<(u64, Bytes, Option<Bytes>)>,
     /// Ids read so far, present or not.
     ids_read: u64,
+    /// The most ids one chunk reads ([`ReadBounds::point_chunk_ids`]).
+    max_chunk_ids: usize,
 }
 
 /// One scan from the first taken id's key to the last's.
@@ -185,22 +214,11 @@ impl<'a, R: DbReadOps + Send + Sync> LabelSource<'a, R> {
         limits: SearchIndexBatchLimits,
         scan: IndexLifecycleScanTuning,
     ) -> Result<Option<Self>> {
-        let upper = match source_id(scope, kind, progress.inclusive_upper_bound.as_bytes())? {
-            SourceKey::Id(id) => id,
-            SourceKey::LegacyEdgePair { .. } => {
-                return Err(corruption(
-                    "build source upper bound is not an exact property-by-ID key",
-                ));
-            }
-        };
+        let upper = upper_id(scope, kind, progress)?;
         let after = progress
             .cursor
             .as_ref()
-            .map(|cursor| {
-                source_id(scope, kind, cursor.as_bytes()).map(|key| match key {
-                    SourceKey::Id(id) | SourceKey::LegacyEdgePair { from: id } => id,
-                })
-            })
+            .map(|cursor| cursor_id(scope, kind, cursor.as_bytes()))
             .transpose()?;
         let first = match after {
             Some(after) if after > upper => {
@@ -223,8 +241,45 @@ impl<'a, R: DbReadOps + Send + Sync> LabelSource<'a, R> {
             .by_ref()
             .take(limits.max_entities().get())
             .collect::<Vec<_>>();
-        let (Some(&first), Some(&last)) = (taken.first(), taken.last()) else {
+        if taken.is_empty() {
             return Ok(None);
+        }
+        let more = in_bound.next().is_some();
+        Ok(Some(
+            Self::over(
+                reader,
+                scope,
+                kind,
+                taken,
+                more,
+                ReadBounds::of_step(limits),
+                scan,
+            )
+            .await?,
+        ))
+    }
+
+    /// Reads the rows of `taken`, ids of one label in ascending order that
+    /// the caller took from the bitmap `reader`'s snapshot holds, under
+    /// `bounds`. `more` says whether the label holds members after them, up
+    /// to the caller's bound: a source that reads every taken id then ends
+    /// [`LabelRead::Paused`] rather than [`LabelRead::Exhausted`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when `taken` is empty: a caller with no id left has no source
+    /// to read.
+    pub(crate) async fn over(
+        reader: &'a R,
+        scope: DataScope,
+        kind: IndexElementKind,
+        taken: Vec<u64>,
+        more: bool,
+        bounds: ReadBounds,
+        scan: IndexLifecycleScanTuning,
+    ) -> Result<Self> {
+        let (Some(&first), Some(&last)) = (taken.first(), taken.last()) else {
+            panic!("a label source reads at least one id");
         };
         let taken_ids = u64::try_from(taken.len()).unwrap_or(u64::MAX);
         let reads = if last - first < taken_ids.saturating_mul(RANGE_DENSITY) {
@@ -242,20 +297,21 @@ impl<'a, R: DbReadOps + Send + Sync> LabelSource<'a, R> {
                 ids: taken.into_iter(),
                 chunk: Vec::new().into_iter(),
                 ids_read: 0,
+                max_chunk_ids: bounds.point_chunk_ids.get(),
             })
         };
-        Ok(Some(Self {
+        Ok(Self {
             reader,
             scope,
             kind,
             reads,
-            more: in_bound.next().is_some(),
+            more,
             read: Read {
                 last: None,
                 bytes: 0,
-                limit: limits.max_input_bytes().get(),
+                limit: bounds.input_bytes,
             },
-        }))
+        })
     }
 
     /// The next present row, or how the step's ids ended once every row
@@ -374,11 +430,12 @@ impl PointReads {
         Ok(true)
     }
 
-    /// How many ids the next chunk reads: at most [`POINT_CHUNK_IDS`] and as
-    /// many as were read so far (starting at [`FIRST_CHUNK_IDS`]), and once
-    /// a row was read, at most enough to reach the input-byte limit at the
-    /// mean bytes per id read so far. A mean taken over small rows can still
-    /// size a chunk of large ones, which [`POINT_CHUNK_IDS`] bounds.
+    /// How many ids the next chunk reads: at most `max_chunk_ids`
+    /// ([`POINT_CHUNK_IDS`] in a step) and as many as were read so far
+    /// (starting at [`FIRST_CHUNK_IDS`]), and once a row was read, at most
+    /// enough to reach the input-byte limit at the mean bytes per id read so
+    /// far. A mean taken over small rows can still size a chunk of large
+    /// ones, which `max_chunk_ids` bounds.
     fn chunk_ids(&self, read: &Read) -> usize {
         let grown = u128::from(self.ids_read).max(FIRST_CHUNK_IDS as u128);
         let ids = match read.bytes {
@@ -392,7 +449,7 @@ impl PointReads {
         };
         usize::try_from(ids)
             .unwrap_or(usize::MAX)
-            .clamp(1, POINT_CHUNK_IDS)
+            .clamp(1, self.max_chunk_ids)
     }
 }
 
@@ -484,6 +541,30 @@ pub(crate) async fn label_members(
     Ok(members.into_unbudgeted())
 }
 
+/// The last id a build's source holds: the one its inclusive upper bound, an
+/// exact property-by-ID key, names.
+pub(crate) fn upper_id(
+    scope: DataScope,
+    kind: IndexElementKind,
+    progress: &SourceScanProgress,
+) -> Result<u64> {
+    match source_id(scope, kind, progress.inclusive_upper_bound.as_bytes())? {
+        SourceKey::Id(id) => Ok(id),
+        SourceKey::LegacyEdgePair { .. } => Err(corruption(
+            "build source upper bound is not an exact property-by-ID key",
+        )),
+    }
+}
+
+/// The id a build's scan has taken up to once its cursor is `cursor`: the id
+/// of a property-by-ID key, and `from` of a retired `[from][to]` edge
+/// property key, which sorts after the ID key of `from` and before the next.
+pub(crate) fn cursor_id(scope: DataScope, kind: IndexElementKind, cursor: &[u8]) -> Result<u64> {
+    source_id(scope, kind, cursor).map(|key| match key {
+        SourceKey::Id(id) | SourceKey::LegacyEdgePair { from: id } => id,
+    })
+}
+
 /// A build source key, decoded to where its scan stands.
 enum SourceKey {
     /// The property-by-ID key of this id.
@@ -524,7 +605,7 @@ fn source_id(scope: DataScope, kind: IndexElementKind, key: &[u8]) -> Result<Sou
 }
 
 /// The property-by-ID key of `id`.
-fn source_key(scope: DataScope, kind: IndexElementKind, id: u64) -> Bytes {
+pub(crate) fn source_key(scope: DataScope, kind: IndexElementKind, id: u64) -> Bytes {
     let kind = match kind {
         IndexElementKind::Node => DataKeyKind::NodeProperty(NodePropertyKey::new(id)),
         IndexElementKind::Edge => DataKeyKind::EdgePropertyById(EdgePropertyByIdKey::new(id)),
