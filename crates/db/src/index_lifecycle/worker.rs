@@ -40,10 +40,12 @@ const DEFAULT_OPERATION_PAGE_SIZE: usize = 64;
 /// claim.
 ///
 /// Within a slice each step keeps its claim, so the next one needs no claim
-/// transaction. The first step after the slice ends, or after shutdown is
-/// requested, releases it: the dispatcher can then give the family's lane to
-/// another queued operation, and shutdown or a failing cycle joins the task
-/// within about one slice plus one step.
+/// transaction. The first step after the slice ends or after shutdown is
+/// requested releases it, and so does a step whose driver parks the
+/// operation ([`IndexOperationDriver::parked_until`]), with its own commit:
+/// the dispatcher can then give the family's lane to another queued
+/// operation, and shutdown or a failing cycle joins the task within about
+/// one slice plus one step.
 ///
 /// Steps commit without waiting for their WAL upload, so the task ends each
 /// slice by uploading them. A build therefore runs at most one slice ahead of
@@ -1099,24 +1101,31 @@ async fn schedule_operation_task(
         if eligible.record.family() != family {
             continue;
         }
-        scan.wrap_before_idle = true;
-        return Ok(DispatchAttempt::Scheduled(Box::new(
-            InFlightTask::Operation {
-                target: operation_id,
-                claim: Box::new(PendingClaim {
-                    eligible,
-                    writer_epoch,
-                    sequence: claim_sequences.next()?,
-                    permission,
-                }),
-                driver,
-                limits,
-                shutdown: shutdown.clone(),
-                _permits: task_permits,
-                #[cfg(feature = "index-lifecycle-testing")]
-                lifecycle_metrics: Arc::clone(lifecycle_metrics),
-            },
-        )));
+        // A parked operation gets no step until its driver wakes the worker
+        // or its time passes, whichever is first.
+        let Some(until) = outbox::parked(driver.as_ref(), &eligible.record) else {
+            scan.wrap_before_idle = true;
+            return Ok(DispatchAttempt::Scheduled(Box::new(
+                InFlightTask::Operation {
+                    target: operation_id,
+                    claim: Box::new(PendingClaim {
+                        eligible,
+                        writer_epoch,
+                        sequence: claim_sequences.next()?,
+                        permission,
+                    }),
+                    driver,
+                    limits,
+                    shutdown: shutdown.clone(),
+                    _permits: task_permits,
+                    #[cfg(feature = "index-lifecycle-testing")]
+                    lifecycle_metrics: Arc::clone(lifecycle_metrics),
+                },
+            )));
+        };
+        let deadline = tokio::time::Instant::from_std(until);
+        *earliest_deadline =
+            Some(earliest_deadline.map_or(deadline, |current| current.min(deadline)));
     }
     if page.prefix_exhausted {
         scan.cursor = None;
@@ -1557,13 +1566,24 @@ mod tests {
 
     /// Enqueues one secondary build at activation with no counted entities.
     async fn enqueue(db: &Db, id_byte: u8) -> IndexOperationRecord {
+        enqueue_index(db, id_byte, IndexId::initial(), "email").await
+    }
+
+    /// [`enqueue`] for the index `index_id` over `property`, so one database
+    /// holds several builds.
+    async fn enqueue_index(
+        db: &Db,
+        id_byte: u8,
+        index_id: IndexId,
+        property: &str,
+    ) -> IndexOperationRecord {
         let definition = ValidatedDynamicIndexDefinition::try_from(
-            SecondaryIndexDefinition::node_equality("User", "email").unwrap(),
+            SecondaryIndexDefinition::node_equality("User", property).unwrap(),
         )
         .unwrap();
         let operation_id = IndexOperationId::from_bytes([id_byte; 16]).unwrap();
         let index = IndexRecordV2::building(
-            IndexId::initial(),
+            index_id,
             definition,
             IndexRevision::initial(),
             PhysicalGeneration::Secondary {
@@ -1973,5 +1993,188 @@ mod tests {
             1,
             "a stopping worker releases its claim with its first step"
         );
+    }
+
+    /// Counts a step for each operation it progresses, and parks the
+    /// operations a test names: [`CountingDriver`] with
+    /// [`IndexOperationDriver::parked_until`].
+    #[derive(Default)]
+    struct ParkingDriver {
+        /// Operations a step parks, until when.
+        parks: parking_lot::Mutex<std::collections::HashMap<IndexOperationId, std::time::Instant>>,
+        /// Operations whose steps found them parked.
+        parked: parking_lot::Mutex<std::collections::HashMap<IndexOperationId, std::time::Instant>>,
+        steps: parking_lot::Mutex<std::collections::HashMap<IndexOperationId, u64>>,
+    }
+
+    impl ParkingDriver {
+        fn steps(&self, operation: &IndexOperationRecord) -> u64 {
+            self.steps
+                .lock()
+                .get(&operation.operation_id())
+                .copied()
+                .unwrap_or(0)
+        }
+    }
+
+    #[async_trait]
+    impl IndexOperationDriver for Arc<ParkingDriver> {
+        fn family(&self) -> IndexOperationFamily {
+            IndexOperationFamily::Secondary
+        }
+
+        async fn step(
+            &self,
+            _db: &Db,
+            _transaction: &DbTransaction,
+            _scope: DataScope,
+            operation: &IndexOperationRecord,
+            _limits: SearchIndexBatchLimits,
+        ) -> Result<outbox::IndexOperationStepExecution> {
+            let operation_id = operation.operation_id();
+            *self.steps.lock().entry(operation_id).or_default() += 1;
+            // A step that finds its operation waiting parks it, as a build
+            // that waits does, and commits the progress as it is.
+            let park = self.parks.lock().get(&operation_id).copied();
+            let entities = IndexOperationStatus::from_record(operation)
+                .common()
+                .progress
+                .entities;
+            let Some(until) = park else {
+                return Ok(outbox::IndexOperationStepExecution::new(
+                    outbox::IndexOperationStepResult::Progressed(activate_progress(entities + 1)),
+                ));
+            };
+            self.parked.lock().insert(operation_id, until);
+            Ok(outbox::IndexOperationStepExecution::new(
+                outbox::IndexOperationStepResult::Progressed(activate_progress(entities)),
+            ))
+        }
+
+        fn parked_until(&self, operation: &IndexOperationRecord) -> Option<std::time::Instant> {
+            self.parked.lock().get(&operation.operation_id()).copied()
+        }
+    }
+
+    /// The step that parks its operation releases the claim with its own
+    /// commit: a slice that would run for its whole second ends after it.
+    #[tokio::test]
+    async fn a_parked_operation_ends_its_claim_slice() {
+        let db = Arc::new(
+            Db::builder("worker-parked-slice", Arc::new(InMemory::new()))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let waiting = enqueue(&db, 12).await;
+        let driver = Arc::new(ParkingDriver::default());
+        driver.parks.lock().insert(
+            waiting.operation_id(),
+            std::time::Instant::now() + Duration::from_secs(3_600),
+        );
+        let released = run_task(&db, &waiting, Arc::clone(&driver), watch::channel(false).1).await;
+        assert_eq!(
+            driver.steps(&waiting),
+            1,
+            "the step that parked the operation released its claim"
+        );
+        assert!(matches!(
+            released.execution_state(),
+            IndexOperationExecutionState::Queued {
+                not_before_unix_millis: None
+            }
+        ));
+        assert_eq!(released.progress(), waiting.progress());
+    }
+
+    /// A parked operation takes no step, and so none of its lane's time,
+    /// while another operation of the lane runs: the running one is given
+    /// every slice. The driver's wake gives the parked one steps again, and
+    /// so does its time passing without one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_parked_operation_leaves_its_lane_to_the_others() {
+        let db = Arc::new(
+            Db::builder("worker-parked-lane", Arc::new(InMemory::new()))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let running = enqueue_index(&db, 13, IndexId::initial(), "email").await;
+        let waiting = enqueue_index(&db, 14, IndexId::new(2).unwrap(), "name").await;
+        let driver = Arc::new(ParkingDriver::default());
+        let far = std::time::Instant::now() + Duration::from_secs(3_600);
+        driver.parks.lock().insert(waiting.operation_id(), far);
+        let capability = IndexFamilyCapability::new(
+            Arc::new(Arc::clone(&driver)),
+            SearchIndexBackfillLimits::default().batch(),
+            IndexDriverScheduling::Automatic,
+        );
+        struct NoCompaction;
+        #[async_trait]
+        impl ActiveTextCompactionDriver for NoCompaction {
+            async fn compact_active_text_once(&self, _db: &Db) -> Result<bool> {
+                Ok(false)
+            }
+        }
+        let wake = IndexWorkerWakeHandle::default();
+        // One task at a time in the lane, as the vector lane has.
+        let supervisor = IndexWorkerSupervisor::start(
+            Arc::clone(&db),
+            IndexFamilyCapabilities::new(
+                capability.clone(),
+                capability.clone(),
+                capability,
+                Arc::new(NoCompaction),
+            ),
+            None,
+            Duration::from_secs(3_600),
+            IndexLifecycleConcurrency::try_new(1, 1, 1, 1).unwrap(),
+            Arc::new(ClaimSequenceAllocator::new()),
+            wake.clone(),
+            #[cfg(feature = "index-lifecycle-testing")]
+            Arc::new(crate::index_lifecycle_testing::AutomaticLifecycleMetrics::new()),
+        );
+        let until = async |reached: &dyn Fn() -> bool| {
+            tokio::time::timeout(Duration::from_secs(60), async {
+                while !reached() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("the worker runs its operations");
+        };
+        // The waiting operation parks in its first step, which ends its
+        // slice.
+        until(&|| driver.steps(&waiting) == 1 && driver.steps(&running) >= 1).await;
+        // Hundreds of steps of the running one later it has taken no other,
+        // nor when the running one's claim slices end and the dispatcher
+        // gives the lane out again: it passes over the parked one.
+        let before = driver.steps(&running);
+        until(&|| driver.steps(&running) >= before + 500).await;
+        tokio::time::sleep(2 * CLAIM_SLICE + CLAIM_SLICE / 2).await;
+        assert_eq!(driver.steps(&waiting), 1);
+
+        // What it waited for is there: the driver unparks it and wakes the
+        // worker.
+        driver.parks.lock().clear();
+        driver.parked.lock().clear();
+        wake.wake();
+        until(&|| driver.steps(&waiting) >= 10).await;
+
+        // Parked again, until a moment from now and with no wake: its time
+        // passing gives it the next step.
+        let soon = std::time::Instant::now() + Duration::from_millis(300);
+        driver.parks.lock().insert(waiting.operation_id(), far);
+        until(&|| driver.parked.lock().contains_key(&waiting.operation_id())).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let parked_at = driver.steps(&waiting);
+        let before = driver.steps(&running);
+        until(&|| driver.steps(&running) >= before + 100).await;
+        assert_eq!(driver.steps(&waiting), parked_at);
+        driver.parks.lock().clear();
+        driver.parked.lock().insert(waiting.operation_id(), soon);
+        until(&|| driver.steps(&waiting) > parked_at).await;
+        assert!(std::time::Instant::now() >= soon);
+        supervisor.stop().await;
     }
 }

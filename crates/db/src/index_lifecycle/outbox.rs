@@ -532,6 +532,18 @@ pub(crate) trait IndexOperationDriver: Send + Sync {
         limits: SearchIndexBatchLimits,
     ) -> Result<IndexOperationStepExecution>;
 
+    /// When the worker offers `operation` a step again at the latest, if a
+    /// step now could only wait for something this process will signal.
+    ///
+    /// The step that parks an operation releases its claim with its own
+    /// commit, so the family's lane goes to other operations, and the worker
+    /// passes over a parked operation until the driver stops reporting it or
+    /// the returned time passes. The driver wakes the worker when the wait
+    /// ends. The default never parks.
+    fn parked_until(&self, _operation: &IndexOperationRecord) -> Option<Instant> {
+        None
+    }
+
     /// Applies disposable runtime cleanup once the staged step committed.
     ///
     /// It runs after every progressed, blocked or completed step, including a
@@ -1224,6 +1236,12 @@ pub(crate) async fn execute_claimed_step_with_evidence(
         }
 
         failpoints::trip(IndexOutboxFailpoint::CheckpointStagingBefore)?;
+        // A step that parked its operation releases the claim with its own
+        // commit: the next step could only wait.
+        let claim = match parked(driver, &operation) {
+            Some(_) => ClaimContinuation::Release,
+            None => claim,
+        };
         let operation_key = scoped_operation_key(claimed.scope, operation.operation_id());
         let pointer_key = global_operation_key(operation.operation_id());
         let before_status = IndexOperationStatus::from_record(&operation);
@@ -1435,6 +1453,17 @@ pub(crate) async fn execute_claimed_step_with_evidence(
             record,
         }),
     })
+}
+
+/// Until when `driver` parks `operation`, if that time is still ahead: a
+/// parked operation whose time has passed is offered a step like any other.
+pub(crate) fn parked(
+    driver: &dyn IndexOperationDriver,
+    operation: &IndexOperationRecord,
+) -> Option<Instant> {
+    driver
+        .parked_until(operation)
+        .filter(|until| *until > Instant::now())
 }
 
 /// Records failures only after failed preparation and staging have been discarded.
