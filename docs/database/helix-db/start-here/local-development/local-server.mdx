@@ -7,7 +7,7 @@ pageType: "Guide"
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-The `ghcr.io/helixdb/helixdb:v0.0.17` image runs the standalone HelixDB server.
+The `ghcr.io/helixdb/helixdb:v0.0.18` image runs the standalone HelixDB server.
 It supports Linux on amd64 and arm64.
 It exposes the same operation-tree request contract used by Helix Cloud at
 `POST /v2/query`; gateway-only Cloud features are not included.
@@ -53,7 +53,7 @@ helix start dev             # add --disk --persist to switch an existing project
 The standalone server accepts queries at `http://localhost:6969/v2/query`.
 
 `helix init` saves the CLI's default image tag in `helix.toml`, and a saved tag wins,
-so `helix update` alone does not upgrade an existing project. Set `tag = "v0.0.17"` in
+so `helix update` alone does not upgrade an existing project. Set `tag = "v0.0.18"` in
 its `[local.dev]` block before starting it.
 
 <Warning>
@@ -126,7 +126,7 @@ Memory mode is selected by leaving `HELIX_DATA_DIR`, `S3_BUCKET`, `GCS_BUCKET` a
 ```bash
 docker run --rm --name helixdb \
   -p 127.0.0.1:6969:8080 \
-  ghcr.io/helixdb/helixdb:v0.0.17
+  ghcr.io/helixdb/helixdb:v0.0.18
 ```
 
 The `127.0.0.1:` prefix publishes the port on host loopback only; see
@@ -184,7 +184,7 @@ docker run --rm --name helixdb \
   -p 127.0.0.1:6969:8080 \
   -e HELIX_DATA_DIR=/var/lib/helix \
   --mount type=volume,source=helixdb-data,target=/var/lib/helix \
-  ghcr.io/helixdb/helixdb:v0.0.17
+  ghcr.io/helixdb/helixdb:v0.0.18
 ```
 
 Stop the server with `docker stop helixdb`. Starting a new container with the
@@ -243,7 +243,7 @@ services:
       retries: 120
 
   helix:
-    image: ghcr.io/helixdb/helixdb:v0.0.17
+    image: ghcr.io/helixdb/helixdb:v0.0.18
     restart: unless-stopped
     depends_on:
       seaweedfs:
@@ -357,7 +357,7 @@ docker run --rm --name helixdb \
   -e HELIX_DISK_CACHE_DIR=/var/cache/helix \
   -e HELIX_DISK_CACHE_BYTES=107374182400 \
   -v /data/helix-cache:/var/cache/helix \
-  ghcr.io/helixdb/helixdb:v0.0.17
+  ghcr.io/helixdb/helixdb:v0.0.18
 ```
 
 In Compose, mount a volume at `/var/cache/helix` on the `helix` service, as the

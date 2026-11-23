@@ -7,7 +7,7 @@ pageType: "Guide"
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-Local development runs the prebuilt `ghcr.io/helixdb/helixdb` server container and exposes the standalone server at `POST /v2/query`. Each instance pins its image tag in `helix.toml` (`v0.0.17` for CLI 3.8.0). By default, storage is in-memory. Use `--disk` when you want persistent local data backed by a CLI-managed SeaweedFS volume.
+Local development runs the prebuilt `ghcr.io/helixdb/helixdb` server container and exposes the standalone server at `POST /v2/query`. Each instance pins its image tag in `helix.toml` (`v0.0.18` for CLI 3.8.0). By default, storage is in-memory. Use `--disk` when you want persistent local data backed by a CLI-managed SeaweedFS volume.
 
 ## Prerequisites
 
@@ -170,7 +170,7 @@ Each instance is isolated by container name and host port. `helix add local` alw
 ## Upgrading the server image
 
 `helix update` updates the CLI, not your instances' server image. `helix doctor <instance>` names
-the new CLI's tag; then run `helix start dev --image-version v0.0.17 --persist` (an in-memory
+the new CLI's tag; then run `helix start dev --image-version v0.0.18 --persist` (an in-memory
 instance starts empty). See [Image pinning](/cli/configuration#image-pinning).
 
 ## Browsing the graph
