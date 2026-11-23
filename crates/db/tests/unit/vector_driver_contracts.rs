@@ -343,16 +343,74 @@ pub(super) async fn partitioned_drop_resumes_each_mapping_and_removes_every_name
         .expect("partitioned Active record projects a handle");
     let mappings = mapping_values(&db, scope, index_id, generation).await;
     assert_eq!(mappings.len(), 2);
-    let indexes = mappings
+    let generations = mappings
         .iter()
         .map(|mapping| {
-            let generation = ValidatedVectorGenerationHandle::try_from_active::<
-                vector::distance::Euclidean,
-            >(&active_handle, mapping.physical_index_id)
-            .expect("partition mapping validates against the Active handle");
-            VectorIndex::<vector::distance::Euclidean>::from_generation(&generation)
+            ValidatedVectorGenerationHandle::try_from_active::<vector::distance::Euclidean>(
+                &active_handle,
+                mapping.physical_index_id,
+            )
+            .expect("partition mapping validates against the Active handle")
         })
         .collect::<Vec<_>>();
+    let indexes = generations
+        .iter()
+        .map(VectorIndex::<vector::distance::Euclidean>::from_generation)
+        .collect::<Vec<_>>();
+
+    // A position in the first partition's namespace is no position in the
+    // second: the scan of the second starts over and proves it empty.
+    let one_operation = SearchIndexBatchLimits::try_new(
+        NonZeroUsize::new(1024).unwrap(),
+        NonZeroU64::new(1024 * 1024).unwrap(),
+        NonZeroU64::MIN,
+        NonZeroU64::new(16 * 1024 * 1024).unwrap(),
+        NonZeroU64::new(16 * 1024 * 1024).unwrap(),
+    )
+    .unwrap();
+    let transaction = db
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+    let Ok(PhysicalCleanupOutcome::Progress {
+        resume: Some(first_partition_row),
+        ..
+    }) = delete_physical_namespace::<vector::distance::Euclidean>(
+        &transaction,
+        &generations[0],
+        None,
+        None,
+        IndexElementKind::Node,
+        OperationCounters::default(),
+        one_operation,
+    )
+    .await
+    else {
+        panic!("one delete of the first partition hands on its position");
+    };
+    drop(transaction);
+    let transaction = db
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+    let Ok(PhysicalCleanupOutcome::Progress {
+        namespace_empty: true,
+        resume: None,
+        ..
+    }) = delete_physical_namespace::<vector::distance::Euclidean>(
+        &transaction,
+        &generations[1],
+        None,
+        Some(&first_partition_row),
+        IndexElementKind::Node,
+        OperationCounters::default(),
+        SearchIndexBackfillLimits::default().batch(),
+    )
+    .await
+    else {
+        panic!("a position in another namespace restarts the scan from the start");
+    };
+    drop(transaction);
 
     let IndexDdlReceipt::Accepted {
         operation_id: drop_id,
@@ -1036,6 +1094,7 @@ pub(super) async fn pre_queue_build_deltas_block_catch_up_validation_and_activat
                 registry,
                 driver.batch_reads,
                 &driver.build_cache,
+                &driver.bulk,
             )
             .await
             .expect("vector build step runs")
@@ -1908,6 +1967,7 @@ async fn activation_result(
         Arc::clone(&driver.simhasher_registry),
         driver.batch_reads,
         &driver.build_cache,
+        &driver.bulk,
     )
     .await
 }

@@ -296,6 +296,8 @@ fn status_common() -> lifecycle::IndexOperationStatusCommon {
             output_operations: 0,
             output_bytes: 9,
         },
+        vector_build_path: None,
+        vector_bulk_build: None,
     }
 }
 

@@ -16,6 +16,10 @@
 //! of a generation its owner writes exclusively. Every retained and
 //! checked-out session shares one budget ([`VectorBuildCache`]).
 //!
+//! The source scan of an unpartitioned generation that fits the bulk-build
+//! memory budget links its whole graph in memory and stores each row once
+//! instead ([`bulk`]); every other scan plans entity by entity as above.
+//!
 //! No vector row codec is defined here. Physical reads and writes remain behind
 //! [`crate::search::vector::VectorIndex`] and the typed `encoding/v2` boundary.
 
@@ -32,7 +36,10 @@ use rand::{rngs::StdRng, SeedableRng};
 use sha2::{Digest, Sha256};
 use slatedb::{Db, DbTransaction, IsolationLevel};
 
-use crate::config::{IndexLifecycleScanTuning, SearchIndexBackfillLimits, SearchIndexBatchLimits};
+use crate::config::{
+    IndexLifecycleScanTuning, SearchIndexBackfillLimits, SearchIndexBatchLimits,
+    VectorBulkBuildTuning,
+};
 use crate::encoding::v2::keys::indexes::vector::{
     VectorIndexMetadataKey, VectorKey, VectorStorageLane,
 };
@@ -61,7 +68,7 @@ use super::vector_document;
 use super::{stored_vector_document, VectorIndexedDocument};
 use crate::index_lifecycle::outbox::{
     CommittedOperationStep, CommittedStepState, IndexOperationDriver, IndexOperationStepExecution,
-    IndexOperationStepPermit, IndexOperationStepResult, PreparedIndexOperationStep,
+    IndexOperationStepPermit, IndexOperationStepResult, PreparedIndexOperationStep, StepCounters,
     StepResourceUsage, VectorPlanningUsage,
 };
 use crate::index_lifecycle::queue::QueueTarget;
@@ -82,6 +89,9 @@ use crate::index_lifecycle::{
 };
 use crate::transaction::Mutation;
 
+mod bulk;
+pub(crate) use bulk::{BulkBuildCommit, VectorBuildReports};
+
 /// Vector lifecycle driver sharing scope gates and the bounded SimHash owner.
 pub(crate) struct VectorIndexDriver {
     scope_gates: Arc<crate::index_lifecycle::IndexScopeGates>,
@@ -92,6 +102,8 @@ pub(crate) struct VectorIndexDriver {
     batch_reads: crate::batch_reads::BatchReads,
     /// Planning budget shared with queue publication.
     build_cache: Arc<VectorBuildCache>,
+    /// In-memory graphs of the source scans that build in bulk.
+    bulk: bulk::BulkBuilds,
 }
 
 /// Exact durable checkpoint a retained build planning cache mirrors.
@@ -1003,7 +1015,39 @@ impl VectorIndexDriver {
             build_cache: Arc::new(VectorBuildCache::new(
                 SearchIndexBackfillLimits::default().vector_build_cache_bytes(),
             )),
+            bulk: bulk::BulkBuilds::new(
+                VectorBulkBuildTuning::disabled(),
+                0,
+                0,
+                crate::index_lifecycle::worker::IndexWorkerWakeHandle::default(),
+            ),
         }
+    }
+
+    /// Lets source scans that fit `tuning` build their graph in memory.
+    /// `configured_memory_bytes` is what the configuration lets the rest of
+    /// the process hold, which an automatic budget leaves to it, and
+    /// `write_buffer_bytes` the part of it that is SlateDB's
+    /// `max_unflushed_bytes`. `worker` wakes the lifecycle worker when a
+    /// build that waited can step again.
+    ///
+    /// Without this every scan is serial, except that a graph an earlier
+    /// process left partially written is still discarded first.
+    pub(crate) fn with_bulk_builds(
+        mut self,
+        tuning: VectorBulkBuildTuning,
+        configured_memory_bytes: u64,
+        write_buffer_bytes: u64,
+        worker: crate::index_lifecycle::worker::IndexWorkerWakeHandle,
+    ) -> Self {
+        self.bulk =
+            bulk::BulkBuilds::new(tuning, configured_memory_bytes, write_buffer_bytes, worker);
+        self
+    }
+
+    /// Returns what this driver's builds report beside their stored progress.
+    pub(crate) fn build_reports(&self) -> Arc<VectorBuildReports> {
+        self.bulk.reports()
     }
 
     /// Applies runtime source-scan prefetching without admitting blocks to cache.
@@ -1069,7 +1113,9 @@ impl IndexOperationDriver for VectorIndexDriver {
         let gate = match operation.progress() {
             IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(stage)) => {
                 match stage {
-                    VectorBuildStage::Scan(_) | VectorBuildStage::CatchUp(_) => StepGate::None,
+                    VectorBuildStage::Scan(_)
+                    | VectorBuildStage::BulkBuild(_)
+                    | VectorBuildStage::CatchUp(_) => StepGate::None,
                     // Adoption and validation keep the generation Building, so
                     // they fence writers without blocking planning.
                     VectorBuildStage::AdoptLegacy(_)
@@ -1117,6 +1163,15 @@ impl IndexOperationDriver for VectorIndexDriver {
         let ValidatedDynamicIndexDefinition::Vector(definition) = record.definition() else {
             return Err(corruption("vector operation loaded another family"));
         };
+        // Only the two scan stages hold anything of a bulk build in memory.
+        if !matches!(
+            operation.progress(),
+            IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+                VectorBuildStage::Scan(_) | VectorBuildStage::BulkBuild(_)
+            ))
+        ) {
+            self.bulk.forget(operation.operation_id());
+        }
         let step = match operation.progress() {
             IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(stage)) => {
                 match definition.metric() {
@@ -1134,6 +1189,7 @@ impl IndexOperationDriver for VectorIndexDriver {
                             Arc::clone(&self.simhasher_registry),
                             self.batch_reads,
                             &self.build_cache,
+                            &self.bulk,
                         )
                         .await?
                     }
@@ -1151,6 +1207,7 @@ impl IndexOperationDriver for VectorIndexDriver {
                             Arc::clone(&self.simhasher_registry),
                             self.batch_reads,
                             &self.build_cache,
+                            &self.bulk,
                         )
                         .await?
                     }
@@ -1168,6 +1225,7 @@ impl IndexOperationDriver for VectorIndexDriver {
                             Arc::clone(&self.simhasher_registry),
                             self.batch_reads,
                             &self.build_cache,
+                            &self.bulk,
                         )
                         .await?
                     }
@@ -1245,6 +1303,21 @@ impl IndexOperationDriver for VectorIndexDriver {
         Ok(step.into_execution())
     }
 
+    fn parked_until(&self, operation: &IndexOperationRecord) -> Option<std::time::Instant> {
+        // Only a scan stage waits, and an abort moves the record off it.
+        match operation.progress() {
+            IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+                VectorBuildStage::Scan(_) | VectorBuildStage::BulkBuild(_),
+            )) => self.bulk.parked_until(operation.operation_id()),
+            IndexOperationProgress::VectorBuild(_)
+            | IndexOperationProgress::VectorCleanup(_)
+            | IndexOperationProgress::SecondaryBuild(_)
+            | IndexOperationProgress::SecondaryCleanup(_)
+            | IndexOperationProgress::TextBuild(_)
+            | IndexOperationProgress::TextCleanup(_) => None,
+        }
+    }
+
     async fn after_commit(
         &self,
         scope: DataScope,
@@ -1253,6 +1326,18 @@ impl IndexOperationDriver for VectorIndexDriver {
         committed: CommittedOperationStep,
         state: Option<CommittedStepState>,
     ) {
+        let state = match state {
+            Some(CommittedStepState::VectorBulkBuild(commit)) => {
+                self.bulk.confirm(operation.operation_id(), commit).await;
+                None
+            }
+            state @ (Some(CommittedStepState::VectorBuild(_)) | None) => state,
+        };
+        // A retry starts from the stored rows, which a blocked bulk build
+        // must delete before it can link them again.
+        if committed == CommittedOperationStep::Blocked {
+            self.bulk.forget(operation.operation_id());
+        }
         self.build_cache
             .after_commit(operation.operation_id(), committed, state)
             .await;
@@ -1394,6 +1479,7 @@ async fn step_cleanup<D: Distance>(
                         counters,
                         namespace_empty,
                         mapping_deleted: false,
+                        resume: _,
                     } = cleanup
                     else {
                         return match cleanup {
@@ -1465,6 +1551,7 @@ async fn step_cleanup<D: Distance>(
                     transaction,
                     &handle,
                     None,
+                    None,
                     definition.element_kind(),
                     progress.counters,
                     limits,
@@ -1478,16 +1565,16 @@ async fn step_cleanup<D: Distance>(
                     }
                     PhysicalCleanupOutcome::Progress {
                         counters,
-                        namespace_empty,
+                        namespace_empty: true,
                         mapping_deleted: false,
-                    } if namespace_empty => {
-                        VectorCleanupProgress::DeleteDeltas(PrefixScanProgress {
-                            cursor: None,
-                            counters,
-                        })
-                    }
+                        ..
+                    } => VectorCleanupProgress::DeleteDeltas(PrefixScanProgress {
+                        cursor: None,
+                        counters,
+                    }),
                     PhysicalCleanupOutcome::Progress {
                         counters,
+                        namespace_empty: false,
                         mapping_deleted: false,
                         ..
                     } => VectorCleanupProgress::DeletePhysical(PrefixScanProgress {
@@ -1528,6 +1615,7 @@ async fn step_cleanup<D: Distance>(
                     transaction,
                     &handle,
                     Some(&mapping),
+                    None,
                     definition.element_kind(),
                     progress.counters,
                     limits,
@@ -1558,6 +1646,8 @@ async fn step_cleanup<D: Distance>(
                 transaction,
                 scope,
                 operation,
+                &[RecordKind::BuildDelta, RecordKind::AppliedState],
+                None,
                 progress.counters,
                 limits,
             )
@@ -1571,6 +1661,7 @@ async fn step_cleanup<D: Distance>(
                 CleanupWorkOutcome::Progress {
                     counters,
                     exhausted: false,
+                    resume: _,
                 } => VectorCleanupProgress::DeleteDeltas(PrefixScanProgress {
                     cursor: None,
                     counters,
@@ -1578,6 +1669,7 @@ async fn step_cleanup<D: Distance>(
                 CleanupWorkOutcome::Progress {
                     counters,
                     exhausted: true,
+                    resume: _,
                 } => VectorCleanupProgress::Finalize(NoCursorProgress { counters }),
             }
         }
@@ -1670,8 +1762,11 @@ async fn current_or_next_mapping(
 enum PhysicalCleanupOutcome {
     Progress {
         counters: OperationCounters,
+        /// Whether a scan from the start of every lane found nothing left.
         namespace_empty: bool,
         mapping_deleted: bool,
+        /// The last row deleted, when the scan stopped before its end.
+        resume: Option<VectorCleanupRow>,
     },
     Blocked(IndexOperationBlocker),
 }
@@ -1764,15 +1859,27 @@ async fn delete_simhash_directory<D: Distance>(
             counters,
             namespace_empty,
             mapping_deleted: false,
+            resume: None,
         },
         measured,
     ))
 }
 
+/// Deletes one bounded batch of a physical namespace, and its mapping once
+/// the namespace is proven empty.
+///
+/// `resume` is the last row an earlier committed step of this operation
+/// deleted. The scan starts just past it, so a step does not read the
+/// tombstones of every step before it. Only a scan from the start of every
+/// lane proves the namespace empty, so a resumed scan that reaches the end
+/// reports the namespace as not yet empty and hands on no position: the next
+/// step scans from the start, deletes any row left behind the position like
+/// any other, and alone can report the namespace empty.
 async fn delete_physical_namespace<D: Distance>(
     transaction: &DbTransaction,
     handle: &crate::search::vector::ValidatedVectorGenerationHandle,
     mapping: Option<&MappingCleanupRow>,
+    resume: Option<&VectorCleanupRow>,
     entity_kind: IndexElementKind,
     counters: OperationCounters,
     limits: SearchIndexBatchLimits,
@@ -1789,11 +1896,14 @@ async fn delete_physical_namespace<D: Distance>(
         ));
     }
     let index = VectorIndex::<D>::from_generation(handle);
-    let mut scan = index.cleanup_scan(transaction, None).await?;
+    // A position in another namespace, such as the partition an earlier step
+    // finished, is no position in this one.
+    let resume = resume.filter(|row| index.owns_cleanup_row(row));
+    let mut scan = index.cleanup_scan(transaction, resume).await?;
     let mut rows = Vec::<VectorCleanupRow>::new();
     let mut input_bytes = mapping_input_bytes;
     let mut predicted_output_bytes = 0_u64;
-    let mut namespace_empty = true;
+    let mut exhausted = true;
     // Physical storage rows are not decoded source entities. Cleanup retains
     // only typed delete tokens and is bounded by the transaction's input,
     // output-operation, and output-byte ceilings below.
@@ -1821,13 +1931,14 @@ async fn delete_physical_namespace<D: Distance>(
                     },
                 ));
             }
-            namespace_empty = false;
+            exhausted = false;
             break;
         }
         input_bytes = next_input;
         predicted_output_bytes = next_output_bytes;
         rows.push(row);
     }
+    let namespace_empty = exhausted && resume.is_none();
 
     let mapping_delete_bytes = mapping.map_or(0, |mapping| mapping.key.len() as u64);
     let can_delete_mapping = namespace_empty
@@ -1894,29 +2005,64 @@ async fn delete_physical_namespace<D: Distance>(
         counters,
         namespace_empty,
         mapping_deleted: can_delete_mapping,
+        resume: if exhausted { None } else { rows.pop() },
     })
 }
 
 enum CleanupWorkOutcome {
     Progress {
         counters: OperationCounters,
+        /// Whether a scan from the start of every prefix found nothing left.
         exhausted: bool,
+        /// The key of the last row deleted, when the scan stopped before its
+        /// end.
+        resume: Option<Bytes>,
     },
     Blocked(IndexOperationBlocker),
 }
 
+/// Deletes one bounded batch of the generation's rows of `kinds`, which are
+/// drawn from `BuildDelta` and `AppliedState`, in that order.
+///
+/// `resume` is the key of the last row an earlier committed step of this
+/// operation deleted; see [`delete_physical_namespace`] for why the scan
+/// starts just past it and why only a scan from the start reports the rows
+/// exhausted.
 async fn delete_delta_and_applied_rows(
     transaction: &DbTransaction,
     scope: DataScope,
     operation: &IndexOperationRecord,
+    kinds: &[RecordKind],
+    resume: Option<&Bytes>,
     counters: OperationCounters,
     limits: SearchIndexBatchLimits,
 ) -> Result<CleanupWorkOutcome> {
     let mut accounting = VectorBatchAccounting::new(counters, limits);
-    let mut exhausted = true;
-    for kind in [RecordKind::BuildDelta, RecordKind::AppliedState] {
-        let prefix = generation_prefix(scope, kind, operation.index_id(), operation.generation());
-        let mut rows = transaction.scan_prefix(&prefix, ..).await?;
+    let lanes = kinds
+        .iter()
+        .map(|kind| {
+            (
+                *kind,
+                generation_prefix(scope, *kind, operation.index_id(), operation.generation()),
+            )
+        })
+        .collect::<Vec<_>>();
+    // A key outside every prefix is no position in these rows.
+    let resume = resume.filter(|key| lanes.iter().any(|(_, prefix)| key.starts_with(prefix)));
+    let mut last_deleted = None;
+    let mut reached_end = true;
+    for (kind, prefix) in lanes
+        .iter()
+        .skip_while(|(_, prefix)| resume.is_some_and(|key| !key.starts_with(prefix)))
+    {
+        let start = resume
+            .and_then(|key| key.strip_prefix(prefix.as_ref()))
+            .map_or(Bound::Unbounded, |suffix| {
+                Bound::Excluded(Bytes::copy_from_slice(suffix))
+            });
+        let mut rows = transaction
+            .scan_prefix(prefix, (start, Bound::Unbounded))
+            .await?;
         while accounting.can_read_another() {
             let Some(row) = rows.next().await? else {
                 break;
@@ -1927,7 +2073,7 @@ async fn delete_delta_and_applied_rows(
                 || !accounting.can_admit_output(VectorWriteMeasurement::zero(), 1, output_bytes)
             {
                 if accounting.is_empty() {
-                    let entity = if kind == RecordKind::BuildDelta {
+                    let entity = if *kind == RecordKind::BuildDelta {
                         decode_delta(scope, &row.key, &row.value)?.0
                     } else {
                         decode_applied(scope, &row.key, &row.value)?.0
@@ -1944,7 +2090,7 @@ async fn delete_delta_and_applied_rows(
                         },
                     ));
                 }
-                exhausted = false;
+                reached_end = false;
                 break;
             }
             transaction.delete(&row.key)?;
@@ -1955,18 +2101,19 @@ async fn delete_delta_and_applied_rows(
                 1,
                 output_bytes,
             )?;
+            last_deleted = Some(row.key);
         }
         if !accounting.can_read_another() {
-            exhausted = false;
-            break;
+            reached_end = false;
         }
-        if !exhausted {
+        if !reached_end {
             break;
         }
     }
     Ok(CleanupWorkOutcome::Progress {
         counters: accounting.finish()?,
-        exhausted,
+        exhausted: reached_end && resume.is_none(),
+        resume: if reached_end { None } else { last_deleted },
     })
 }
 
@@ -1984,7 +2131,10 @@ struct VectorStepResult {
     physical_operations: u64,
     output_bytes: u64,
     vector_planning: VectorPlanningUsage,
-    retained: Option<OfferedVectorBuild>,
+    /// How the counters of a progressed result follow the stored ones.
+    counters: StepCounters,
+    /// In-memory state the step's commit makes true of the stored rows.
+    committed: Option<CommittedStepState>,
 }
 
 impl VectorStepResult {
@@ -1995,8 +2145,15 @@ impl VectorStepResult {
             physical_operations: 0,
             output_bytes: 0,
             vector_planning: VectorPlanningUsage::default(),
-            retained: None,
+            counters: StepCounters::Continued,
+            committed: None,
         }
+    }
+
+    /// Declares how the step's counters follow the stored ones.
+    fn with_counters(mut self, counters: StepCounters) -> Self {
+        self.counters = counters;
+        self
     }
 
     /// Offers `session` for reuse once this step commits its progress.
@@ -2019,9 +2176,13 @@ impl VectorStepResult {
         else {
             return self;
         };
-        self.retained = session.into_offer(VectorPlanningCheckpoint::Build(
-            VectorBuildCheckpoint::new(operation, record, next.clone()),
-        ));
+        self.committed = session
+            .into_offer(VectorPlanningCheckpoint::Build(VectorBuildCheckpoint::new(
+                operation,
+                record,
+                next.clone(),
+            )))
+            .map(|offered| CommittedStepState::VectorBuild(Box::new(offered)));
         self
     }
 
@@ -2035,7 +2196,8 @@ impl VectorStepResult {
             physical_operations: measurement.operations(),
             output_bytes: measurement.encoded_bytes(),
             vector_planning: VectorPlanningUsage::default(),
-            retained: None,
+            counters: StepCounters::Continued,
+            committed: None,
         }
     }
 
@@ -2049,7 +2211,8 @@ impl VectorStepResult {
             physical_operations: measurement.operations(),
             output_bytes: measurement.encoded_bytes(),
             vector_planning: VectorPlanningUsage::default(),
-            retained: None,
+            counters: StepCounters::Continued,
+            committed: None,
         }
     }
 
@@ -2067,11 +2230,75 @@ impl VectorStepResult {
                 vector_planning: self.vector_planning,
                 ..StepResourceUsage::default()
             })
-            .with_committed_state(
-                self.retained
-                    .map(|retained| CommittedStepState::VectorBuild(Box::new(retained))),
-            )
+            .with_counters(self.counters)
+            .with_committed_state(self.committed)
     }
+}
+
+/// Runs one step of either scan stage: the bulk build's while the build is on
+/// the bulk path, and otherwise the serial scan's, from the progress the bulk
+/// path hands it.
+async fn step_scan<D: Distance>(
+    scan: &bulk::ScanStep<'_>,
+    build_cache: &VectorBuildCache,
+    bulk: &bulk::BulkBuilds,
+) -> Result<VectorStepResult>
+where
+    bulk::LinkedGraph: From<Box<vector::BulkGraph<D>>>,
+{
+    let (progress, counters) = match bulk.scan_step::<D>(scan).await? {
+        bulk::ScanOutcome::Bulk(step) => return Ok(*step),
+        bulk::ScanOutcome::Serial { progress, counters } => (progress, counters),
+    };
+    let mut session = build_cache
+        .checkout::<D>(&VectorBuildCheckpoint::new(
+            scan.operation,
+            scan.record,
+            scan.operation.progress().clone(),
+        ))
+        .await;
+    let stepped = scan_source::<D>(
+        scan.db,
+        scan.transaction,
+        scan.scope,
+        scan.operation,
+        scan.record,
+        scan.definition,
+        &progress,
+        scan.limits,
+        scan.scan_tuning,
+        Arc::clone(scan.simhasher_registry),
+        scan.batch_reads,
+        &mut session,
+    )
+    .await;
+    // A serial scan that takes a build over from the bulk stage commits the
+    // serial stage with its first rows. Where that step would block instead,
+    // the build leaves the bulk stage first and blocks under the serial one
+    // (see "Blocked builds" in [`bulk`]).
+    let step = match (stepped, scan.stored) {
+        (Ok(step), bulk::StoredScan::Serial(_)) => step,
+        (Ok(step), bulk::StoredScan::Bulk(_)) => match step.result {
+            // A blocked scan step staged nothing, and nothing of the bulk
+            // attempts is stored: the next step meets the blocker again.
+            IndexOperationStepResult::Blocked(_) => {
+                return Ok(
+                    VectorStepResult::ordinary(progressed_build(VectorBuildStage::Scan(progress)))
+                        .with_counters(StepCounters::Restarted),
+                );
+            }
+            IndexOperationStepResult::Progressed(_)
+            | IndexOperationStepResult::TransientFailure
+            | IndexOperationStepResult::Completed(_) => step,
+        },
+        (Err(error), bulk::StoredScan::Serial(_)) => return Err(error),
+        (Err(error), bulk::StoredScan::Bulk(_)) => {
+            return bulk.serial_scan_failed(scan, error).await;
+        }
+    };
+    Ok(step
+        .with_counters(counters)
+        .retaining(scan.operation, scan.record, session))
 }
 
 #[allow(
@@ -2091,7 +2318,24 @@ async fn step_build<D: Distance>(
     simhasher_registry: Arc<vector::SimHasherRegistry>,
     batch_reads: crate::batch_reads::BatchReads,
     build_cache: &VectorBuildCache,
-) -> Result<VectorStepResult> {
+    bulk: &bulk::BulkBuilds,
+) -> Result<VectorStepResult>
+where
+    bulk::LinkedGraph: From<Box<vector::BulkGraph<D>>>,
+{
+    let scan_step = |stored| bulk::ScanStep {
+        db,
+        transaction,
+        scope,
+        operation,
+        record,
+        definition,
+        stored,
+        limits,
+        scan_tuning,
+        simhasher_registry: &simhasher_registry,
+        batch_reads,
+    };
     match stage {
         VectorBuildStage::AdoptLegacy(progress) => {
             adopt_legacy::<D>(
@@ -2118,29 +2362,20 @@ async fn step_build<D: Distance>(
             .await
         }
         VectorBuildStage::Scan(progress) => {
-            let mut session = build_cache
-                .checkout::<D>(&VectorBuildCheckpoint::new(
-                    operation,
-                    record,
-                    operation.progress().clone(),
-                ))
-                .await;
-            let step = scan_source::<D>(
-                db,
-                transaction,
-                scope,
-                operation,
-                record,
-                definition,
-                progress,
-                limits,
-                scan_tuning,
-                simhasher_registry,
-                batch_reads,
-                &mut session,
+            step_scan::<D>(
+                &scan_step(&bulk::StoredScan::Serial(progress.clone())),
+                build_cache,
+                bulk,
             )
-            .await?;
-            Ok(step.retaining(operation, record, session))
+            .await
+        }
+        VectorBuildStage::BulkBuild(progress) => {
+            step_scan::<D>(
+                &scan_step(&bulk::StoredScan::Bulk(progress.clone())),
+                build_cache,
+                bulk,
+            )
+            .await
         }
         VectorBuildStage::CatchUp(progress) => {
             // Only builds started before operations were queued persist this
@@ -2952,7 +3187,8 @@ async fn scan_source<D: Distance>(
         physical_operations: 0,
         output_bytes: 0,
         vector_planning,
-        retained: None,
+        counters: StepCounters::Continued,
+        committed: None,
     })
 }
 
@@ -4447,6 +4683,18 @@ impl VectorBatchAccounting {
         Ok(())
     }
 
+    /// Records vector writes no source entity of the batch accounts for.
+    fn admit_vector_writes(
+        &mut self,
+        cumulative_vector: VectorWriteMeasurement,
+        single_vector_output_bytes: u64,
+    ) {
+        self.vector_writes = cumulative_vector;
+        self.max_single_vector_output_bytes = self
+            .max_single_vector_output_bytes
+            .max(single_vector_output_bytes);
+    }
+
     fn finish(self) -> Result<OperationCounters> {
         Ok(OperationCounters {
             entities: checked_add(
@@ -5011,9 +5259,11 @@ mod tests {
             counters,
             namespace_empty,
             mapping_deleted,
+            resume: Some(first_row),
         } = delete_physical_namespace::<vector::distance::Euclidean>(
             &limited_cleanup_transaction,
             &generation,
+            None,
             None,
             IndexElementKind::Node,
             OperationCounters::default(),
@@ -5030,6 +5280,33 @@ mod tests {
         assert!(!mapping_deleted);
         drop(limited_cleanup_transaction);
 
+        // A scan resumed behind that row deletes every row after it and has
+        // not read the one before its position, which is still stored here.
+        let resumed_cleanup_transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .expect("resumed vector cleanup transaction opens");
+        let PhysicalCleanupOutcome::Progress {
+            counters: resumed,
+            namespace_empty: false,
+            mapping_deleted: false,
+            resume: None,
+        } = delete_physical_namespace::<vector::distance::Euclidean>(
+            &resumed_cleanup_transaction,
+            &generation,
+            None,
+            Some(&first_row),
+            IndexElementKind::Node,
+            OperationCounters::default(),
+            one_entity,
+        )
+        .await
+        .expect("resumed physical cleanup batch plans")
+        else {
+            panic!("a resumed scan that reaches the end proves nothing empty");
+        };
+        drop(resumed_cleanup_transaction);
+
         let cleanup_transaction = db
             .begin(IsolationLevel::SerializableSnapshot)
             .await
@@ -5038,9 +5315,11 @@ mod tests {
             counters,
             namespace_empty,
             mapping_deleted,
+            resume: _,
         } = delete_physical_namespace::<vector::distance::Euclidean>(
             &cleanup_transaction,
             &generation,
+            None,
             None,
             IndexElementKind::Node,
             OperationCounters::default(),
@@ -5060,6 +5339,7 @@ mod tests {
             "physical cleanup rows must not consume the decoded source-entity limit"
         );
         assert_eq!(counters.output_operations, counters.entities);
+        assert_eq!(resumed.entities + 1, counters.entities);
         drop(cleanup_transaction);
 
         let IndexDdlReceipt::Accepted {

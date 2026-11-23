@@ -1122,6 +1122,9 @@ struct HelixDBInner {
     index_operation_backlog: Arc<index_lifecycle::queue::backlog::IndexOperationBacklog>,
     index_queue_store: Arc<index_lifecycle::queue::storage::QueueStore>,
     index_queue_publisher: Option<Arc<index_lifecycle::queue::publication::QueuePublisher>>,
+    /// What this process's vector builds report beside their records, for
+    /// operation statuses.
+    vector_build_reports: Arc<index_lifecycle::vector::VectorBuildReports>,
     /// Analyses of queued text that text searches reuse, shared with the
     /// publisher, which drops a generation's once nothing of it is queued.
     pending_text_analyses: Arc<search::text::pending::PendingTextAnalyses>,
@@ -2024,12 +2027,21 @@ impl HelixDB {
             index_lifecycle::secondary::SecondaryIndexDriver::new(Arc::clone(&index_scope_gates))
                 .with_scan_tuning(lifecycle_throughput.scan()),
         );
+        // Created before the worker, so the drivers and the operation ledger
+        // can wake it.
+        let index_worker_wake = index_lifecycle::worker::IndexWorkerWakeHandle::default();
         let vector_driver = index_lifecycle::vector::VectorIndexDriver::new(
             Arc::clone(&index_scope_gates),
             Arc::clone(&vector_memory.registry),
             Arc::clone(&vector_memory.simhasher_registry),
         )
         .with_scan_tuning(lifecycle_throughput.scan())
+        .with_bulk_builds(
+            lifecycle_throughput.vector_bulk_build(),
+            config.db().configured_memory_bytes(),
+            config.db().write_buffer_bytes(),
+            index_worker_wake.clone(),
+        )
         .with_batch_reads(batch_reads::BatchReads::for_block_cache(
             slate_db_cache.as_ref(),
         ))
@@ -2041,6 +2053,7 @@ impl HelixDB {
         );
         // Queue publication plans within the budget builds retain sessions in.
         let vector_planning_cache = vector_driver.build_cache();
+        let vector_build_reports = vector_driver.build_reports();
         let vector_driver: Arc<dyn index_lifecycle::outbox::IndexOperationDriver> =
             Arc::new(vector_driver);
         let secondary_scheduling = index_scheduling.resolve(match secondary_tuning.worker_mode() {
@@ -2092,7 +2105,6 @@ impl HelixDB {
         let index_claim_sequences =
             Arc::new(index_lifecycle::worker::ClaimSequenceAllocator::new());
         let queue_tuning = config.db().index_operation_queue();
-        let index_worker_wake = index_lifecycle::worker::IndexWorkerWakeHandle::default();
         let index_operation_backlog = index_lifecycle::queue::backlog::IndexOperationBacklog::new(
             index_lifecycle::queue::backlog::BacklogLimits {
                 max_retained_bytes: queue_tuning.max_retained_bytes().get(),
@@ -2203,6 +2215,7 @@ impl HelixDB {
                 index_operation_backlog,
                 index_queue_store,
                 index_queue_publisher,
+                vector_build_reports,
                 pending_text_analyses,
                 strong_text_search_rejections: std::sync::atomic::AtomicU64::new(0),
                 strong_text_search_warned: parking_lot::Mutex::new(None),
@@ -2343,6 +2356,10 @@ impl HelixDB {
         scope: DataScope,
         operation_id: index_lifecycle::IndexOperationId,
     ) -> Result<index_lifecycle::IndexOperationStatus> {
+        // Read before the records: a step that finds the operation at the
+        // bulk stage after this is a sighting this call has not seen.
+        let reports = &self.inner.vector_build_reports;
+        let sightings = reports.bulk_stage_sightings(operation_id);
         let operation = match self.storage() {
             HelixStorage::Reader(reader) => {
                 index_lifecycle::outbox::read_operation(reader.as_ref(), scope, operation_id)
@@ -2359,9 +2376,54 @@ impl HelixDB {
                 operation_id: operation_id.as_uuid().to_string(),
             });
         };
-        Ok(index_lifecycle::IndexOperationStatus::from_record(
-            &operation,
-        ))
+        // Only a writer's applied record can be ahead of what a restart
+        // would find, and that matters only for an operation that may have
+        // left a vector build's bulk stage in what this process applied and
+        // not in what it uploaded. A step of this process took it off the
+        // stage, which the sightings tell until the two records are the
+        // same one off it; or an abort did, which takes a build off the
+        // stage without a step, in any process, so the durable record of an
+        // aborting vector build is read every time. Every other status
+        // costs no read.
+        let durable = match self.storage() {
+            HelixStorage::Writer(writer)
+                if sightings.is_some() || index_lifecycle::is_aborting_vector_build(&operation) =>
+            {
+                let durable = index_lifecycle::outbox::read_durable_operation_record(
+                    writer.db(),
+                    scope,
+                    operation_id,
+                )
+                .await?;
+                match sightings {
+                    Some(sightings)
+                        if durable.as_ref() == Some(&operation)
+                            && !index_lifecycle::at_bulk_stage(&operation) =>
+                    {
+                        reports.durably_left_bulk_stage(operation_id, sightings);
+                    }
+                    Some(_) | None => {}
+                }
+                durable
+            }
+            HelixStorage::Writer(_) | HelixStorage::Reader(_) => None,
+        };
+        Ok(
+            self.vector_build_report(index_lifecycle::IndexOperationStatus::from_record(
+                index_lifecycle::status_record(&operation, durable.as_ref()),
+            )),
+        )
+    }
+
+    /// Attaches what this process's vector driver knows of `status`'s
+    /// operation beside its record.
+    fn vector_build_report(
+        &self,
+        status: index_lifecycle::IndexOperationStatus,
+    ) -> index_lifecycle::IndexOperationStatus {
+        let operation_id = status.common().operation_id;
+        let reports = &self.inner.vector_build_reports;
+        status.with_vector_build_report(reports.path(operation_id), reports.phase(operation_id))
     }
 
     /// Compares every label bitmap of `scope` with the rows carrying its
@@ -2678,9 +2740,11 @@ impl HelixDB {
         ) {
             self.notify_index_worker();
         }
-        Ok(index_lifecycle::IndexOperationStatus::from_record(
-            &operation,
-        ))
+        Ok(
+            self.vector_build_report(index_lifecycle::IndexOperationStatus::from_record(
+                &operation,
+            )),
+        )
     }
 
     /// Converts a constructing BUILD into cleanup, while converging on the
@@ -2734,9 +2798,11 @@ impl HelixDB {
         ) {
             self.notify_index_worker();
         }
-        Ok(index_lifecycle::IndexOperationStatus::from_record(
-            &operation,
-        ))
+        Ok(
+            self.vector_build_report(index_lifecycle::IndexOperationStatus::from_record(
+                &operation,
+            )),
+        )
     }
 
     /// Return the database path inside the object store.

@@ -325,6 +325,35 @@ mod tests {
         ));
         decode_operation_record(&operation[1..])
             .expect("checked-in operation record reaches the current decoder");
+        let bulk_build = hex_seed(include_bytes!(
+            "../fuzz/corpus/current_index_v2_records/valid-vector-bulk-build-operation-record"
+        ));
+        assert!(matches!(
+            decode_operation_record(&bulk_build[1..])
+                .expect("checked-in bulk build record reaches the current decoder")
+                .progress(),
+            crate::index_lifecycle::IndexOperationProgress::VectorBuild(
+                crate::index_lifecycle::VectorBuildProgress::Constructing(
+                    crate::index_lifecycle::VectorBuildStage::BulkBuild(progress)
+                )
+            ) if progress.attempts.get() == 3
+        ));
+        for malformed in [
+            include_bytes!(
+                "../fuzz/corpus/current_index_v2_records/vector-bulk-build-zero-attempts"
+            )
+            .as_slice(),
+            include_bytes!(
+                "../fuzz/corpus/current_index_v2_records/vector-bulk-build-without-attempts"
+            )
+            .as_slice(),
+            include_bytes!(
+                "../fuzz/corpus/current_index_v2_records/vector-bulk-build-unknown-stage"
+            )
+            .as_slice(),
+        ] {
+            assert!(decode_operation_record(&hex_seed(malformed)[1..]).is_err());
+        }
         let metadata = hex_seed(include_bytes!(
             "../fuzz/corpus/current_index_v2_records/valid-storage-version"
         ));

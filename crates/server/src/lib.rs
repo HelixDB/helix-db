@@ -252,6 +252,7 @@ pub async fn run_until_ctrl_c(config: ServerConfig) -> ServerResult<()> {
 ///     storage: StorageConfig::Memory,
 ///     wal_flush_interval_ms: None,
 ///     sst_compression: db::config::SstCompression::default(),
+///     vector_bulk_build_memory: db::config::VectorBulkBuildMemory::default(),
 ///     index_operation_queue: db::config::IndexOperationQueueTuning::default(),
 /// };
 /// server::run_with_shutdown(config, async {}).await.unwrap();
