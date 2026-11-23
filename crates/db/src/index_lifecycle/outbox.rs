@@ -1365,16 +1365,11 @@ pub(crate) async fn execute_claimed_step_with_evidence(
                 // Staged here, the entry commits in the transaction that
                 // moves the record to `Dropped`, or neither does: a failure
                 // is the step's, and blocks the operation like any other.
-                match left {
-                    Some(rows) => {
-                        stage_dropped_entry(&transaction, claimed.scope, &operation, rows)
-                            .await
-                            .inspect_err(|_| {
-                                driver_failed = true;
-                            })?;
-                    }
-                    None => {}
-                }
+                stage_dropped_entry(&transaction, claimed.scope, &operation, left)
+                    .await
+                    .inspect_err(|_| {
+                        driver_failed = true;
+                    })?;
                 let next_index = index.transition(transition)?;
                 let next = operation
                     .complete(outcome, next_index.revision())
@@ -1599,7 +1594,8 @@ impl DriverFailure {
 }
 
 /// Stages the dropped-generation entry of the generation `operation` gives
-/// up, whose `rows` its cleanup left to compactions.
+/// up, whose rows its cleanup `left` to compactions; nothing when it left
+/// none.
 ///
 /// This is the only place an entry is written, and its one caller is the
 /// function that commits the step and then tells the writer's registry.
@@ -1607,8 +1603,11 @@ async fn stage_dropped_entry(
     transaction: &DbTransaction,
     scope: DataScope,
     operation: &IndexOperationRecord,
-    rows: DroppedGenerationRows,
+    left: Option<DroppedGenerationRows>,
 ) -> Result<()> {
+    let Some(rows) = left else {
+        return Ok(());
+    };
     if !dropped::admitted(transaction).await? {
         return Err(corruption(
             "a step left rows to compactions on a store that admits no dropped-generation entry",

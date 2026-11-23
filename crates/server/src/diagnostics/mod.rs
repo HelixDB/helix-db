@@ -1145,8 +1145,14 @@ fn dropped_index_storage(storage: &db::DroppedIndexStorage) -> Check {
             },
         );
     }
-    match &storage.last_pass {
-        Some(db::DroppedStoragePass::Failed { at, since, error }) => {
+    // A proof that has not been matched to its tables for this long is held
+    // up by something; one that tracks tables only waits for a compaction.
+    let stalled = storage
+        .stalled_since
+        .map(|since| since.elapsed())
+        .filter(|stood| *stood >= DROPPED_STALLED_AFTER);
+    let looked = match (&storage.last_pass, stalled) {
+        (Some(db::DroppedStoragePass::Failed { at, since, error }), _) => {
             return Check::new(
                 CheckId::DroppedIndexStorage,
                 "The background pass over dropped index storage is failing",
@@ -1165,14 +1171,7 @@ fn dropped_index_storage(storage: &db::DroppedIndexStorage) -> Check {
                 },
             );
         }
-        Some(db::DroppedStoragePass::Completed { .. }) | None => {}
-    }
-    let stalled = storage
-        .stalled_since
-        .map(|since| since.elapsed())
-        .filter(|stood| *stood >= DROPPED_STALLED_AFTER);
-    match stalled {
-        Some(stood) => {
+        (Some(db::DroppedStoragePass::Completed { .. }) | None, Some(stood)) => {
             return Check::new(
                 CheckId::DroppedIndexStorage,
                 "Dropped index generations are not making progress",
@@ -1190,16 +1189,13 @@ fn dropped_index_storage(storage: &db::DroppedIndexStorage) -> Check {
                 },
             );
         }
-        None => {}
-    }
-    let looked = match &storage.last_pass {
-        Some(db::DroppedStoragePass::Completed { at }) => {
+        (Some(db::DroppedStoragePass::Completed { at }), None) => {
             format!(
                 "As of the last background pass, {} ago",
                 elapsed(at.elapsed())
             )
         }
-        Some(db::DroppedStoragePass::Failed { .. }) | None => {
+        (None, None) => {
             "The first background pass has not run yet, so as far as it knows".to_string()
         }
     };
