@@ -39,7 +39,7 @@ passes a busy node when it addresses that node by ID.
 
 ## Storage contract
 
-The current and maximum supported index storage version is **7**. Canonical
+The current and maximum supported index storage version is **8**. Canonical
 values and the existing `HLXRBM2` / `HLXADJ2` membership-delta codecs are unchanged.
 WAL replay, partial merging, and compaction must retain support for those operands.
 The membership deltas themselves need no index rebuild or storage migration.
