@@ -5010,6 +5010,14 @@ Have a feature request? [Let us know on Discord](https://discord.com/invite/2stg
 
 Page type: Reference
 
+- **Behavior change: `date_time` parameters are stored as datetimes**, not strings. Cypher and SQL read and write datetimes, and `datetime()` and `timestamp()` work as index bounds. A datetime compared with text is unknown on every plan, so filter datetime properties with a `date_time` parameter or a `{"date_time": <ms>}` constant, not a string.
+- **Stored RFC 3339 strings become datetimes.** On first open, a background job converts each property whose every value is an RFC 3339 string at millisecond precision or coarser. Properties holding other values, dates without a time, or sub-millisecond times stay as they are. The server serves reads and writes while it runs, and logs `datetime string migration completed` when done.
+- **Label index rows are keyed by the exact label.** On first open, a background copy writes the new rows, publishes them and deletes the old ones. Lifecycle index builds then read from the label's bitmap.
+- **Google Cloud Storage** is an object storage backend.
+- **Faster index builds:** a build no longer waits on the object store at each step or rescans deltas it has applied.
+- **Background migrations** are isolated, paced and back off independently. Responses report execution, commit and durable-wait time in `Server-Timing`.
+- **Upgrading:** this release changes stored data. The label copy publishes storage version 7, and the datetime conversion rewrites stored values. Both run on first open. After that, v0.0.16 and earlier cannot read the data, so take a backup before you upgrade if you may need to go back.
+
 - **Durable requests time out after 30 s.** While the object store is unreachable, durable writes and native no-op requests fail with `query_deadline_exceeded` (HTTP 408) instead of hanging. The commit may still have happened, so reconcile before you resend. Index definition changes still wait without a limit.
 - **Faster bulk inserts:** 1.6–2.3x as many nodes per second in an in-process insert with 8 clients and 8 indexes. p99 at 8 clients rose from about 0.5 s to 1.1–3.1 s.
 - **Shorter pause when a secondary index activates:** the longest write gap during a 600K-row build fell from 11.9 s to 1.3 s.
