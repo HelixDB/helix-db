@@ -482,8 +482,15 @@ deletes what it wrote and builds the index serially at once
   or restart the current release with `HELIX_VECTOR_BULK_BUILD_MEMORY_BYTES` unset and
   wait until the build no longer reports path `bulk` (it deletes what it wrote, at about
   2,600 entities a second, and continues serially under either release), or abort it and
-  wait until it reports `aborted`, which deletes the same rows far more slowly. A status
-  reports `bulk` for as long as that is what a restart would find.
+  wait until it reports `aborted`. A status reports `bulk` for as long as that is what a
+  restart would find.
+
+  That makes a database readable by such a release only while its index storage version
+  is below 8, where an abort deletes the same rows far more slowly. The current release
+  moves a database it opens as the writer to version 8: an abort then ends within
+  seconds and leaves the rows to compactions, and no release from before in-memory
+  builds opens the database, so going back past it needs a backup taken before the
+  upgrade.
 </Warning>
 
 ## Next steps

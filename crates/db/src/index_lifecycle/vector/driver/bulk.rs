@@ -303,7 +303,9 @@
 //!   however many attempts were counted; the build goes on serially, here or
 //!   under the older binary.
 //! - Abort the build. An abort stores the cleanup progress every binary
-//!   reads, and cleanup deletes the partly written graph like any other.
+//!   reads, and cleanup removes the partly written graph like any other
+//!   generation: row by row on a store that admits no dropped-generation
+//!   entry, which is the only store such a binary can still open.
 //!
 //! A build that finished its bulk stage needs neither: `ValidateDescriptor`
 //! and everything after it are stages every binary reads.
@@ -427,9 +429,11 @@
 //!   its reads, and a scan that finds no row has no position to hand on. A
 //!   process restarted while it deletes pays that scan once more, over the
 //!   tombstones written so far.
-//!   Aborting a partly written build deletes through the cleanup every build
-//!   shares, which was slower still: 46 to 60 minutes for a fifth of a
-//!   million-vector graph.
+//!   Aborting a partly written build goes through the cleanup every build
+//!   shares. On a store that admits dropped-generation entries it leaves the
+//!   graph to compactions. On one that does not it deletes row by row, which
+//!   was slower still: 46 to 60 minutes for a fifth of a million-vector
+//!   graph.
 //! - A build whose operation never runs another step in this process keeps
 //!   its reservation, and builds waiting for it keep waiting. Every way an
 //!   operation leaves its scan (completion, a blocker, an abort) runs a step
