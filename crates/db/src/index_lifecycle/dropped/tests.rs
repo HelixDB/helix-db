@@ -997,18 +997,6 @@ fn the_last_pass_is_reported_with_how_long_passes_have_failed() {
 }
 
 #[test]
-fn every_admission_moves_a_store_and_a_pristine_managed_store_starts_there() {
-    // The decision the owner has still to take is in these two places.
-    for admission in Admission::ALL {
-        assert!(admission.moves_store(), "{admission:?}");
-    }
-    assert_eq!(
-        PRISTINE_MANAGED_STORE,
-        IndexStorageVersion::DROPPED_GENERATIONS
-    );
-}
-
-#[test]
 fn the_embedded_compactor_never_moves_tables_without_a_filter() {
     use slatedb::config::CompactorOptions;
 

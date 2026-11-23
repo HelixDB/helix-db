@@ -147,63 +147,30 @@ use super::{
     VectorPhysicalIndexId,
 };
 
-/// Who asks for a store at [`IndexStorageVersion::LABEL_IDENTITY`] to be
-/// moved to [`IndexStorageVersion::DROPPED_GENERATIONS`].
-///
-/// Which stores are moved, and by whom, is decided here and nowhere else:
-/// [`Self::moves_store`] says whether each caller of [`admit`] performs the
-/// move, and [`PRISTINE_MANAGED_STORE`] is the version a pristine managed
-/// store starts at. Changing who performs the move is an edit to those two.
-///
-/// The move is one way: images that support at most version 7 refuse a store
-/// at version 8, so every reader must run an image that knows version 8
-/// before any writer that performs the move opens the store.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Admission {
-    /// A writer open that is authorized to migrate: an embedded open, or a
-    /// managed open with a controlled-migration intent. It asks once it has
-    /// started, or found finished, the label identity copy.
-    MigrationAuthorizedOpen,
-    /// The background migration worker of any writer, a managed failover
-    /// writer included, right after its label identity copy has published
-    /// version 7.
-    LabelCopyPublished,
-}
-
-impl Admission {
-    /// Every admission the code knows.
-    #[cfg(test)]
-    pub(crate) const ALL: [Self; 2] = [Self::MigrationAuthorizedOpen, Self::LabelCopyPublished];
-
-    /// Whether this caller moves the store. Each does today.
-    pub(crate) const fn moves_store(self) -> bool {
-        match self {
-            Self::MigrationAuthorizedOpen | Self::LabelCopyPublished => true,
-        }
-    }
-}
-
-/// The version a pristine managed store is bootstrapped at: it has no rows
-/// of any earlier layout, so it starts where [`admit`] would take it.
-pub(crate) const PRISTINE_MANAGED_STORE: IndexStorageVersion =
-    IndexStorageVersion::DROPPED_GENERATIONS;
-
 /// Moves a store at [`IndexStorageVersion::LABEL_IDENTITY`] to
 /// [`IndexStorageVersion::DROPPED_GENERATIONS`] in one commit that writes
-/// only the marker, if `by` [moves the store](Admission::moves_store); the
-/// two versions share every other row. Binaries that support at most
-/// version 7 refuse the store from then on: they would neither decode a
-/// dropped-generation entry nor discard its rows.
+/// only the marker; the two versions share every other row.
+///
+/// The move is automatic, and two callers perform it: a writer open that is
+/// authorized to migrate (an embedded open, or a managed open with a
+/// controlled-migration intent), once it has started or found finished the
+/// label identity copy; and the background migration worker of any writer,
+/// a managed failover writer included, right after its copy has published
+/// version 7. A pristine managed store is bootstrapped at the current
+/// version, and a new embedded database ends its first open there.
+///
+/// The move is one way. Binaries that support at most version 7 refuse the
+/// store from then on: they would neither decode a dropped-generation entry
+/// nor discard its rows. So every reader must run an image that knows
+/// version 8 before any writer that knows it opens the store.
 ///
 /// A store below version 7 is left alone: one whose label identity copy is
 /// still running is admitted by the background worker in a second commit
 /// after the copy publishes, or by the next migration-authorized open when
 /// the process dies between the two. A store already admitted is left alone
 /// too.
-pub(crate) async fn admit(db: &Db, by: Admission) -> Result<()> {
-    if !by.moves_store()
-        || crate::migrations::startup::storage_version(db).await?
-            != IndexStorageVersion::LABEL_IDENTITY
+pub(crate) async fn admit(db: &Db) -> Result<()> {
+    if crate::migrations::startup::storage_version(db).await? != IndexStorageVersion::LABEL_IDENTITY
     {
         return Ok(());
     }
@@ -214,7 +181,7 @@ pub(crate) async fn admit(db: &Db, by: Admission) -> Result<()> {
         |_| Ok(()),
     )
     .await?;
-    tracing::info!(?by, "index storage admits dropped-generation entries");
+    tracing::info!("index storage admits dropped-generation entries");
     Ok(())
 }
 
@@ -322,7 +289,7 @@ pub(crate) async fn admit_fixture(db: &Db) {
     )
     .await
     .expect("fixture storage version is written");
-    admit(db, Admission::MigrationAuthorizedOpen)
+    admit(db)
         .await
         .expect("fixture store admits dropped-generation entries");
     assert!(admitted(db).await.expect("storage version reads"));

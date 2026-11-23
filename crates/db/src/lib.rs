@@ -1733,11 +1733,7 @@ impl HelixDB {
                 // while the writer serves, and every graph write files label
                 // rows under both keys meanwhile.
                 migrations::start_label_identity_copy(&db).await?;
-                index_lifecycle::dropped::admit(
-                    &db,
-                    index_lifecycle::dropped::Admission::MigrationAuthorizedOpen,
-                )
-                .await?;
+                index_lifecycle::dropped::admit(&db).await?;
                 index_lifecycle::outbox::reconcile_legacy_reader_coordination_operations(
                     &db,
                     DataScope::LegacyUnscoped,
@@ -5840,6 +5836,14 @@ mod tests {
         )
         .await
         .expect("explicit bootstrap initializes current storage");
+        // A pristine managed store starts at the current storage version:
+        // it has no rows of any earlier layout to move.
+        assert_eq!(
+            migrations::startup::storage_version(bootstrap.inner_db().as_ref())
+                .await
+                .expect("the storage version reads"),
+            index_lifecycle::IndexStorageVersion::CURRENT
+        );
         let prefix = migrations::migration_job_scan_prefix_scoped(DataScope::LegacyUnscoped);
         let mut jobs = bootstrap
             .inner_db()
@@ -5857,6 +5861,12 @@ mod tests {
         )
         .await
         .expect("current storage recovers without migration");
+        assert_eq!(
+            migrations::startup::storage_version(recovered.inner_db().as_ref())
+                .await
+                .expect("the storage version reads"),
+            index_lifecycle::IndexStorageVersion::CURRENT
+        );
         let mut jobs = recovered.inner_db().scan_prefix(prefix, ..).await.unwrap();
         assert!(jobs.next().await.unwrap().is_none());
         recovered.close().await.expect("recovered writer closes");

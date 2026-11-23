@@ -30,11 +30,7 @@ pub(crate) async fn prepare_writer(
     let prepare_result: Result<()> = async {
         super::super::run_blocking_startup_migration(&writer, config.migrations()).await?;
         super::super::start_label_identity_copy(writer.db()).await?;
-        crate::index_lifecycle::dropped::admit(
-            writer.db(),
-            crate::index_lifecycle::dropped::Admission::MigrationAuthorizedOpen,
-        )
-        .await?;
+        crate::index_lifecycle::dropped::admit(writer.db()).await?;
         writer.observe_storage_version(super::stored_storage_version(writer.db()).await?);
         crate::index_lifecycle::outbox::reconcile_legacy_reader_coordination_operations(
             writer.db(),
