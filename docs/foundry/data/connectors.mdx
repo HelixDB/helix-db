@@ -7,7 +7,7 @@ pageType: "Reference"
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-Foundry reads thirteen kinds of source, and takes data your apps and agents send to an
+Foundry reads fourteen kinds of source, and takes data your apps and agents send to an
 [API source](/foundry/data/api-sources). Apps sync every table their credential can
 read; databases and Amazon S3 sync the tables you choose. Granola, Slack, Notion and
 Google Workspace also keep text as [documents](/foundry/data/documents) in sets of their
@@ -20,13 +20,14 @@ every plan offers every kind: plans differ in
 | [Stripe](#stripe) | Restricted (`rk_`) or secret (`sk_`) API key | Customers, subscriptions, invoices, payments and more |
 | [WorkOS](#workos) | Secret API key (`sk_`) | Organizations, users, SSO and directories |
 | [PostHog](#posthog) | Personal API key (`phx_`) | Persons, groups and events |
-| [GitHub](#github) | Fine-grained (`github_pat_`) or classic (`ghp_`) token | Issues, pull requests, comments and reviews |
-| [Linear](#linear) | Personal API key (`lin_api_`) | Teams, projects, cycles, issues and comments |
+| [GitHub](#github) | Sign in with GitHub, or a fine-grained (`github_pat_`) or classic (`ghp_`) token | Issues, pull requests, comments and reviews |
+| [Linear](#linear) | Sign in with Linear, or a personal API key (`lin_api_`) | Teams, projects, cycles, issues and comments |
 | [Cal.com](#cal-com) | API key (`cal_live_`) | Bookings, attendees, event types and schedules |
 | [Granola](#granola) | API key (`grn_`) | Meeting notes and attendees, kept as documents too |
 | [Slack](#slack) | An app's bot token (`xoxb-`) | Channels, members and messages, each channel's days kept as documents too |
 | [Notion](#notion) | Internal integration secret (`ntn_`) | Pages, databases and people, each page kept as a document too |
-| [Google Workspace](#google-workspace) | Service account JSON key with domain-wide delegation | Drive files, calendars, events and people, each Google Doc kept as a document too |
+| [Google Workspace](#google-workspace) | Service account JSON key with domain-wide delegation | Drive files, calendars, events and people; Google Docs, meeting transcripts and PDFs kept as documents too |
+| [Databuddy](#databuddy) | API key (`dbdy_`) | Websites' daily metrics, pages, referrers, custom events, sessions and visitors |
 | [PostgreSQL](#postgresql) | Database user and password | The tables you choose |
 | [MySQL](#mysql) | Database user and password | The tables you choose |
 | [Amazon S3](#amazon-s3) | IAM role, or an access key | Parquet, JSON and CSV files as tables |
@@ -78,11 +79,21 @@ want to import.
 Syncs `persons`, `person_distinct_ids` and `groups` in full, and `events` and
 `daily_event_counts` for the event history you chose.
 
+PostHog syncs at most once a day on every plan, since PostHog limits repeated exports
+through its query API.
+
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/data/posthog-form.png" alt="The PostHog form with the personal API key, region, project ID and event history fields" />
 </Frame>
 
 ## GitHub
+
+When the form offers **Connect with GitHub**, select it and authorize Helix Foundry. It
+reads metadata, issues and pull requests, never code, and only the repositories chosen
+where the Helix Foundry GitHub App is installed. If the app isn't installed yet, Foundry
+sends you to install it and choose repositories. On an organization, an owner installs
+it. GitHub keeps the sign-in: it reads as you, and stops if you leave the workspace,
+until an owner or admin signs it in again. A personal access token works instead:
 
 In GitHub, open **Settings** → **Developer settings** → **Fine-grained tokens** and
 create a token named "Helix Foundry". For an organization's repositories, choose the
@@ -92,13 +103,17 @@ classic token (`ghp_…`) with the `repo` scope works too.
 
 | Field | Notes |
 | --- | --- |
-| Repositories | Optional: one `owner/name` per line. Blank syncs every repository the token can read, up to 100. |
+| Repositories | Optional: up to 100, one `owner/name` per line. Blank syncs every repository the token can read; if it reads more than 100, the test asks you to list them. |
 | Review history (days) | 1 to 365, 90 by default: how far back pull request reviews are read. |
 
 Syncs `repositories`, `users`, `labels`, `milestones`, `issues`, `pull_requests`,
 `issue_comments` and `pull_request_reviews`. Foundry never reads code.
 
 ## Linear
+
+When the form offers **Connect with Linear**, select it and authorize Helix Foundry. It
+reads every team you can see. Linear keeps the sign-in, as GitHub does. A personal API
+key works instead:
 
 In Linear, open **Settings** → **Security & access** and create a personal API key named
 "Helix Foundry" with **Read** access. It reads every team you can see in Linear.
@@ -212,8 +227,26 @@ users.
 
 Syncs `files` (Drive), `calendars`, `calendar_events` and `event_attendees` (Calendar),
 and `users` (directory). Each API has its own scope: one you didn't delegate leaves out
-only its tables, and the test names them. Each Google Doc the user can open and download
-is also kept as a Markdown document, without images, in the connection's **Docs** set.
+only its tables, and the test names them.
+
+Each Google Doc the user can open and download is also kept as a Markdown document,
+without images, in the connection's **Docs** set. Each meeting transcript (`.vtt` file)
+goes in a **Transcripts** set, and each PDF of up to 3 MiB in a **PDFs** set. A PDF's
+text is read as an uploaded PDF's is, up to 150 pages; a scan has no text to read.
+
+## Databuddy
+
+In your Databuddy dashboard, open **Organization settings** → **API keys** and create a
+key named "Helix Foundry" with the **read:data** scope, for every website or only the
+ones to sync. Databuddy shows the key once.
+
+| Field | Notes |
+| --- | --- |
+| Websites | Optional: one website id per line. Blank syncs every website the key can read. |
+| Days of history | 1 to 365, 90 by default. |
+
+Syncs `websites`, and `daily_metrics`, `pages`, `referrers`, `custom_events`, `sessions`
+and `profiles` for each website over the days of history.
 
 ## PostgreSQL
 
@@ -251,7 +284,10 @@ database you name. Give the user `SELECT` on it only.
 
 Foundry reads Parquet, JSON, JSON Lines and CSV files (plain, gzip, zstd or bzip2) from
 one folder of a bucket. Files with the same shape become one table, named after their
-folder or file name, and every sync reads them all again.
+folder or file name. On Free, every sync reads them all again. On Pro and Max, a sync
+skips a table whose files haven't changed and reads only files added after the rest; it
+reads a table in full when its files change otherwise, when it has no key, and once a
+day.
 
 | Field | Notes |
 | --- | --- |
@@ -306,7 +342,7 @@ redirects.
 | Rows per table | 2,000,000, and 2 GiB. A larger table fails the sync: for a database, leave it out; for PostHog, shorten the event history. |
 | Size of an S3 connection's tables, per sync | 20 GB. Choose fewer tables, or a narrower folder. |
 | Documents a connection keeps, per set | The newest 1,000 |
-| Scheduled syncs | Free daily, Pro hourly, Max every 15 minutes |
+| Scheduled syncs | Free daily, Pro hourly, Max every 15 minutes; PostHog daily on every plan |
 | One sync attempt | 2 hours |
 | Attempts per sync | 3 |
 | Syncs running per connection | 1 |

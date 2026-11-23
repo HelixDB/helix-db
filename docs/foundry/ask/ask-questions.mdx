@@ -1,16 +1,15 @@
 ---
-title: "Ask the Analyst questions about your data"
-description: "Ask a Helix Foundry ontology's load questions in plain language in the Analyst, follow each step, read charts and tables, and open the records, rows and quotes its answers cite"
-sidebarTitle: "Analyst"
+title: "Ask Founder questions about your data"
+description: "Ask a Helix Foundry ontology's load questions in plain language with Founder, follow each step, read charts and tables, and open the records, rows and quotes its answers cite"
+sidebarTitle: "Founder"
 pageType: "Guide"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-The **Analyst**, Foundry's main page, answers questions about an ontology's load in
-plain language. Foundry's agent reads the load from the ontology's database step by
-step, and its answer cites each record, table row, quote and rule it used, so you can
-open every one.
+**Founder**, Foundry's main page, answers questions about an ontology's load in plain
+language. It asks the data for you step by step, and its answer cites each record,
+table row, quote and rule it used, so you can open every one.
 
 <Frame caption="Ask a question, follow its steps, read the sourced answer, then follow up.">
   <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/ask/ask-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/ask/ask.webm"></video>
@@ -18,21 +17,22 @@ open every one.
 
 ## Start a thread
 
-Foundry opens on the Analyst, and **Analyst** in the sidebar comes back to it. It opens
+Foundry opens on Founder, and **Founder** in the sidebar comes back to it. It opens
 the ontology you last opened, or the newest; the **Ontology** picker at the top of the
-page opens another. A new thread asks what you want to know about the ontology, with
-the composer in the middle of the page and, when Foundry has read the load's version,
-the version's questions as suggestions.
+page opens another. A new chat asks what you want to know about the ontology, with the
+composer in the middle and, below it, suggestions in four tabs: **Questions**,
+**Dashboards**, **Ontologies** and **Workflows**. Select a card to put its prompt in the
+composer, then edit it or send it.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/ask/new-thread.png" alt="A new Analyst thread: What do you want to know about Customer contracts?, the composer, two suggested questions, and the Load picker in the top bar" />
 </Frame>
 
-Write the question, or select a suggestion, then select the arrow or press
-<kbd>⌘</kbd> <kbd>Enter</kbd> (<kbd>Ctrl</kbd> <kbd>Enter</kbd> on Windows and Linux).
+Write the question, or pick a suggestion, then press <kbd>Enter</kbd> or select the
+arrow (<kbd>Shift</kbd> <kbd>Enter</kbd> adds a new line).
 A question is at most 4,000 characters.
 
-The Analyst reads one load: the current one, unless you choose another in the **Load**
+Founder reads one load: the current one, unless you choose another in the **Load**
 picker in the top bar. A load can be asked about once it is **Ready** or **Partial**.
 While the ontology has no load, a new thread says **Nothing loaded yet** in place of the
 composer, with **Load data** or, while no version is current, **Finish setting up**.
@@ -45,6 +45,10 @@ instead. A [restricted member](/foundry/workspace/access) who holds no sources y
 
 A thread is one column: each question, then its steps as they run, then the answer,
 with the composer pinned at the bottom.
+
+Founder asks the data for you. Its **Asked the data** step holds the cited answer, shown
+as below, and **Open the full answer** opens it on its own page. Founder may add a
+sentence around the answer, but never rewrites it.
 
 - **Steps** say what the agent read. Its first step reads what the load holds: its
   types and links and how many of each. Then it finds entities, reads them and their
@@ -71,13 +75,13 @@ before it is ready.
 
 ## Threads
 
-While the Analyst is open, the sidebar lists the ontology's threads under the sections,
-by their first question, grouped **Today**, **Previous 7 days** and **Older**. A thread
-being answered says **Answering…**. **New thread** starts another. What questions have
+The sidebar lists your chats with Founder under the sections, grouped **Today**,
+**Previous 7 days** and **Older**. **New chat** starts another. Below them, **Earlier
+questions** lists the ontology's questions from before Founder, read only; one still
+being answered says **Answering…**. What questions have
 spent this month is under **Usage** in the [account menu](/foundry/workspace/usage).
 
-On a phone, the Analyst shows the threads first; choose one, or **New thread**, to open
-it.
+On a phone, Founder shows the threads first; choose one, or **New chat**, to open it.
 
 ## Getting into production
 
@@ -96,15 +100,14 @@ Select the card's head to minimise it; this browser remembers. Members reading t
 
 ## Ask about a record
 
-On an entity's page, select **Ask about this** to ask about that record in a drawer.
-The question is about the entity and the load the page reads; **Open in Analyst** opens
-its thread.
+On an entity's page, select **Ask about this** to start a new chat with "About
+&lt;name&gt;: " already in the composer; finish the question and send it.
 
-## When the Analyst can't answer
+## When Founder can't answer
 
 | What the thread says | What it means |
 | --- | --- |
-| **This ontology can't answer that** | What the load holds doesn't say. The Analyst says why, and what the ontology lacks. **Draft a new version with this** opens [Generate](/foundry/ontologies/generate-and-version) with a goal written from the question. |
+| **This ontology can't answer that** | What the load holds doesn't say. Founder says why, and what the ontology lacks. **Draft a new version with this** opens [Generate](/foundry/ontologies/generate-and-version) with a goal written from the question. |
 | **Stopped at this question's limit** | The question used its budget, steps or time before it could answer. Ask something narrower. |
 | **It couldn't answer** | It stopped with an error, which it names. |
 | **An attempt failed. Helix will try again** | A passing failure; the question runs again by itself. |
@@ -112,7 +115,7 @@ its thread.
 
 ## Limits and spending
 
-The Analyst sends your question, and what each step reads from the load, to the
+Founder sends your question, and what each step reads from the load, to the
 workspace's [AI models](/foundry/workspace/ai-models). Questions have their
 own monthly budget, apart from loads'; [Usage](/foundry/workspace/usage) shows both.
 Your agent can ask too, through the [Helix MCP](/foundry/agents/helix-mcp#ask-questions),
@@ -124,7 +127,11 @@ within the same limits.
 | Questions running per workspace | 2; others wait, queued |
 | Questions per workspace, per hour | 30 |
 | Per workspace, per month | $15 |
+| Per restricted member | $10 a month and 10 questions an hour, within the workspace's |
 | Question | 4,000 characters |
+
+Founder's own turns have a budget of their own, apart from questions'; when one runs
+out, Founder says which.
 
 ## Who can ask
 
@@ -132,7 +139,7 @@ Anyone in the workspace who can read the ontology's database: members need **Que
 read** on the database's Helix project, or sources shared with them under
 [Access](/foundry/workspace/access). New members have neither
 ([Members and roles](/foundry/workspace/members-and-roles#what-new-members-can-read)).
-The Analyst only reads the load; it never writes to the database.
+Founder only reads the load to answer; it never writes to the database.
 
 ## Next steps
 
@@ -141,6 +148,6 @@ The Analyst only reads the load; it never writes to the database.
     Search and expand what a load wrote.
   </Card>
   <Card title="Load data" icon="database" href="/foundry/ontologies/load-data">
-    The Analyst reads a load, so keep the current one up to date.
+    Founder reads a load, so keep the current one up to date.
   </Card>
 </CardGroup>

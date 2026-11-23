@@ -47,8 +47,9 @@ plan.
   </Step>
 
   <Step title="Come back">
-    Stripe returns you to **Plan & billing**, which checks the payment until the new plan
-    shows. Connections sync on the new plan's schedule from then on.
+    Stripe returns you to **Plan & billing**, which checks the payment for up to a minute.
+    If the new plan hasn't shown by then, select **Check again**: a payment can take a few
+    minutes. Connections sync on the new plan's schedule from then on.
   </Step>
 </Steps>
 
@@ -58,7 +59,8 @@ plan before it offers checkout again, so you aren't charged twice.
 ## Switch between Pro and Max
 
 On a paid workspace, select **Switch to Max** or **Switch to Pro** on the other tier's
-card and confirm.
+card and confirm. The switch starts at once, at the new tier's price. Promotion codes
+apply only when upgrading from Free.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/workspace/billing-pro.png" alt="Plan & billing for a Pro workspace with Manage billing, Cancel Pro and Switch to Max" />
@@ -91,14 +93,15 @@ the [Helix dashboard](https://helix-db.com/login).
 - Each workspace gets it once.
 
 When the free months end, choose a Helix Cloud plan in the Helix dashboard. Without an
-active plan, Foundry can't create databases, and the Explorer may say queries are
-paused.
+active plan, Foundry can't create databases, and the Explorer, Records and entity pages
+may say queries are paused.
 
-Foundry offers **Open Helix billing** only when a new database can't be created: the
-workspace's Helix plan has ended, or the workspace signed up through the Helix website,
-which has its own offer. The
-[Explorer](/foundry/explore/explorer#when-theres-nothing-to-read) links there too when
-the plan has paused queries.
+Foundry links to Helix billing when a new database can't be created (**Open Helix
+billing**): the workspace's Helix plan has ended, or the workspace signed up through the
+Helix website, which has its own offer. The
+[Explorer](/foundry/explore/explorer#when-theres-nothing-to-read), Records and entity
+pages link there too when queries are paused: **Choose a plan** when the workspace has no
+Helix plan, else **Open Helix billing**.
 
 ## Next steps
 

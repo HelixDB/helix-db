@@ -17,9 +17,11 @@ workspace's [data](/foundry/data/connect-data) and
 
 In **Ontologies**, the panel beside the sidebar lists the workspace's ontologies, each
 with its database and a dot for the status of its last load. The open ontology's row
-holds its pages: **Overview**, which also lists its schema versions and data loads,
-**Documents**, with how many it reads and the sets they're in, and **Workflows**, the
-runs your agents record through the [Helix MCP](/foundry/agents/helix-mcp#workflows).
+holds its pages: **Overview**, which also lists its schema versions and data loads;
+**Explorer**, its graph and records; **Connections**, the connections and documents it
+reads; **Review**, with how many items are open; and **Usage**, the use cases your
+agents record through the [Helix MCP](/foundry/agents/helix-mcp#workflows) and their
+runs.
 Owners and admins create an ontology with **+** in the panel's head. From eight
 ontologies, a filter finds one by name or database.
 
@@ -54,6 +56,12 @@ You don't name the ontology or choose its database. Foundry:
 - has its agent draft a first version, then makes the draft current and loads it as
   soon as it is stored, without a review;
 - emails you when you can ask it questions, or if the draft or the load failed.
+
+If the agent asks questions while it drafts, the draft waits for your answers on the
+generation's page and Foundry emails you. Questions left unanswered for 7 days take the
+agent's recommended answer. If the workspace has spent this month's loads, or the draft
+can't be loaded as it is, the draft waits for your review instead, and the email says
+so.
 
 The generation's page says **Foundry loads it when it's drafted**, then **Drafted
 version 1, now current** while the load runs. You can leave the page. Later versions
@@ -104,10 +112,10 @@ place.
     - **API sources**: the [API sources](/foundry/data/api-sources) it reads, each
       through structured mappings or by entity extraction.
     - **Documents**: the [document sets](/foundry/data/documents) the first version
-      reads, up to 20.
+      reads, up to 20, counting each API source read by entity extraction.
 
-    A generation reads at most 50 tables, synced tables and table files together. If a
-    source isn't connected yet, select **Add data** to connect it without leaving the
+    A generation reads at most 50 tables: synced tables, table files and API sources
+    read through mappings together. If a source isn't connected yet, select **Add data** to connect it without leaving the
     page; its first sync shows in its row, and you can continue once it has synced.
     **New API source** makes an API source in place. **Upload documents** uploads files
     into **General** or the oldest set, and the upload button on a set's row uploads
@@ -141,8 +149,9 @@ place.
 
 You review the draft before it is used: make it current to load it. If you leave
 before then, the ontology's [overview](#the-overview) picks up where you stopped. If
-the ontology was created but its generation couldn't start, the ontology opens saying
-why, with **Try again**, which opens Generate with your choices.
+the ontology was created but its generation couldn't start, its overview opens saying
+why. The setup steps below keep your choices, so select **Generate** there to try
+again.
 
 ## A new database
 
@@ -175,7 +184,7 @@ on from there:
 - A draft to review offers **Review** and **Make current**.
 - A current version not loaded yet offers **Load data**.
 - Once loaded, **Explore or ask** offers **Open the Explorer** and **Ask a question**,
-  which opens the Analyst.
+  which opens Founder on the ontology. Founder's answers come from the Analyst.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/ontology/overview-setup.png" alt="The Renewals overview with Set it up, 5 of 7 required steps done: its name, database, data, goal, draft and current version ticked, Load it open with Version 1 isn't loaded yet and Load data, and Set up with your agent" />
@@ -195,14 +204,16 @@ says when a newer version is ready to review or the current one isn't loaded yet
 </Frame>
 
 Its header names the database and its Helix project, the status of the last load and
-when the ontology was created. It links to the documents the ontology reads, and offers
+when the ontology was created. Its **N documents** button opens the ontology's
+**Connections** page, with the connections and documents it reads, and offers
 **Generate** once the ontology has a draft and, once the current version can be loaded,
 **Load data**. Below the schema,
 [Schema versions](/foundry/ontologies/generate-and-version#schema-versions) lists every
 version and [Data loads](/foundry/ontologies/load-data#manage-loads) the loads kept.
 
-The [Explorer](/foundry/explore/explorer) and the [Analyst](/foundry/ask/ask-questions)
-are sections of their own, which open the ontology you last opened.
+Open the [Explorer](/foundry/explore/explorer) from **Explorer** under the open
+ontology in the Ontologies panel. **Founder** in the sidebar, whose answers come from
+the [Analyst](/foundry/ask/ask-questions), opens the ontology you last opened.
 
 ## Delete an ontology
 
@@ -215,7 +226,9 @@ finishes.
 ## Who can do what
 
 Owners and admins create and delete ontologies, and need write access to the
-database's Helix project to do so. Members see every ontology. A member who can't read
+database's Helix project to do so. Members see every ontology, except
+[restricted members](/foundry/workspace/access#restricted-members), who see only the
+ontologies their sources cover. A member who can't read
 the database's project sees the ontology without its database's details or contents.
 
 ## Next steps

@@ -1,6 +1,6 @@
 ---
 title: "Helix Foundry limits"
-description: "Every Helix Foundry limit in one place: syncs, API sources, documents, generations, loads, Analyst questions, spending, the Helix MCP and reads"
+description: "Every Helix Foundry limit in one place: syncs, API sources, documents, generations, loads, questions, Founder, workflows, dashboards, spending, the Helix MCP and reads"
 sidebarTitle: "Limits"
 pageType: "Reference"
 ---
@@ -18,10 +18,10 @@ The limits Foundry applies, by area. Each guide explains what happens when you r
 | One sync attempt | 2 hours |
 | Attempts per sync | 3 |
 | Syncs running per connection | 1 |
-| Size of an S3 connection's tables, per sync | 20 GB |
+| Size of an S3 connection's tables, per sync | 20 GiB |
 | PostHog event history | 1 to 365 days, 30 by default |
 | GitHub review history | 1 to 365 days, 90 by default |
-| GitHub repositories | Up to 100 when none are named |
+| GitHub repositories | 100 at most; with none named, a token or app install that reads more than 100 is refused until you list them |
 | Slack history | 1 to 365 days, 90 by default |
 | Google Workspace past events | 1 to 365 days, 90 by default, and 30 days ahead |
 | Documents a connection keeps, per set | The newest 1,000 |
@@ -36,7 +36,7 @@ The limits Foundry applies, by area. Each guide explains what happens when you r
 | Live send tokens per source | 10 |
 | Pieces per send | 500, with at most 1 MiB of data together |
 | Request body over HTTP | 2 MiB, arriving within 15 seconds |
-| Piece | 256 KiB of data, 64 levels deep; an id of 1 to 128 characters |
+| Piece | 256 KiB of data, 64 levels deep; an id of 1 to 128 printable ASCII characters, no spaces; field names up to 64 bytes |
 | Fields per source | 200 |
 | Sends per source | 5 a second, in bursts of up to 20 |
 | Sends per workspace | 20 a second, in bursts of up to 50 |
@@ -87,7 +87,9 @@ The limits Foundry applies, by area. Each guide explains what happens when you r
 | Loads kept per ontology | 5: the current one and the four newest others |
 | Loads or extracts running per ontology | 1 |
 
-## Analyst
+## Questions
+
+Questions Founder asks for you, and those asked through the Helix MCP's `helix_foundry_ask`.
 
 | Limit | Value |
 | --- | --- |
@@ -99,11 +101,43 @@ The limits Foundry applies, by area. Each guide explains what happens when you r
 | Questions per member or agent key reading through [sources](/foundry/workspace/access), per hour | 10 |
 | Spend per member or agent key reading through sources, per month | $10 |
 
+## Founder
+
+| Limit | Value |
+| --- | --- |
+| Per turn | $0.50, 20 steps and 4 minutes |
+| Message | 4,000 characters |
+| Messages per person, per hour | 30 |
+| Turns running per workspace | 2 |
+| Spend per workspace, per month | $30, apart from questions' |
+| Prepared actions waiting per thread | 3 |
+
+## Use cases
+
+| Limit | Value |
+| --- | --- |
+| Assessing use cases' runs, spend per workspace, per month | $20 |
+
 ## Workflows
 
 | Limit | Value |
 | --- | --- |
-| Run assessments' spend per workspace, per month | $20 |
+| Workflows per workspace | 50 |
+| Runs per workspace | 200 in any 24 hours; past that, a trigger's run is skipped and **Run now** is refused |
+| Founder steps' spend per workspace, per month | $20, at most $0.50 a step, 2 running at once |
+| Steps per workflow | 50, its trigger included |
+| Failed runs in a row before a workflow pauses | 3 |
+
+## Dashboards
+
+| Limit | Value |
+| --- | --- |
+| Dashboards per workspace | 200 |
+| Pinned in the sidebar, per workspace | 20 |
+| Tiles per dashboard | 20, up to 3 a row |
+| Name | 120 characters |
+| Description | 1,000 characters |
+| Tile title | 80 characters |
 
 ## Helix MCP
 

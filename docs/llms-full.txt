@@ -33,8 +33,11 @@ you use for Helix Cloud; your workspaces come with it.
 | **Generation** | A request to Foundry's agent to draft a new version of the ontology from the tables, API sources and document sets you pick. |
 | **Version** | One draft of the ontology. Versions never change; you choose which one is current. |
 | **Load** | One write of the current version into the ontology's database: your tables, then the documents of its sets. A **refresh** is a load Foundry starts itself when the data changed. |
-| **Analyst** | Questions about a load in plain language, answered with the sources they came from. Foundry opens on it. |
+| **Founder** | Foundry's assistant, in private chats. It answers from your ontologies' loads through the Analyst and prepares changes you confirm. Foundry opens on it. |
+| **Analyst** | The engine Founder asks: questions about a load in plain language, answered with the sources they came from. |
 | **Explorer** | The graph and records view of a load, read from the database with your session. |
+| **Dashboard** | Tiles of saved queries over an ontology's load, drawn as charts or tables. |
+| **Workflow** | Steps Foundry runs for you on a schedule, by hand, or when a sync, load, upload or draft finishes. Nothing runs until you approve it. |
 
 The work flows in one direction:
 
@@ -43,7 +46,7 @@ flowchart LR
   A[Connect data and upload documents] --> B[Generate a draft]
   B --> C[Review and make it current]
   C --> D[Load into the database]
-  D --> E[Ask the Analyst and explore]
+  D --> E[Ask Founder and explore]
   A -. syncs .-> D
 ```
 
@@ -65,12 +68,14 @@ A generation sends your synced tables, and up to five of the newest documents of
 set it picks, to Foundry's agent, which drafts the version. A load sends your
 documents' text to AI models, which find the names and facts they hold and check them.
 Reading tables into a load uses no models. The Analyst sends your question, and what
-each step reads from the load, to AI models.
+each step reads from the load, to AI models. Founder sends your messages, and what its
+tools read, to AI models, and so does each Founder step of a workflow.
 
 By default these run on hosted providers through Helix, today Anthropic's Claude models.
 On Pro or Max, an owner can run them on the workspace's own Anthropic key instead; see
-[AI models](/foundry/workspace/ai-models). What they cost counts against the
-workspace's [monthly caps](/foundry/workspace/usage).
+[AI models](/foundry/workspace/ai-models). What loads and questions cost counts against
+the workspace's [monthly caps](/foundry/workspace/usage). Each generation attempt has a
+spending cap of its own.
 
 ## Next steps
 
@@ -107,8 +112,10 @@ first. Owners and admins can do every step.
     See [Connect data](/foundry/data/connect-data) for every source, and
     [Documents](/foundry/data/documents) for what Foundry reads in each format.
 
-Your first draft was made current without a review: open the ontology under
-**Ontologies** to see its types and links. To change it,
+Foundry usually makes your first draft current without a review. If a load would
+refuse it, or the workspace has spent this month's load budget, it waits as a draft
+instead: the email asks you to review it, make it current and load it. Open the
+ontology under **Ontologies** to see its types and links. To change it,
 [generate](/foundry/ontologies/generate-and-version#generate-a-draft) or
 [edit](/foundry/ontologies/generate-and-version#edit-a-version) a new version; you
 review every later version before you make it current.
@@ -138,8 +145,8 @@ and admins can start it.
 
 ## Start the sample
 
-On **Get started**, select **See it on a sample company (1 min)** under **Start with a
-sample company**. **Acme Corp, a sample company** opens and runs each step by itself;
+In a workspace with no ontology yet, **Get started** offers the sample: select **See it
+on a sample company (1 min)** under **Start with a sample company**. **Acme Corp, a sample company** opens and runs each step by itself;
 each step opens as its work finishes and stays open.
 
     Foundry connects Acme Corp's PostgreSQL database with a read-only login and syncs
@@ -159,7 +166,7 @@ each step opens as its work finishes and stays open.
     contact, then reads the documents with AI models for the names and facts they hold.
     **See the load** opens its page.
 
-    Once the load is written, the page asks the first suggested question and shows the
+    Once the load finishes, the page asks the first suggested question and shows the
     answer with the records and documents it came from. Then:
 
     - under **Ask another**, a suggestion opens its thread in the
@@ -171,13 +178,21 @@ each step opens as its work finishes and stays open.
     for your own sources. **Set up with your agent** copies a prompt for your agent to do
     them with you.
 
-If a step fails, the page says why, with **Try again**. Reopening or reloading the page
-carries on where it was and makes nothing twice.
+If setting up fails, the page says why, with **Try again**. Reopening or reloading the
+page carries on where it was and makes nothing twice. If the load fails, the Loading step
+says why, with **See the load**. To load again, use **Load data** on the ontology's
+overview.
+
+An agent with the Helix MCP can add the sample too. It creates an ontology named **Acme
+Corp customers**, adds the sample's connection and documents to it with the
+`add_sample_data` operation, then generates it from the sample.
 
 ## While you explore the sample
 
-While the sample is the workspace's only ontology, every page shows the banner **Sample
-data: you're exploring Acme Corp, a made-up company.** For owners and admins it links
+While the sample is the workspace's only ontology, every page except the new-ontology
+page shows the banner **Sample data: you're exploring Acme Corp, a made-up company.**
+Once you have your own ontology, it shows only on the sample's pages. For owners and
+admins it links
 **Back to getting started**, or, once the sample's question is answered, **Get started
 with your own data**.
 
@@ -202,6 +217,9 @@ a day later if the workspace still has no data of its own.
 Delete the **Acme Corp customers** ontology from its overview, then its connection and
 documents in **Connectors**.
 
+Deleting the ontology keeps the Helix database the sample made, named Acme Corp
+customers. Delete it in the Helix dashboard if you don't want it.
+
 ## Next steps
 
     Build your first ontology from your own data.
@@ -222,31 +240,37 @@ the workspace you chose in this browser.
 A workspace without an ontology opens on **Get started**: try the
 [sample company](/foundry/start-here/sample-company), hand the setup to your agent, or
 create the [first ontology](/foundry/ontologies/create-an-ontology#create-your-first-ontology)
-yourself. Until then, the sidebar holds only the workspace menu, **Get started** and
-your account menu, which offers **Plan & billing**, usage, the theme and **Sign out**;
+yourself. Until then, the sidebar holds only **helixfoundry**, the workspace menu,
+**Get started**, **Feedback**, the **Founder** button and your account menu, which offers **Plan & billing**, usage, the theme and **Sign out**;
 there's no search or Settings link. Members see **This workspace isn't set up yet**
 until an owner or admin creates one.
 
-## The main page: Analyst
+## The main page: Founder
 
-Foundry opens on the [Analyst](/foundry/ask/ask-questions), on the ontology you last
-opened, or the newest. Ask your data a question there, or pick a suggestion; the
-**Ontology** picker at the top opens another ontology. Select **helixfoundry** at the
-top of the sidebar to come back to it from anywhere.
+Foundry opens on Founder, on the ontology you last opened, or the newest. Ask a
+question there, or pick a suggestion; Founder answers with the
+[Analyst](/foundry/ask/ask-questions)'s cited answers. The **Ontology** picker at the
+top opens another ontology. Select **helixfoundry** at the top of the sidebar to come
+back to it from anywhere.
 
 ## The sidebar
 
 The sidebar is on every page. From the top:
 
-- **helixfoundry**, which opens the Analyst, and the search button.
+- **helixfoundry**, which opens Founder, and the search button.
 - The workspace menu, to switch workspaces.
-- The sections, by name: **Analyst**, **Ontologies**, **Explorer** and **Connectors**.
-- What the open section adds below them. For the Analyst, **New thread** and the
-  ontology's threads.
-- Your account menu, and **Settings**.
+- The sections, by name: **Founder**, **Dashboards**, **Workflows** and **Ontologies**.
+  The Explorer has no link of its own: open it from an ontology in the Ontologies panel.
+- What the open section adds below them: for Founder, **New chat** and your threads;
+  for Dashboards, its dashboards.
+- Jobs in progress, while there are any, then **Connectors** and **Feedback**.
+- Your account menu, the **Founder** button (<kbd>⌘</kbd> <kbd>J</kbd>, <kbd>Ctrl</kbd>
+  <kbd>J</kbd> on Windows and Linux) and **Settings**.
 
 A [restricted member](/foundry/workspace/access#restricted-members) sees only
-**Analyst**, **Ontologies** and **Explorer**, with no search or Settings.
+**Founder**, **Dashboards** and **Ontologies**, with the Explorer of the ontologies they
+can read. They get no search, Connectors or Settings, and their account menu holds only
+the theme and **Sign out**.
 
 Three sections have a second panel, beside the sidebar:
 
@@ -263,9 +287,11 @@ side.
 ## Search with the command palette
 
 Press <kbd>⌘</kbd> <kbd>K</kbd> (<kbd>Ctrl</kbd> <kbd>K</kbd> on Windows and Linux), or
-select the search icon, to search pages, connections, synced tables, documents and
-ontologies, switch workspace or theme, and reopen what you opened recently. Owners and
-admins also get **Add data**, **New API source** and **Create an ontology** there.
+select the search icon, to search pages, connections, synced tables, documents,
+ontologies, dashboards and workflows, open Founder, switch workspace or theme, and
+reopen what you opened recently. Owners and admins also get **Add data**, **New API
+source** and **Create an ontology** there. Restricted members, and a workspace still on
+**Get started**, have no search.
 
 ## Account menu and theme
 
@@ -280,9 +306,9 @@ browser.
 Rename or delete a workspace in the Helix dashboard; Foundry shares it with Helix Cloud.
 Settings also holds [AI models](/foundry/workspace/ai-models),
 [Members](/foundry/workspace/members-and-roles),
-[Access](/foundry/workspace/access),
-[Plan & billing](/foundry/workspace/plans-and-billing) and
-People enrichment.
+[Access](/foundry/workspace/access) (owners and admins),
+[Plan & billing](/foundry/workspace/plans-and-billing), People enrichment and Sharing,
+for public dashboard links.
 
 ## Emails from Foundry
 
@@ -290,10 +316,13 @@ Foundry emails you, from Helix, about your own work:
 
 | Email | When |
 | --- | --- |
-| **… is ready to ask** | Your workspace's [first ontology](/foundry/ontologies/create-an-ontology#create-your-first-ontology) was drafted and loaded. If the load stopped at the month's budget, it says some documents weren't read. |
+| **… is ready to ask** | Your workspace's [first ontology](/foundry/ontologies/create-an-ontology#create-your-first-ontology) was drafted and loaded. If the load left some documents unread, because of the month's budget or documents the model couldn't read, it says so and why. |
 | **… couldn't be drafted**, **… couldn't be loaded** | Your first ontology's draft or load failed. It says why, and links to the ontology to try again. |
 | **…'s first draft is ready** | Your first ontology was drafted but not loaded, so the draft waits for your review. |
 | **Try Foundry on your own data** | Once, a day after you ran the [sample company](/foundry/start-here/sample-company), if the workspace still has no data of its own. |
+| **… has questions for you** | Foundry's agent, drafting your first ontology, needs a few answers before it can finish. If no one answers within a week, it carries on with its own best guesses. |
+| **&lt;workflow&gt;: …** | A workflow you own reached a step that emails you what it did, and any actions waiting for you. |
+| **… paused after failing** | A workflow you own failed several runs in a row, so Foundry paused it. It says why, and links to the workflow to resume it. |
 
 Invitations to a workspace come from Helix; see
 [Members and roles](/foundry/workspace/members-and-roles#invite-people).
@@ -335,6 +364,10 @@ Rows can't be moved while a filter is on. Sync, and a document set's upload, des
 delete buttons, show on a row while you point at it or it has the focus.
 
 ## Add a connection
+
+    Don't see your source? **Request a connector**, under the kinds or in the
+    Connections section of the Connectors overview, tells Helix what you'd like to
+    connect. Members can ask too.
 
     Under **Connection options** you can name the connection; databases also choose
     their encryption there.
@@ -382,10 +415,11 @@ Open the **⋯** menu on a connection's page:
 
 - **Edit connection** changes its settings or credential. Foundry tests the new
   settings before it saves them, and syncs again when they changed. Leave the
-  credential blank to keep the stored one. To change which database tables sync, enter
+  credential blank to keep the stored one, unless the new settings point at a different
+  server, such as a changed database host: then enter it again. To change which database tables sync, enter
   the password and test the connection again.
-- **Delete connection** stops syncing it and removes its tables from the workspace's
-  data. The source itself is not changed.
+- **Delete connection** stops syncing it and removes its tables, and any documents its
+  syncs wrote, from the workspace's data. The source itself is not changed.
 
 Foundry never shows a stored credential again. An API key is named by its prefix and
 last four characters, such as `rk_live…Qx7m`; a database shows that a password is set.
@@ -423,8 +457,11 @@ Some connections write documents of their own, in sets of their own:
 | [Granola](/foundry/data/connectors#granola) | **Notes**: each meeting note's summary. **Transcripts**: each note's transcript, when you turn them on. |
 | [Slack](/foundry/data/connectors#slack) | **Conversations**: each finished day of each channel the app is in. |
 | [Notion](/foundry/data/connectors#notion) | **Pages**: each page shared with the integration. |
-| [Google Workspace](/foundry/data/connectors#google-workspace) | **Docs**: each Google Doc the connection's user can open. |
+| [Google Workspace](/foundry/data/connectors#google-workspace) | **Docs**: each Google Doc the connection's user can open. **Transcripts**: each WebVTT (`.vtt`) meeting transcript in Drive. **PDFs**: each PDF up to 3 MiB, whose text is read as an uploaded PDF's is. |
 | [API source](/foundry/data/api-sources) read by entity extraction | Its newest 500 pieces. |
+
+These sets sit under their connection in the Connectors explorer, not in **Documents**,
+and show elsewhere as *connection* / *set*, such as Granola / Notes.
 
 Each sync updates them, so they can't be uploaded to, moved, renamed or deleted, and
 they don't count toward the workspace's uploads. A connection keeps the newest 1,000
@@ -457,6 +494,7 @@ it straight to storage and shows its progress.
 | Format | Extensions | Size | Ontologies read it |
 | --- | --- | --- | --- |
 | Markdown, MDX and text | `.md`, `.markdown`, `.mdx`, `.txt` | Up to 1 MiB | As text, for its names and facts |
+| WebVTT transcript | `.vtt` | Up to 1 MiB | As text: each turn with its start and speaker |
 | PDF | `.pdf` | Up to 3 MiB and 150 pages | As the text Foundry reads from it |
 | CSV, TSV, JSON, JSONL and Parquet | `.csv`, `.tsv`, `.json`, `.jsonl`, `.ndjson`, `.parquet` | Up to 3 MiB | As a table of its own |
 
@@ -478,14 +516,17 @@ when it was uploaded. Foundry shows each document by its type:
 | --- | --- |
 | Markdown and MDX | Rendered, with headings, lists, tables and links; images show as their alt text and are never loaded. MDX is never run: its components and expressions show as written |
 | Text | As it is |
+| WebVTT | **Transcript**: each turn's start, speaker and words |
 | JSON | A tree you open node by node |
 | CSV, TSV, JSONL and Parquet | A table of the first 5,000 rows, with the rows it couldn't read |
 | PDF | **Text**: the text Foundry read from it, page by page; **Pages**: its pages as they look |
 
-Markdown, JSON, CSV, TSV and JSONL also have **Source**, to read the file's own text.
+Markdown, JSON, CSV, TSV, JSONL and WebVTT also have **Source**, to read the file's own text.
 
-A table file's page also says how Foundry read it: its columns, as **Rows**. Until
-Foundry has read it, which takes a moment after the upload, a generation leaves it out.
+A table file's page has **Rows** in place of **Ontologies**: how many rows Foundry
+read, and for each ontology whose current version reads its set, whether that version
+maps the file (**Mapped**), or **Not mapped** with **Revise** or **Generate** to draft a
+version that maps it. Until Foundry has read it, which takes a moment after the upload, a generation leaves it out.
 
 A PDF's text is read once, after its upload. Until then, it says **Reading its text**,
 and a generation leaves it out. A scanned PDF has no text to read, so ontologies can't
@@ -507,6 +548,10 @@ On a document's page, owners and admins can:
   ontology that reads the new set reads it there.
 - **Delete** it. It's removed from Foundry at once; what loads read from it stays in
   their ontologies' databases.
+
+  If an ontology's current version maps a table file, deleting the file, or moving it to
+  a set that version doesn't read, makes that ontology's next load fail until the
+  version is revised. **Delete** and **Move** warn first.
 - Rename it in place in the explorer, with the pencil beside its name. A rename may
   change its extension.
 
@@ -542,16 +587,16 @@ to check them. What it costs counts toward the month's
 
 ## In an ontology
 
-An ontology's **Documents** lists what it reads of the workspace's documents: those in
-the sets its version reads, and those its current load holds. Open it from the
-ontology's pages in the Ontologies panel, from the document count in the ontology's
-header, or from a load's **Documents read** and **Review documents**. It is read-only:
-**Open in Connectors** goes back to the documents in Connectors.
+An ontology's **Connections** page lists what it reads: the connections its current
+version maps, the document sets it reads, and its documents (those in its version's
+sets and those its current load holds). Open it from **Connections** under the ontology
+in the Ontologies panel, from the document count in the ontology's header, or from a
+load's **Documents done** and **Review documents**. It is read-only: **Open in
+Connectors** goes to Connectors.
 
-There, the Ontologies panel becomes the ontology's documents explorer: a row back to
-the ontology, a filter, and its sets as folders of their documents. Each document's dot
-says what the current load made of it: orange needs review, red couldn't be read,
-green read, grey waiting or not read. A set counts its documents that need review.
+Its **Documents** list says what the current load made of each document. Filter it by
+**Status** (**Waiting**, **Read**, **Needs review**, **Duplicate**, **Couldn't be
+read** or **Not read by its version**) or by set, or search it by name.
 
 Open a document there to see its text as the load read it, shown as the document is
 (Markdown rendered, text as it is), with names underlined, quoted facts tinted and
@@ -565,7 +610,9 @@ the document as another load saw it.
 ## Who can do what
 
 Owners and admins upload, move, rename and delete documents, and create, describe and
-delete sets. Members read them.
+delete sets. Members read them. A restricted member has no Connectors and reads only the
+documents their sources cover (see [Access](/foundry/workspace/access#restricted-members)).
+When moving a document would cut someone off, Foundry lists who and asks first.
 
 ## Next steps
 
@@ -581,7 +628,7 @@ delete sets. Members read them.
 
 Page type: Reference
 
-Foundry reads thirteen kinds of source, and takes data your apps and agents send to an
+Foundry reads fourteen kinds of source, and takes data your apps and agents send to an
 [API source](/foundry/data/api-sources). Apps sync every table their credential can
 read; databases and Amazon S3 sync the tables you choose. Granola, Slack, Notion and
 Google Workspace also keep text as [documents](/foundry/data/documents) in sets of their
@@ -594,13 +641,14 @@ every plan offers every kind: plans differ in
 | [Stripe](#stripe) | Restricted (`rk_`) or secret (`sk_`) API key | Customers, subscriptions, invoices, payments and more |
 | [WorkOS](#workos) | Secret API key (`sk_`) | Organizations, users, SSO and directories |
 | [PostHog](#posthog) | Personal API key (`phx_`) | Persons, groups and events |
-| [GitHub](#github) | Fine-grained (`github_pat_`) or classic (`ghp_`) token | Issues, pull requests, comments and reviews |
-| [Linear](#linear) | Personal API key (`lin_api_`) | Teams, projects, cycles, issues and comments |
+| [GitHub](#github) | Sign in with GitHub, or a fine-grained (`github_pat_`) or classic (`ghp_`) token | Issues, pull requests, comments and reviews |
+| [Linear](#linear) | Sign in with Linear, or a personal API key (`lin_api_`) | Teams, projects, cycles, issues and comments |
 | [Cal.com](#cal-com) | API key (`cal_live_`) | Bookings, attendees, event types and schedules |
 | [Granola](#granola) | API key (`grn_`) | Meeting notes and attendees, kept as documents too |
 | [Slack](#slack) | An app's bot token (`xoxb-`) | Channels, members and messages, each channel's days kept as documents too |
 | [Notion](#notion) | Internal integration secret (`ntn_`) | Pages, databases and people, each page kept as a document too |
-| [Google Workspace](#google-workspace) | Service account JSON key with domain-wide delegation | Drive files, calendars, events and people, each Google Doc kept as a document too |
+| [Google Workspace](#google-workspace) | Service account JSON key with domain-wide delegation | Drive files, calendars, events and people; Google Docs, meeting transcripts and PDFs kept as documents too |
+| [Databuddy](#databuddy) | API key (`dbdy_`) | Websites' daily metrics, pages, referrers, custom events, sessions and visitors |
 | [PostgreSQL](#postgresql) | Database user and password | The tables you choose |
 | [MySQL](#mysql) | Database user and password | The tables you choose |
 | [Amazon S3](#amazon-s3) | IAM role, or an access key | Parquet, JSON and CSV files as tables |
@@ -648,7 +696,17 @@ want to import.
 Syncs `persons`, `person_distinct_ids` and `groups` in full, and `events` and
 `daily_event_counts` for the event history you chose.
 
+PostHog syncs at most once a day on every plan, since PostHog limits repeated exports
+through its query API.
+
 ## GitHub
+
+When the form offers **Connect with GitHub**, select it and authorize Helix Foundry. It
+reads metadata, issues and pull requests, never code, and only the repositories chosen
+where the Helix Foundry GitHub App is installed. If the app isn't installed yet, Foundry
+sends you to install it and choose repositories. On an organization, an owner installs
+it. GitHub keeps the sign-in: it reads as you, and stops if you leave the workspace,
+until an owner or admin signs it in again. A personal access token works instead:
 
 In GitHub, open **Settings** → **Developer settings** → **Fine-grained tokens** and
 create a token named "Helix Foundry". For an organization's repositories, choose the
@@ -658,13 +716,17 @@ classic token (`ghp_…`) with the `repo` scope works too.
 
 | Field | Notes |
 | --- | --- |
-| Repositories | Optional: one `owner/name` per line. Blank syncs every repository the token can read, up to 100. |
+| Repositories | Optional: up to 100, one `owner/name` per line. Blank syncs every repository the token can read; if it reads more than 100, the test asks you to list them. |
 | Review history (days) | 1 to 365, 90 by default: how far back pull request reviews are read. |
 
 Syncs `repositories`, `users`, `labels`, `milestones`, `issues`, `pull_requests`,
 `issue_comments` and `pull_request_reviews`. Foundry never reads code.
 
 ## Linear
+
+When the form offers **Connect with Linear**, select it and authorize Helix Foundry. It
+reads every team you can see. Linear keeps the sign-in, as GitHub does. A personal API
+key works instead:
 
 In Linear, open **Settings** → **Security & access** and create a personal API key named
 "Helix Foundry" with **Read** access. It reads every team you can see in Linear.
@@ -770,8 +832,26 @@ users.
 
 Syncs `files` (Drive), `calendars`, `calendar_events` and `event_attendees` (Calendar),
 and `users` (directory). Each API has its own scope: one you didn't delegate leaves out
-only its tables, and the test names them. Each Google Doc the user can open and download
-is also kept as a Markdown document, without images, in the connection's **Docs** set.
+only its tables, and the test names them.
+
+Each Google Doc the user can open and download is also kept as a Markdown document,
+without images, in the connection's **Docs** set. Each meeting transcript (`.vtt` file)
+goes in a **Transcripts** set, and each PDF of up to 3 MiB in a **PDFs** set. A PDF's
+text is read as an uploaded PDF's is, up to 150 pages; a scan has no text to read.
+
+## Databuddy
+
+In your Databuddy dashboard, open **Organization settings** → **API keys** and create a
+key named "Helix Foundry" with the **read:data** scope, for every website or only the
+ones to sync. Databuddy shows the key once.
+
+| Field | Notes |
+| --- | --- |
+| Websites | Optional: one website id per line. Blank syncs every website the key can read. |
+| Days of history | 1 to 365, 90 by default. |
+
+Syncs `websites`, and `daily_metrics`, `pages`, `referrers`, `custom_events`, `sessions`
+and `profiles` for each website over the days of history.
 
 ## PostgreSQL
 
@@ -805,7 +885,10 @@ database you name. Give the user `SELECT` on it only.
 
 Foundry reads Parquet, JSON, JSON Lines and CSV files (plain, gzip, zstd or bzip2) from
 one folder of a bucket. Files with the same shape become one table, named after their
-folder or file name, and every sync reads them all again.
+folder or file name. On Free, every sync reads them all again. On Pro and Max, a sync
+skips a table whose files haven't changed and reads only files added after the rest; it
+reads a table in full when its files change otherwise, when it has no key, and once a
+day.
 
 | Field | Notes |
 | --- | --- |
@@ -852,7 +935,7 @@ redirects.
 | Rows per table | 2,000,000, and 2 GiB. A larger table fails the sync: for a database, leave it out; for PostHog, shorten the event history. |
 | Size of an S3 connection's tables, per sync | 20 GB. Choose fewer tables, or a narrower folder. |
 | Documents a connection keeps, per set | The newest 1,000 |
-| Scheduled syncs | Free daily, Pro hourly, Max every 15 minutes |
+| Scheduled syncs | Free daily, Pro hourly, Max every 15 minutes; PostHog daily on every plan |
 | One sync attempt | 2 hours |
 | Attempts per sync | 3 |
 | Syncs running per connection | 1 |
@@ -876,8 +959,11 @@ extraction. API sources are on every plan.
 
 ## Create an API source
 
-An agent can create one too, with the MCP's `create_event_source` action, after your
-confirmation.
+An agent can create one too, with the MCP's `create_event_source` operation, which can
+also set the text field, after your confirmation.
+
+Owners and admins rename, describe or delete a source from its page's menu: **Edit API
+source**, **Delete API source**.
 
 ## Send tokens
 
@@ -956,8 +1042,8 @@ what each answer means.
 | Field | Rule |
 | --- | --- |
 | `id` | 1 to 128 printable ASCII characters, no spaces, unique within the send. A piece with an id the source holds replaces it. |
-| `occurred_at` | Optional: when it happened, as an RFC 3339 time. |
-| `data` | One JSON object, at most 256 KiB and 64 levels deep. Its top-level keys are the source's fields: at most 200 in a source, 1 to 64 bytes each. `id`, `received_at` and `occurred_at` can't be data keys. |
+| `occurred_at` | Optional: when it happened, as an RFC 3339 time in the years 1000 to 9999. |
+| `data` | One JSON object, at most 256 KiB and 64 levels deep. Its top-level keys are the source's fields: at most 200 in a source, 1 to 64 bytes each, with no control characters or backticks, and none twice. `id`, `received_at` and `occurred_at` can't be data keys. |
 
 A field keeps the JSON type it first had: string, number, boolean, object or array, and
 `null` is always allowed. A send that changes a field's type is refused and names both
@@ -969,9 +1055,9 @@ pieces; Foundry stores nothing new and answers `replayed: true`.
 
 ### Answers
 
-A send that is stored answers 200, with the source's `capacity`, any `warning` and when
-its next sync is due (`next`). One bad piece refuses the whole send, and none of it is
-stored.
+A send that is stored answers 200 with `replayed`, the fields it added (`new_fields`),
+the source's `capacity`, any `warning`, and `next`, a note that pieces reach the table at
+its next sync. One bad piece refuses the whole send, and none of it is stored.
 
 | Status | Meaning |
 | --- | --- |
@@ -982,8 +1068,11 @@ stored.
 | 409 | The source is full or paused, or has all the fields it may have, as `reason` says. |
 | 413 | The body is over 2 MiB. Send fewer pieces at a time. |
 | 415 | Send JSON in UTF-8, uncompressed, with `Content-Type: application/json`. |
-| 429 | Too many sends: wait as long as `Retry-After` says, then retry with the same `client_token`. |
+| 429 | Too many sends, or the workspace has reached its daily cap of pieces or bytes. Wait as long as `Retry-After` says (for the daily cap, until 00:00 UTC), then retry with the same `client_token`. |
 | 500 to 504 | Wait a second, or as `Retry-After` says, then retry with the same `client_token`. |
+
+A source whose sync fails for good is paused and refuses sends until an owner or admin
+selects **Resume** on its page.
 
 ## Read an API source
 
@@ -1004,13 +1093,15 @@ Foundry keeps every piece until you delete the source.
 A source with a text field can be read back through the Helix MCP:
 `helix_foundry_recall` returns its pieces as Markdown notes, newest first or those
 holding some words, from the moment they are sent. Any member of the workspace can
-recall, signed in; send tokens only send. See [Agent memory](/foundry/agents/agent-memory).
+recall while signed in, unless source grants restrict them. Send tokens can only send.
+See [Agent memory](/foundry/agents/agent-memory).
 
 ## How ontologies read it
 
 On [New ontology](/foundry/ontologies/create-an-ontology) and in
 [Generate](/foundry/ontologies/generate-and-version#generate-a-draft), **API sources**
-lists the sources that have synced pieces. Choose one, and how it is read:
+lists your API sources. Each can be chosen once its first pieces have synced. Choose one,
+and how it is read:
 
 - **Structured mappings** suit strictly structured JSON: ids, amounts, statuses, times.
   Its fields map to types and properties, as a synced table's columns do, and every
@@ -1018,9 +1109,14 @@ lists the sources that have synced pieces. Choose one, and how it is read:
 - **Entity extraction** suits pieces whose body is text, such as an agent's reply or a
   note: Foundry's agent reads the text and finds the entities and facts it describes.
   Choose the source's **text field**, the top-level field holding each piece's text,
-  which must stay a string in every piece. Its newest 500 pieces become Markdown
+  which must stay a string, or `null`, in every piece. Its newest 500 pieces become Markdown
   documents in a set of the source's own, which loads read like any
   [document](/foundry/data/documents).
+
+Owners and admins choose the text field, here or in **Documents** on the source's page.
+Saving asks you to confirm and queues one full sync, and the field can't be changed while
+a sync of the source is running. Clearing it removes the source's pieces as documents at
+its next sync.
 
 Extraction suits a few hundred pieces a month, not a steady stream. It costs about 1
 cent a piece for each ontology that reads it. Extraction no person started, as pieces
@@ -1067,9 +1163,11 @@ workspace's [data](/foundry/data/connect-data) and
 
 In **Ontologies**, the panel beside the sidebar lists the workspace's ontologies, each
 with its database and a dot for the status of its last load. The open ontology's row
-holds its pages: **Overview**, which also lists its schema versions and data loads,
-**Documents**, with how many it reads and the sets they're in, and **Workflows**, the
-runs your agents record through the [Helix MCP](/foundry/agents/helix-mcp#workflows).
+holds its pages: **Overview**, which also lists its schema versions and data loads;
+**Explorer**, its graph and records; **Connections**, the connections and documents it
+reads; **Review**, with how many items are open; and **Usage**, the use cases your
+agents record through the [Helix MCP](/foundry/agents/helix-mcp#workflows) and their
+runs.
 Owners and admins create an ontology with **+** in the panel's head. From eight
 ontologies, a filter finds one by name or database.
 
@@ -1101,6 +1199,12 @@ You don't name the ontology or choose its database. Foundry:
   soon as it is stored, without a review;
 - emails you when you can ask it questions, or if the draft or the load failed.
 
+If the agent asks questions while it drafts, the draft waits for your answers on the
+generation's page and Foundry emails you. Questions left unanswered for 7 days take the
+agent's recommended answer. If the workspace has spent this month's loads, or the draft
+can't be loaded as it is, the draft waits for your review instead, and the email says
+so.
+
 The generation's page says **Foundry loads it when it's drafted**, then **Drafted
 version 1, now current** while the load runs. You can leave the page. Later versions
 wait for your review, as for any ontology.
@@ -1120,8 +1224,9 @@ place.
 
 You review the draft before it is used: make it current to load it. If you leave
 before then, the ontology's [overview](#the-overview) picks up where you stopped. If
-the ontology was created but its generation couldn't start, the ontology opens saying
-why, with **Try again**, which opens Generate with your choices.
+the ontology was created but its generation couldn't start, its overview opens saying
+why. The setup steps below keep your choices, so select **Generate** there to try
+again.
 
 ## A new database
 
@@ -1154,7 +1259,7 @@ on from there:
 - A draft to review offers **Review** and **Make current**.
 - A current version not loaded yet offers **Load data**.
 - Once loaded, **Explore or ask** offers **Open the Explorer** and **Ask a question**,
-  which opens the Analyst.
+  which opens Founder on the ontology. Founder's answers come from the Analyst.
 
 Members see the same steps, without the pickers or anything that changes the
 ontology.
@@ -1166,14 +1271,16 @@ it means. Above it, the overview follows a generation or load that is running, a
 says when a newer version is ready to review or the current one isn't loaded yet.
 
 Its header names the database and its Helix project, the status of the last load and
-when the ontology was created. It links to the documents the ontology reads, and offers
+when the ontology was created. Its **N documents** button opens the ontology's
+**Connections** page, with the connections and documents it reads, and offers
 **Generate** once the ontology has a draft and, once the current version can be loaded,
 **Load data**. Below the schema,
 [Schema versions](/foundry/ontologies/generate-and-version#schema-versions) lists every
 version and [Data loads](/foundry/ontologies/load-data#manage-loads) the loads kept.
 
-The [Explorer](/foundry/explore/explorer) and the [Analyst](/foundry/ask/ask-questions)
-are sections of their own, which open the ontology you last opened.
+Open the [Explorer](/foundry/explore/explorer) from **Explorer** under the open
+ontology in the Ontologies panel. **Founder** in the sidebar, whose answers come from
+the [Analyst](/foundry/ask/ask-questions), opens the ontology you last opened.
 
 ## Delete an ontology
 
@@ -1186,7 +1293,9 @@ finishes.
 ## Who can do what
 
 Owners and admins create and delete ontologies, and need write access to the
-database's Helix project to do so. Members see every ontology. A member who can't read
+database's Helix project to do so. Members see every ontology, except
+[restricted members](/foundry/workspace/access#restricted-members), who see only the
+ontologies their sources cover. A member who can't read
 the database's project sees the ontology without its database's details or contents.
 
 ## Next steps
@@ -1208,8 +1317,8 @@ until you make a version current.
 version, and until the ontology is set up its
 [overview](/foundry/ontologies/create-an-ontology#the-overview) carries on from there:
 generate, review, make current, load. A workspace's
-[first ontology](/foundry/ontologies/create-an-ontology#create-your-first-ontology) skips
-the review: its first draft is made current and loaded as soon as it is stored.
+[first ontology](/foundry/ontologies/create-an-ontology#create-your-first-ontology) of its
+own (the sample company's doesn't count) skips the review: its first draft is made current and loaded as soon as it is stored.
 **Generate** drafts the next versions.
 
 A generation's page shows its goal, its tables and its steps. Open it from its
@@ -1277,8 +1386,9 @@ is current now.
 
 ## Who can do what
 
-Owners and admins generate, edit versions and make them current. Members see every
-generation and version.
+Owners and admins generate, answer the agent's questions, edit versions and make them
+current. Members see every generation and version, except
+[restricted members](/foundry/workspace/access#restricted-members), who see neither.
 
 ## Next steps
 
@@ -1292,8 +1402,8 @@ Page type: Guide
 
 A load writes the ontology's current version into its Helix database: your synced
 tables as its mappings shape them, then the documents of the sets the version reads.
-Each load is a complete copy, written beside the earlier ones, so you can compare them
-and switch back. Reads go to the current load.
+Each load you start is a complete copy, written beside the earlier ones, so you can
+compare them and switch back. Reads go to the current load.
 
 The version's page shows the same sets in its header, as **Reads …**. To read another
 set, generate a version that picks it, or
@@ -1304,34 +1414,48 @@ then load that version.
 
 The load's page follows each step: preparing, writing the tables, reading the
 documents, finishing. A load is **Writing**, then **Ready**. It ends **Partial** when
-it reached the spending cap with its tables written but some documents unread, or
-**Failed**.
+its tables are written but some documents went unread, because it stopped at a spending
+cap or the model couldn't read them. Otherwise it ends **Failed**. A load with unread
+documents says how many and why: **Ready, N documents not read**.
 
 When the load leaves items to review, **Review documents** opens the ontology's
 documents that need review. **Rule breaks** lists the records that break the version's
 constraints.
 
-The newest load that finishes **Ready** becomes current. A **Partial** load becomes
-current only when the ontology has no current load.
+The newest load that finishes **Ready** becomes current. A **Partial** load that stopped
+at a spending cap becomes current only when the ontology has no current load. A
+**Partial** load you started because the model couldn't read some documents (for
+example, your own provider refused the key) becomes current like a Ready one, and
+Foundry reads those documents again by itself. A **Partial** refresh replaces the load
+it refreshed once it holds everything that load held.
 
 - If a source synced again while the load ran, the load says so and offers a new one;
   with automatic refreshes on, Foundry starts it itself.
-- If the database is new and still starting, the load waits and tries again by itself.
+- If the database is new and still starting, or still building its indexes, the load
+  waits and carries on by itself.
 - An ontology runs one load at a time.
 
 Loading, setting a load current and deleting one need owner or admin rights and write
-access to the database's Helix project.
+access to the database's Helix project. An agent with the
+[Helix MCP](/foundry/agents/helix-mcp#changes-with-a-confirmation) can start a load and
+set the current load, with the same rights.
 
 ## Automatic refreshes
 
 Connections [sync on a schedule](/foundry/data/connect-data#syncs-on-a-schedule). When a
-sync changes a table the current load reads, or a connection's document it read is
-replaced or removed, the ontology owes a refresh: a load of its current version that
-Foundry starts itself. It runs at most once per the plan's interval (daily on Free,
-hourly on Pro, every 15 minutes on Max), and waits while another load or generation
-runs. An API source's changes arrive with its own syncs, which a large source
-[spaces further apart](/foundry/data/api-sources#read-an-api-source). A refresh becomes
-current when it finishes, like any load.
+sync changes a table the current load reads, the ontology owes a refresh, which Foundry
+runs itself. A refresh brings the current load up to date in place, writing only what
+changed. If it can't, for example because the current load isn't Ready or Partial, it
+writes a new load of the current version instead, which becomes current when it
+finishes. About once a week, Foundry also writes a full load to check the in-place
+updates. Refreshes run at most once per the plan's interval (daily on Free, hourly on
+Pro, every 15 minutes on Max), and wait while another load or job of the ontology runs.
+An API source's changes arrive with its own syncs, which a large source
+[spaces further apart](/foundry/data/api-sources#read-an-api-source).
+
+When a connection's document is removed at the source, Foundry soon takes it out of the
+current load, at no cost. A replaced document arrives as a new one and is read as
+uploads are.
 
 Refreshes are on by default for every ontology, with no setting on the website or in the
 Helix MCP to turn them off.
@@ -1419,8 +1543,8 @@ inspector names its load.
 
 The **Load** picker reads another load of the ontology. Every view reads one load at a
 time; links between the Explorer, Records, a record's page and a document keep the load
-you chose. The **Ontology** picker beside it opens another ontology's Explorer;
-**Explorer** in the sidebar opens the ontology you last opened.
+you chose. To read another ontology, open it in the **Ontologies** panel and select
+**Explorer** under it.
 
 ## Show Foundry's own records
 
@@ -1434,9 +1558,10 @@ is kept in this browser.
 Choose a second load under **Compare with**, or select **Compare with current** in a
 load's menu in [Data loads](/foundry/ontologies/load-data#manage-loads). The two loads
 are drawn side by side, each with its own bar, labels and inspector, over **What
-changed**: the count of each type and link in each load. Open a type to see the
-records added, removed and renamed between them, by key, and select one to find it on
-its side.
+changed**: the count of each type and link in each load. Open a type to see, by key, the
+records added, removed and renamed between them. A renamed key or type shows as all
+removed and all added. Past 5,000 records of a type in a load, only the counts compare.
+Select a record to find it on both sides.
 
 ## When there's nothing to read
 
@@ -1444,11 +1569,12 @@ its side.
 | --- | --- |
 | **Nothing shared with you yet** | You're [restricted to some sources](/foundry/workspace/access#restricted-members) and hold none yet. An owner or admin shares them. A workspace with no ontology opens on [Get started](/foundry/start-here/quickstart) instead. |
 | **You don't have read access to this database** | Reading the graph needs **Query read** on the database's Helix project. An owner or admin grants it; see [Members and roles](/foundry/workspace/members-and-roles#what-new-members-can-read). |
+| **Not shared with you** | You have no **Query read** on the database's Helix project, and none of the sources shared with you is in the ontology's current load. An owner or admin grants **Query read** ([Members and roles](/foundry/workspace/members-and-roles#what-new-members-can-read)) or shares the sources ([Access](/foundry/workspace/access)). |
 | **Nothing loaded yet** | The ontology has no load. Owners and admins select **Load data**, which opens the Load dialog, or, while no version is current, **Finish setting up**, which opens the ontology's overview. Records and an entity's page say the same. |
-| The database is starting | A database created in the last few minutes may not answer yet. The Explorer opens by itself once it answers. |
+| **Your new database is starting** | A database created in the last few minutes may not answer yet. The Explorer opens by itself once it answers, or select **Retry**. |
 | **Queries are paused** | The workspace's Helix plan doesn't allow queries now. **Choose a plan**, or **Open Helix billing**, opens billing in the Helix dashboard. |
 
-Members see the same messages, without the buttons.
+Members don't get **Load data** or **Finish setting up**. The other messages and their buttons are the same for everyone.
 
 ## Next steps
 
@@ -1484,7 +1610,8 @@ source and row; one that came from a document shows the quote, with a link to it
 document.
 
 Select **Open in graph** to find it in the Explorer, or **Open its page** for the
-entity's page.
+entity's page. If you're [restricted to some sources](/foundry/workspace/access#restricted-members),
+Records shows only the records you can read, and a record has no **Open in graph**.
 
 ## An entity's page
 
@@ -1495,7 +1622,8 @@ why), **Mentions** (where documents name it) and **Needs review** (reviews, and 
 breaks).
 
 Every page here reads one load. Use the **Load** picker to read another; links between
-pages keep it. **Ask about this** asks a question about the record in a drawer; see
+pages keep it. **Ask about this** opens a new chat about the record, with your message already
+started as `About <record>: `. Finish the question and send it; see
 [the Analyst](/foundry/ask/ask-questions#ask-about-a-record).
 
 **Derived** shows only for a version with rules. Its facts are worked out when the page
@@ -1513,10 +1641,10 @@ settle this review**.
 
 | On a card | What it does | When it applies |
 | --- | --- | --- |
-| **Approve** a claim held for a person to check | Writes the link the document's sentence states | This load at once, and later loads. If a name in it still needs review, the first load after that name is settled writes it. |
+| **Approve** a claim held for a person to check | Writes the link the document's sentence states | This load at once, and later loads. If a name in it still needs review, this load keeps it held until that name is settled, then writes it. |
 | **Reject** a held claim | Writes nothing, and takes the card out of Needs review | This load and later ones |
 | **Keep value**, or **Replace the table's value with** one a document states | Keeps one of the values documents disagree on, or overrides a table's value | This load at once, and later loads. A chosen value holds even after the table changes; a document dated after your decision still wins. |
-| **Link this name to** a record, or **Not in data** | Settles which record a name means, or that none does | From the next load. Load again to see it. |
+| **Link this name to** a record, or **Not in data**, then **Settle review** | Settles which record a name means (here and in other documents where nothing else links it), or that none does (this document only) | This load at once, and later loads. On a name the load already linked, a new choice or **Undo link** applies from the next load. |
 
 A link that holds one value, such as a contract's single customer, says on its card what
 an approval replaces. Approve those one at a time.
@@ -1531,9 +1659,16 @@ On a group:
   asking for the links those reviews suggest. The new version waits for your review;
   the current one stays until you choose otherwise.
 
-**Saved decisions** lists every decision. Removing one undoes it: a value leaves the
-current load at once, a rejected claim is listed again, and a name decision is undone
-from the next load.
+To work through every open review of the current load in one place, open **Review**
+under the ontology in the Ontologies panel; its count is how many are open. It lists the
+decisions that write the most facts first, with the same controls as a card. There is no
+**Approve all** there.
+
+**Saved decisions** lists the decisions for this document or record. **Remove decision**
+undoes one: a value leaves the current load at once, a rejected claim is listed again,
+and a name decision stays in this load but later loads won't read it. **Take back
+approval** takes an approval out of the current load at once, and its claim is held for
+review again.
 
 ## Next steps
 
@@ -1541,20 +1676,19 @@ from the next load.
 
     Add the documents facts and mentions come from.
 
-# Ask the Analyst questions about your data
+# Ask Founder questions about your data
 
 Page type: Guide
 
-The **Analyst**, Foundry's main page, answers questions about an ontology's load in
-plain language. Foundry's agent reads the load from the ontology's database step by
-step, and its answer cites each record, table row, quote and rule it used, so you can
-open every one.
+**Founder**, Foundry's main page, answers questions about an ontology's load in plain
+language. It asks the data for you step by step, and its answer cites each record,
+table row, quote and rule it used, so you can open every one.
 
-Write the question, or select a suggestion, then select the arrow or press
-<kbd>⌘</kbd> <kbd>Enter</kbd> (<kbd>Ctrl</kbd> <kbd>Enter</kbd> on Windows and Linux).
+Write the question, or pick a suggestion, then press <kbd>Enter</kbd> or select the
+arrow (<kbd>Shift</kbd> <kbd>Enter</kbd> adds a new line).
 A question is at most 4,000 characters.
 
-The Analyst reads one load: the current one, unless you choose another in the **Load**
+Founder reads one load: the current one, unless you choose another in the **Load**
 picker in the top bar. A load can be asked about once it is **Ready** or **Partial**.
 While the ontology has no load, a new thread says **Nothing loaded yet** in place of the
 composer, with **Load data** or, while no version is current, **Finish setting up**.
@@ -1567,6 +1701,10 @@ instead. A [restricted member](/foundry/workspace/access) who holds no sources y
 
 A thread is one column: each question, then its steps as they run, then the answer,
 with the composer pinned at the bottom.
+
+Founder asks the data for you. Its **Asked the data** step holds the cited answer, shown
+as below, and **Open the full answer** opens it on its own page. Founder may add a
+sentence around the answer, but never rewrites it.
 
 - **Steps** say what the agent read. Its first step reads what the load holds: its
   types and links and how many of each. Then it finds entities, reads them and their
@@ -1589,13 +1727,13 @@ before it is ready.
 
 ## Threads
 
-While the Analyst is open, the sidebar lists the ontology's threads under the sections,
-by their first question, grouped **Today**, **Previous 7 days** and **Older**. A thread
-being answered says **Answering…**. **New thread** starts another. What questions have
+The sidebar lists your chats with Founder under the sections, grouped **Today**,
+**Previous 7 days** and **Older**. **New chat** starts another. Below them, **Earlier
+questions** lists the ontology's questions from before Founder, read only; one still
+being answered says **Answering…**. What questions have
 spent this month is under **Usage** in the [account menu](/foundry/workspace/usage).
 
-On a phone, the Analyst shows the threads first; choose one, or **New thread**, to open
-it.
+On a phone, Founder shows the threads first; choose one, or **New chat**, to open it.
 
 ## Getting into production
 
@@ -1614,15 +1752,14 @@ Select the card's head to minimise it; this browser remembers. Members reading t
 
 ## Ask about a record
 
-On an entity's page, select **Ask about this** to ask about that record in a drawer.
-The question is about the entity and the load the page reads; **Open in Analyst** opens
-its thread.
+On an entity's page, select **Ask about this** to start a new chat with "About
+&lt;name&gt;: " already in the composer; finish the question and send it.
 
-## When the Analyst can't answer
+## When Founder can't answer
 
 | What the thread says | What it means |
 | --- | --- |
-| **This ontology can't answer that** | What the load holds doesn't say. The Analyst says why, and what the ontology lacks. **Draft a new version with this** opens [Generate](/foundry/ontologies/generate-and-version) with a goal written from the question. |
+| **This ontology can't answer that** | What the load holds doesn't say. Founder says why, and what the ontology lacks. **Draft a new version with this** opens [Generate](/foundry/ontologies/generate-and-version) with a goal written from the question. |
 | **Stopped at this question's limit** | The question used its budget, steps or time before it could answer. Ask something narrower. |
 | **It couldn't answer** | It stopped with an error, which it names. |
 | **An attempt failed. Helix will try again** | A passing failure; the question runs again by itself. |
@@ -1630,7 +1767,7 @@ its thread.
 
 ## Limits and spending
 
-The Analyst sends your question, and what each step reads from the load, to the
+Founder sends your question, and what each step reads from the load, to the
 workspace's [AI models](/foundry/workspace/ai-models). Questions have their
 own monthly budget, apart from loads'; [Usage](/foundry/workspace/usage) shows both.
 Your agent can ask too, through the [Helix MCP](/foundry/agents/helix-mcp#ask-questions),
@@ -1642,7 +1779,11 @@ within the same limits.
 | Questions running per workspace | 2; others wait, queued |
 | Questions per workspace, per hour | 30 |
 | Per workspace, per month | $15 |
+| Per restricted member | $10 a month and 10 questions an hour, within the workspace's |
 | Question | 4,000 characters |
+
+Founder's own turns have a budget of their own, apart from questions'; when one runs
+out, Founder says which.
 
 ## Who can ask
 
@@ -1650,13 +1791,13 @@ Anyone in the workspace who can read the ontology's database: members need **Que
 read** on the database's Helix project, or sources shared with them under
 [Access](/foundry/workspace/access). New members have neither
 ([Members and roles](/foundry/workspace/members-and-roles#what-new-members-can-read)).
-The Analyst only reads the load; it never writes to the database.
+Founder only reads the load to answer; it never writes to the database.
 
 ## Next steps
 
     Search and expand what a load wrote.
 
-    The Analyst reads a load, so keep the current one up to date.
+    Founder reads a load, so keep the current one up to date.
 
 # Use Foundry from your agent
 
@@ -1665,8 +1806,8 @@ Page type: Guide
 Foundry's tools are on the Helix MCP, at `https://mcp.helix-db.com/mcp`. Connect your
 agent to it, sign in once, and the agent works in Foundry as you: it reads your
 ontologies, their versions, loads and graph, asks them questions, and makes the changes
-you ask for, each after a confirmation. It can't add a connector's credentials, delete
-anything or change billing; those stay on the website.
+you ask for, most after a confirmation. It can't add a connector's credentials, delete
+connections, ontologies or documents, or change billing; those stay on the website.
 
 ## Connect your agent
 
@@ -1724,10 +1865,14 @@ before each change it makes.
 | Tools | What they read |
 | --- | --- |
 | `helix_list_workspaces`, `helix_foundry_list_ontologies`, `helix_foundry_get_ontology` | Your workspaces, their ontologies, and an ontology's database, current version, current load and setup |
+| `helix_foundry_get_context` | An ontology's schema and the example questions it answers, for the current load's version |
 | `helix_foundry_get_version`, `helix_foundry_get_generation` | A version's definition, and a generation's goal, sources and outcome |
 | `helix_foundry_get_load`, `helix_foundry_read_graph` | A load, and what it wrote: up to 20 graph reads per call |
 | `helix_foundry_list_documents`, `helix_foundry_list_review_decisions` | The documents an ontology reads, and the review decisions settled on them |
-| `helix_foundry_list_connectors`, `helix_foundry_list_connector_kinds`, `helix_foundry_list_syncs`, `helix_foundry_get_sync` | The workspace's connections and their syncs, and the kinds of source it can add |
+| `helix_foundry_list_reviews` | The current load's reviews, which `settle_review` settles |
+| `helix_foundry_list_connectors`, `helix_foundry_list_connector_kinds`, `helix_foundry_get_sync` | The workspace's connections with their newest sync, one sync's status, and the kinds of source it can add, with which its plan includes |
+| `helix_foundry_list_dashboards`, `helix_foundry_get_dashboard`, `helix_foundry_preview_dashboard_tile` | The workspace's dashboards, one dashboard's tiles, and what a tile would show before it is saved |
+| `helix_foundry_get_ai_settings` | The provider and models the workspace's work runs on; only an owner changes them, in **Settings** → **AI models** |
 | `helix_foundry_recall` | The notes sent to an API source, newest first or by keyword: see [Agent memory](/foundry/agents/agent-memory) |
 | `helix_foundry_read_guide` | Foundry's own guide to these tools |
 
@@ -1738,17 +1883,16 @@ database's Helix project, as on the website.
 
 `helix_foundry_ask` asks an ontology's load a question in plain language, as
 the [Analyst](/foundry/ask/ask-questions) does, and waits up to 25 seconds for the answer. A
-longer question carries on: the agent follows it with `helix_foundry_get_question`, reads
-its steps with `helix_foundry_list_question_events`, and stops it with
-`helix_foundry_cancel_question`. `helix_foundry_list_questions` lists the ontology's
+longer question carries on: the agent follows it with `helix_foundry_get_question`, which
+waits up to 25 seconds each call, and stops it with `helix_foundry_cancel_question`. `helix_foundry_list_questions` lists the ontology's
 questions. Questions asked through the MCP count against the same hourly limit and
 monthly budget as the Analyst's.
 
 ## Changes, with a confirmation
 
-Every change takes two calls. `helix_prepare_foundry_operation` checks the change and
+Every change takes two calls. `helix_foundry_prepare_operation` checks the change and
 returns a confirmation for it: one-time, valid for five minutes, and bound to that
-operation, its target and its exact payload. `helix_execute_foundry_operation` uses the
+operation, its target and its exact payload. `helix_foundry_execute_operation` uses the
 confirmation and makes the change once. Agents with Helix's skills show you what they
 are about to do and ask before they execute it.
 
@@ -1758,12 +1902,16 @@ are about to do and ask before they execute it.
 | `generate_ontology` | Asks Foundry's agent for a new draft, from the tables, API sources and document sets you choose |
 | `revise_version` | Applies edits to a version as a new version, or previews them with `dry_run` |
 | `set_current_version` | Makes a version current |
-| `create_load`, `set_current_load` | Loads the current version, or makes another load current |
+| `create_load`, `set_current_load` | Loads a version, or makes another load current |
 | `sync_connector` | Syncs a connection now |
 | `create_event_source` | Creates an [API source](/foundry/data/api-sources) |
 | `upload_document` | Starts a document upload; the agent sends the file, then completes it with `helix_foundry_complete_document_upload` |
 | `create_document_set`, `update_document_set`, `move_document` | Makes, renames or describes a document set, or moves a document to another set |
 | `settle_review` | Settles a load's review, as on an entity's page |
+| `add_sample_data` | Adds the Acme Corp sample company's connection and documents, for an ontology generated with the sample |
+| `answer_generation_questions` | Answers the questions a generation waits on, which `helix_foundry_get_generation` lists; the agent asks you, never answers for you |
+| `create_dashboard`, `update_dashboard`, `delete_dashboard` | Makes, changes or deletes a dashboard. Any member can make one and change or delete their own; owners and admins any. |
+| `pin_dashboard`, `publish_dashboard`, `unpublish_dashboard` | Pins a dashboard in every member's sidebar, or publishes or removes its public snapshot link. Owners and admins only. |
 
 A change is refused for the same reasons as on the website: your role, the database's
 project rights, a sync or generation already running, the
@@ -1771,30 +1919,43 @@ project rights, a sync or generation already running, the
 spending caps. Making a version current is refused if someone moved the current
 version since the agent read it.
 
-## Workflows
+## Use cases
 
-A workflow is an agent's task over one ontology, such as answering support tickets.
+A use case is an agent's task over one ontology, such as answering support tickets.
 Each run records the agent's request, every read, question, send and upload it makes
 for it, and its answer, so you can see what the ontology gave the agent. Runs show on
-the ontology's **Workflows** page with an assessment of how much the ontology helped,
-which uses AI models and counts toward the month's
+the ontology's **Usage** page with an assessment of how much the ontology helped, which
+uses AI models and counts toward the month's
 [Run assessments](/foundry/workspace/usage) cap.
 
 | Tool | Does |
 | --- | --- |
-| `helix_foundry_create_workflow` | Creates a workflow. Owners and admins only, signed in; they can also select **New workflow** on the Workflows page. |
-| `helix_foundry_list_workflows` | Lists an ontology's workflows. |
-| `helix_foundry_start_workflow_run` | Starts a run when the agent takes on a request. The agent passes its id as `workflow_run_id` to the read, ask, send and upload tools while it works. |
-| `helix_foundry_finish_workflow_run` | Finishes a run with the agent's answer. |
-| `helix_foundry_get_workflow_run` | Reads a run and the calls it recorded. |
+| `helix_foundry_create_use_case` | Creates a use case. Owners and admins only, signed in; they can also select **New use case** on the Usage page. |
+| `helix_foundry_list_use_cases` | Lists an ontology's use cases. |
+| `helix_foundry_start_use_case_run` | Starts a run when the agent takes on a request. The agent passes its id as `use_case_run_id` to the read, ask, send and upload tools while it works. |
+| `helix_foundry_finish_use_case_run` | Finishes a run with the agent's answer. |
+| `helix_foundry_get_use_case_run` | Reads a run and the calls it recorded. |
+
+## Workflows
+
+A workflow runs steps for you on a trigger, as the person who made it. Your agent reads
+them with `helix_foundry_list_workflows`, `helix_foundry_get_workflow`,
+`helix_foundry_list_workflow_runs` and `helix_foundry_get_workflow_run`. It can create,
+update, pause, resume, run or delete one through the prepare and execute calls
+(`create_workflow`, `update_workflow`, `pause_workflow`, `resume_workflow`,
+`run_workflow`, `delete_workflow`). Any member can do this for their own workflows. A
+workflow the agent creates, or whose steps it changes, runs only after its owner
+approves it in Foundry.
 
 ## Connectors stay on the website
 
 An agent never handles a connector's credentials. When you ask it to connect a source,
-`helix_foundry_connector_link` gives it a link to Foundry's **Add data** form for that
-kind, in your workspace, such as
-`https://foundry.helix-db.com/data?add=stripe&workspace=<id>`. Open the link, follow the
-form's steps, and the agent carries on once the connection has synced.
+`helix_foundry_connect` gives it a link to open in your browser. For GitHub and Linear
+you sign in at the provider, and the agent follows the sign-in with
+`helix_foundry_get_sign_in`. For other kinds the link opens Foundry's **Add data** form
+for that kind, in your workspace, such as
+`https://foundry.helix-db.com/data?add=stripe&workspace=<id>`, where you enter the
+credentials. The same tool signs a connection in again when it needs it.
 
 [API sources](/foundry/data/api-sources) hold no credentials, so an agent can create one,
 send it pieces with `helix_foundry_send_pieces`, and read them back with
@@ -1856,18 +2017,21 @@ load.
 
 ## Set it up
 
-    In **Connectors**, select **Add data**, then **API source**. Name it, such as
-    "Agent memory", and describe what its notes hold: Foundry's agent reads the
-    description when it drafts an ontology from the source. An agent can also create
-    one with the MCP's `create_event_source` action, after your confirmation, and
-    give its text field there.
+    Owners and admins create one: in **Connectors**, select **Add data**, then **API
+    source**. Name it, such as "Agent memory", and describe what its notes hold:
+    Foundry's agent reads the description when it drafts an ontology from the source.
+    An agent can also create one with the MCP's `create_event_source` operation
+    (`helix_foundry_prepare_operation`, then `helix_foundry_execute_operation` once
+    you confirm), and give its text field there.
 
     The text field is the top-level field holding each note's text, such as `text`.
     Recall needs one. Owners and admins choose it on the source's page, under **Text
     field**: a field its pieces have, or **Another field…** by name before any arrive.
     With a text field, the source's newest 500 notes also become documents, which an
     ontology reading them by [entity extraction](/foundry/data/api-sources#how-ontologies-read-it)
-    spends about 1 cent a note on.
+    spends about 1 cent a note on. Extraction no person started spends at most $5 a
+    month per source and $20 across the workspace's API sources; past that, new notes
+    wait for next month or a load you start. Recall still finds them.
 
     Connect your agent to the [Helix MCP](/foundry/agents/helix-mcp#connect-your-agent)
     and sign in. Tell it the source to remember in, by name or id; it finds it with
@@ -1905,7 +2069,7 @@ agent may keep.
 | --- | --- |
 | `workspace_id` | The workspace. May be left out when you have only one. |
 | `event_source_id` | The API source. |
-| `query` | Optional: up to 10 words, 200 bytes. Only notes whose id, fields or text hold every word, whatever its case, are returned. Left out, the newest notes are. |
+| `query` | Optional: up to 10 words, 200 bytes. Only notes whose id, fields or text contain every word, whatever its case, are returned. A field is matched as the note shows it, which cuts a long value at 500 characters. Left out, the newest notes are. |
 | `limit` | Optional: at most 50 notes, 20 when left out. |
 
 Each note comes back as Markdown, its fields then its text, with its id, when it was
@@ -1935,9 +2099,9 @@ agent keys, send tokens and members whose access is limited to some
 
 | Limit | Value |
 | --- | --- |
-| Notes per recall | 50, 20 by default, with at most 64 KiB of text |
+| Notes per recall | 50, 20 by default, with at most 64 KiB of text (the newest note always comes back, however long) |
 | Query | 10 words, 200 bytes |
-| Source table | 64 MiB. Recall reads the whole source on every call, so a larger source is refused (`FOUNDRY_EVENT_SOURCE_TOO_LARGE`): send new notes to a new source before then. |
+| Source table | 64 MiB uncompressed. Recall reads the whole source on every call, so a larger source is refused (`FOUNDRY_EVENT_SOURCE_TOO_LARGE`): send new notes to a new source before then. |
 | Waiting sends read | The newest 100 |
 
 Recall is part of hosted Foundry's Helix MCP; a local install doesn't offer it.
@@ -1980,28 +2144,35 @@ change a role, remove someone or manage pending invitations, use the
 | Action | Owner | Admin | Member |
 | --- | :---: | :---: | :---: |
 | See connections, documents, ontologies, versions, loads, the plan and usage | ✓ | ✓ | ✓ |
-| Ask the Analyst, explore and read records | ✓ | ✓ | With **Query read** on the database's project, or what [their sources](/foundry/workspace/access) hold |
+| Ask Founder, explore and read records | ✓ | ✓ | With **Query read** on the database's project, or what [their sources](/foundry/workspace/access) hold |
 | Add, sync, edit and delete connections | ✓ | ✓ | |
 | Create API sources, and make and revoke their send tokens | ✓ | ✓ | |
 | Upload, move, rename and delete documents and sets | ✓ | ✓ | |
 | Arrange the Connectors explorer for the workspace | ✓ | ✓ | |
 | Create and delete ontologies | ✓ | ✓ | |
 | Generate, edit versions, make them current, load and settle reviews | ✓ | ✓ | |
+| Create dashboards, and edit or delete your own while unpinned and unpublished | ✓ | ✓ | ✓ |
+| Edit, pin, publish and delete any dashboard | ✓ | ✓ | |
+| Turn public dashboard links on or off | ✓ | | |
+| Create workflows, and edit, run and delete your own | ✓ | ✓ | ✓ |
+| Pause or delete anyone's workflow | ✓ | ✓ | |
+| Create and delete use cases on an ontology's Usage page | ✓ | ✓ | |
 | Invite people | ✓ | ✓ | |
 | Share sources with members, teams and agent keys | ✓ | ✓ | |
 | Upgrade, switch, cancel and manage billing | ✓ | ✓ | |
 | Choose where the workspace's AI runs, bring its own key, and allow People enrichment | ✓ | | |
 
-Creating or deleting an ontology and loading also need write access to the database's
-Helix project, which owners and admins have.
+Creating or deleting an ontology, loading, setting the current load and deleting a load
+also need **Query write** on the database's Helix project, which owners and admins have.
 
 ## What new members can read
 
 A new member sees the workspace's connections, documents, ontologies, versions and
 loads, but has no **Query read** on any Helix project. Until they get read access, pages
-that read what loads wrote (the Analyst, the Explorer, Records, entity pages and a
+that read what loads wrote (Founder's answers, the Explorer, Records, entity pages and a
 document's text in an ontology) say **You don't have read access to this database** or
-**You can't read this ontology's database**.
+**You can't read this ontology's database**. Dashboard tiles and an ontology's Usage page
+read the same way, so they need **Query read** too.
 
 An owner or admin grants read access in one of two ways:
 
@@ -2013,8 +2184,10 @@ An owner or admin grants read access in one of two ways:
 Owners and admins have **Query read** on every project.
 
 An agent you connect through the [Helix MCP](/foundry/agents/helix-mcp) acts with your
-role and rights: it can do only what the table allows you, and it never adds connections,
-deletes anything, invites people or changes billing.
+role and rights: it can do only what the table allows you. Each change takes a prepare
+call and then an execute call, except sending pieces to an API source. You enter a
+connection's credentials in Foundry, never through the agent. The agent can't invite
+people or change billing.
 
 ## Next steps
 
@@ -2049,13 +2222,19 @@ Taking sources away doesn't lift the restriction. Without them, the member reads
 or nothing. To lift it, take away every source they hold, their own and their teams',
 then turn off **Restricted** for them under **People**.
 
+Under **People**, **Restricted, holds nothing** lists restricted members with no sources
+left. **Lift** lifts each one in one click. You can also turn on **Restricted** for a
+member before you give them any sources.
+
 Some people can't be restricted:
 
-- **Owners and admins** always see everything.
+- **Owners and admins** always see everything. A restriction applies only while
+  someone's role is member.
 - **Members with raw access** can't be restricted. Raw access means the member writes to
   a project or queries its databases outside Foundry, which is set in the
   [Helix dashboard](https://helix-db.com/login). Take that access away there first. A
-  team that has such a member can't be given sources either. If a restricted member is
+  team that has such a member can't be given sources, and such a member can't join a
+  team that has them. If a restricted member is
   given raw access later, they're flagged **Raw access**, because Foundry can't limit
   what they do outside it.
 
@@ -2071,7 +2250,8 @@ hold otherwise.
 ## Agent keys
 
 An agent's key reads and asks only the ontologies its sources cover, through the
-[Helix MCP](/foundry/agents/helix-mcp). It changes nothing.
+[Helix MCP](/foundry/agents/helix-mcp). It changes nothing, apart from recording its own
+use case runs while **Usage** is on.
 
 **Revoke** stops the key at once, and its sources go with it. A key granted **Query read**
 on a project in the Helix dashboard reads that project's ontologies whole, whatever its
@@ -2156,14 +2336,15 @@ the [Helix dashboard](https://helix-db.com/login).
 - Each workspace gets it once.
 
 When the free months end, choose a Helix Cloud plan in the Helix dashboard. Without an
-active plan, Foundry can't create databases, and the Explorer may say queries are
-paused.
+active plan, Foundry can't create databases, and the Explorer, Records and entity pages
+may say queries are paused.
 
-Foundry offers **Open Helix billing** only when a new database can't be created: the
-workspace's Helix plan has ended, or the workspace signed up through the Helix website,
-which has its own offer. The
-[Explorer](/foundry/explore/explorer#when-theres-nothing-to-read) links there too when
-the plan has paused queries.
+Foundry links to Helix billing when a new database can't be created (**Open Helix
+billing**): the workspace's Helix plan has ended, or the workspace signed up through the
+Helix website, which has its own offer. The
+[Explorer](/foundry/explore/explorer#when-theres-nothing-to-read), Records and entity
+pages link there too when queries are paused: **Choose a plan** when the workspace has no
+Helix plan, else **Open Helix billing**.
 
 ## Next steps
 
@@ -2176,7 +2357,7 @@ the plan has paused queries.
 Page type: Guide
 
 Foundry uses AI models to draft ontologies, read documents into loads, check the facts
-it finds, answer questions and assess workflow runs. **Settings** → **AI models** says
+it finds, answer questions, assess use case runs and run Founder. **Settings** → **AI models** says
 where they run. Owners choose; everyone else in the workspace sees the choice.
 
 ## Default
@@ -2194,9 +2375,14 @@ Anthropic API key instead, under the terms of its Anthropic account.
     them: the page follows the test and says when it passed, or why it failed. Until it
     passes, the setting before stays in force.
 
-From then on, new drafts, document reads and questions run on your key. Documents are
-read again on their next load, at your key's cost. To go back, choose **Default** and
-select **Use the default**; it takes effect at once.
+Founder runs on the Questions model. Once the test passes, Foundry checks that Founder can
+run on that model. If it can't, the page says why: drafts, loads and questions still run
+on your key, but Founder needs a Questions model that calls tools.
+
+From then on, new drafts, document reads and questions run on your key. If you choose a
+different model for reading documents or checking facts, documents are read again on
+their next load, at your key's cost; the confirmation says so. To go back, choose
+**Default**, select **Use the default**, then **Switch**; it takes effect at once.
 
 Foundry keeps the key encrypted and never shows it again. Spend on your own key counts
 toward the workspace's [monthly caps](/foundry/workspace/usage) all the same. On Free,
@@ -2211,7 +2397,8 @@ chooses **Default**. The page says so.
 
 ## Who can change it
 
-Only owners. Admins and members see where the workspace's AI runs.
+Only owners. Admins and members see where the workspace's AI runs, except members
+[limited to certain sources](/foundry/workspace/access).
 
 ## Next steps
 
@@ -2223,7 +2410,7 @@ Only owners. Admins and members see where the workspace's AI runs.
 
 Page type: Guide
 
-Reading documents into loads, answering questions and assessing workflow runs use AI
+Reading documents into loads, answering questions and assessing use case runs use AI
 models, so they cost money; reading tables doesn't. Each has a monthly cap per
 workspace, the same on every plan. **Usage**, in the account menu at the foot of the
 sidebar, shows what the workspace has spent this month.
@@ -2233,12 +2420,16 @@ sidebar, shows what the workspace has spent this month.
 | **This month** | Everything below, once | |
 | **Loads** | Reading documents, and API sources' pieces, into your ontologies' loads | $50 |
 | **API sources** | Part of Loads: extracting API sources' pieces that no one started a load for | $20 |
-| **Questions** | Answering questions in the Analyst and through the Helix MCP | $15 |
-| **Run assessments** | Assessing how much your ontologies helped your agents' [workflow runs](/foundry/agents/helix-mcp#workflows) | $20 |
+| **Questions** | Answering questions about your data, from Founder and through the Helix MCP | $15 |
+| **Run assessments** | Assessing how much your ontologies helped your agents' [use case runs](/foundry/agents/helix-mcp#use-cases), shown on each ontology's Usage page | $20 |
+
+Founder's own turns and the Founder steps of Workflows have budgets of their own, $30
+and $20 a month, and aren't in Usage.
 
 Each row's bar fills as the month's spend nears its cap. Point at a row for what it
 counts; point at the total for the day the caps start again, the first of each month
-(UTC). Everyone in the workspace sees it. Spend on the workspace's
+(UTC). Everyone in the workspace sees it, except members limited to
+[source grants](/foundry/workspace/access). Spend on the workspace's
 [own model key](/foundry/workspace/ai-models) counts toward the caps too.
 
 ## When a cap is reached
@@ -2246,11 +2437,12 @@ counts; point at the total for the day the caps start again, the first of each m
 | Cap | What happens |
 | --- | --- |
 | A load: $10 | The load stops **Partial**, with its tables written. The documents it didn't reach are read into it once it's current and the month has budget. |
-| Loads: $50 a month | New loads are refused, and new documents aren't read, until next month. Work no person started, such as [refreshes](/foundry/ontologies/load-data#automatic-refreshes) and reading documents as they arrive, stops at $40, which leaves the last $10 for loads you start. |
+| Loads: $50 a month | New loads are refused, and new documents aren't read, until next month. Work no person started, such as [refreshes](/foundry/ontologies/load-data#automatic-refreshes) and reading connectors' new documents, stops at $40, which leaves the last $10 for loads and uploads you start. |
 | API sources: $5 per source, $20 a month | Extraction no person started stops for the month: new pieces wait for next month, and ontologies keep the pieces they have. |
 | A question: $0.50 | The question stops at its limit. Ask something narrower. |
-| Questions: $15 a month | A question waits until the month's budget can hold it, or you cancel it. |
-| Run assessments: $20 a month | Runs that finish once it's reached aren't assessed. |
+| Questions: $15 a month | New questions are refused until next month once the month's spend leaves less than one question's $0.50. A question held back by others still running waits until the budget can hold it, or until you cancel it. |
+| A member or agent key limited to source grants: $10 a month, within the workspace's | Their new questions are refused until next month. |
+| Run assessments: $20 a month | Runs that finish once the month's spend is within $1 of it aren't assessed. |
 
 A refresh that runs with the month spent still writes your tables, and reuses what
 earlier loads read from documents at no cost.
@@ -2261,7 +2453,7 @@ Drafting an ontology isn't in Usage and has no monthly cap. Instead:
 
 - each generation attempt stops at $5 of model use;
 - a generation makes at most 3 attempts;
-- a workspace starts at most 10 generations and version edits an hour.
+- a workspace starts at most 10 generations an hour. Version edits don't count toward this.
 
 On the workspace's [own key](/foundry/workspace/ai-models#your-own-anthropic-key),
 drafts run on that key and still aren't in Usage: see their cost in your Anthropic
@@ -2288,10 +2480,10 @@ The limits Foundry applies, by area. Each guide explains what happens when you r
 | One sync attempt | 2 hours |
 | Attempts per sync | 3 |
 | Syncs running per connection | 1 |
-| Size of an S3 connection's tables, per sync | 20 GB |
+| Size of an S3 connection's tables, per sync | 20 GiB |
 | PostHog event history | 1 to 365 days, 30 by default |
 | GitHub review history | 1 to 365 days, 90 by default |
-| GitHub repositories | Up to 100 when none are named |
+| GitHub repositories | 100 at most; with none named, a token or app install that reads more than 100 is refused until you list them |
 | Slack history | 1 to 365 days, 90 by default |
 | Google Workspace past events | 1 to 365 days, 90 by default, and 30 days ahead |
 | Documents a connection keeps, per set | The newest 1,000 |
@@ -2306,7 +2498,7 @@ The limits Foundry applies, by area. Each guide explains what happens when you r
 | Live send tokens per source | 10 |
 | Pieces per send | 500, with at most 1 MiB of data together |
 | Request body over HTTP | 2 MiB, arriving within 15 seconds |
-| Piece | 256 KiB of data, 64 levels deep; an id of 1 to 128 characters |
+| Piece | 256 KiB of data, 64 levels deep; an id of 1 to 128 printable ASCII characters, no spaces; field names up to 64 bytes |
 | Fields per source | 200 |
 | Sends per source | 5 a second, in bursts of up to 20 |
 | Sends per workspace | 20 a second, in bursts of up to 50 |
@@ -2357,7 +2549,9 @@ The limits Foundry applies, by area. Each guide explains what happens when you r
 | Loads kept per ontology | 5: the current one and the four newest others |
 | Loads or extracts running per ontology | 1 |
 
-## Analyst
+## Questions
+
+Questions Founder asks for you, and those asked through the Helix MCP's `helix_foundry_ask`.
 
 | Limit | Value |
 | --- | --- |
@@ -2369,11 +2563,43 @@ The limits Foundry applies, by area. Each guide explains what happens when you r
 | Questions per member or agent key reading through [sources](/foundry/workspace/access), per hour | 10 |
 | Spend per member or agent key reading through sources, per month | $10 |
 
+## Founder
+
+| Limit | Value |
+| --- | --- |
+| Per turn | $0.50, 20 steps and 4 minutes |
+| Message | 4,000 characters |
+| Messages per person, per hour | 30 |
+| Turns running per workspace | 2 |
+| Spend per workspace, per month | $30, apart from questions' |
+| Prepared actions waiting per thread | 3 |
+
+## Use cases
+
+| Limit | Value |
+| --- | --- |
+| Assessing use cases' runs, spend per workspace, per month | $20 |
+
 ## Workflows
 
 | Limit | Value |
 | --- | --- |
-| Run assessments' spend per workspace, per month | $20 |
+| Workflows per workspace | 50 |
+| Runs per workspace | 200 in any 24 hours; past that, a trigger's run is skipped and **Run now** is refused |
+| Founder steps' spend per workspace, per month | $20, at most $0.50 a step, 2 running at once |
+| Steps per workflow | 50, its trigger included |
+| Failed runs in a row before a workflow pauses | 3 |
+
+## Dashboards
+
+| Limit | Value |
+| --- | --- |
+| Dashboards per workspace | 200 |
+| Pinned in the sidebar, per workspace | 20 |
+| Tiles per dashboard | 20, up to 3 a row |
+| Name | 120 characters |
+| Description | 1,000 characters |
+| Tile title | 80 characters |
 
 ## Helix MCP
 
@@ -2417,12 +2643,15 @@ Find the message Foundry shows, then its cause and fix.
 
 | Message | Cause and fix |
 | --- | --- |
-| Your company signs in with single sign-on. | Foundry doesn't offer single sign-on yet. Sign in to the [Helix dashboard](https://helix-db.com/login) instead. |
-| Your email isn't verified yet. | Verify the email with your provider, or continue with another provider. |
+| Your company signs in with single sign-on. | Foundry couldn't start your company's single sign-on. Try again in a moment, or ask whoever manages Helix at your company. |
+| Your email isn't verified yet. | The code Foundry emailed ran out or was tried too many times. Sign in again to get a new code. |
 | This account can't sign in here. | The environment doesn't accept this account. Sign in with your work account, or ask Helix for access. |
-| Sign-in couldn't start. | Choose a provider to try again. |
+| Sign-in couldn't start. | Choose a way to sign in to try again. |
 | Sign-in is unavailable right now. | Helix couldn't start sign-in. Try again in a moment. |
 | Sign-in didn't finish. | The sign-in link expired or was already used. Try again. |
+| That email and password don't match. | Check them and try again, or select **Forgot your password?** to reset it. |
+| An account already uses this email. | Sign in instead, or reset its password from **Forgot your password?**. |
+| Helix couldn't reach sign-in. | Try again in a moment. |
 | Couldn't load your workspaces. | Foundry couldn't reach Helix. Select **Retry**; **Sign out** is offered on the same page. |
 
 ## Connections and syncs
@@ -2433,7 +2662,7 @@ Find the message Foundry shows, then its cause and fix.
 | This key cannot read: … | The key can't read those objects, so they're skipped. Add **Read** for them and test again, or carry on without them. |
 | The database can't be reached | The database must accept connections from Helix's network. Allow the outbound addresses the form lists, and check the host and port. Private addresses are refused. |
 | A TLS error | Foundry verifies the server's certificate. Add the CA certificate under **Connection options**, or choose **No TLS** if the database doesn't offer it. |
-| this key can't read events, so on Pro and Max every sync reads every object in full | Stripe: give the key **Read** on Events, so syncs read only what changed. It syncs either way. |
+| this key can't read events, so on Pro and Max every sync reads every object in full | Stripe: give the key **Read** on Events. WorkOS: use a key that can read the Events API. Syncs then read only what changed; they work either way. |
 | table … has more than 2000000 rows; choose fewer tables | A table is over the [row limit](/foundry/reference/limits#connections). For a database, edit the connection and leave the table out; for PostHog, shorten the event history. |
 | Syncs fail after a table changed | A selected database table was dropped or renamed. Edit the connection and test it again. |
 | A sync of this connector is already queued or running | Wait for it to finish before syncing, editing or deleting. |
@@ -2459,8 +2688,8 @@ Find the message Foundry shows, then its cause and fix.
 | Message or state | Cause and fix |
 | --- | --- |
 | Already uploaded: it's in … | The workspace has this file already, in the set named. Foundry keeps one copy. |
-| Only Markdown, MDX, text, JSON, CSV, TSV, JSONL, Parquet, or PDF files can be uploaded. | Save the file in one of these formats, with its extension, uncompressed. |
-| The file is larger than 1.0 MiB, or 3.0 MiB | Text is up to 1 MiB, and PDFs and table files up to 3 MiB. Split it into smaller documents. |
+| Only Markdown, MDX, text, JSON, CSV, TSV, JSONL, Parquet, PDF, or WebVTT files can be uploaded. | Save the file in one of these formats, with its extension, uncompressed. |
+| … files hold at most 1.0 MiB, or 3.0 MiB | Text files (Markdown, MDX, plain text and WebVTT) hold up to 1 MiB, and PDFs and table files up to 3 MiB. Split it into smaller files. |
 | Reading its text, or Reading its rows | Foundry reads a PDF's text, or a table file's rows, once after the upload. Wait a moment; a generation started meanwhile leaves the file out. |
 | Scanned PDF: no text to read | The PDF has no text layer, so ontologies can't read it. Upload a PDF with its text, such as one exported from the original, or the text itself. |
 | Ontologies can't read it, for a PDF | The PDF is encrypted, damaged or longer than 150 pages. Upload an unlocked copy, or split it. |
@@ -2482,7 +2711,7 @@ Find the message Foundry shows, then its cause and fix.
 | A generation reads at most 20 document sets | Untick a set to choose another. |
 | One generation covers at most 50 tables | Choose fewer connectors or sets: table files count as tables. |
 | A workspace may start 10 ontology generations an hour | Generations and version edits are capped per workspace. Try again later. |
-| Syncing… you can continue once it's synced. | The connection you added on New ontology is on its first sync. Wait for it, or choose a connection that has synced. |
+| Syncing… or Reading its files… you can continue once … | A connection you added is on its first sync, or an uploaded table file is still being read. Wait for it, or choose a source that's ready. |
 | … is used by …. Choose another. | A database holds one ontology. Choose another database, or create a new one. |
 | Making a version current is refused | Someone else made another version current at the same time. The page now shows it; make yours current again if you still want it. |
 | A new database needs a Helix plan | The workspace has no active Helix Cloud plan: its plan ended, or it signed up through the Helix website, so it doesn't get [Foundry's free plan](/foundry/workspace/plans-and-billing#the-helix-cloud-plan-for-databases). Select **Open Helix billing** to choose one, or, for an ontology after the first, **Use an existing one** for a database you already have. |
@@ -2494,14 +2723,14 @@ Find the message Foundry shows, then its cause and fix.
 | Message or state | Cause and fix |
 | --- | --- |
 | **Load data** isn't offered | Only a current agent draft the agent finished can be loaded. [Generate](/foundry/ontologies/generate-and-version) one and make it current. |
-| Partial, or Stopped at the cap | Reading documents reached the [spending cap](/foundry/ontologies/load-data#spending-and-limits). The documents it didn't reach are read into it once it's current and the month has budget. |
+| Partial, or Stopped early | The load stopped before reading every document. It reached the [spending cap](/foundry/ontologies/load-data#spending-and-limits), the workspace's own AI key was refused or ran out of quota, or the model left some unread. The load's page says which. What it read is in the database, and the documents it didn't reach are read later: after a cap, once it's current and the month has budget. |
 | The workspace has spent this month's $50.00 of loads | New loads are refused until next month. [Usage](/foundry/workspace/usage) shows the month's spend. |
 | The tables synced again during the load | A source changed under the load. Start a new load to write the new snapshot. |
 | A document needs review | The load couldn't settle something in it, such as an unknown or ambiguous name, a quote it couldn't verify, or a fact that conflicts with your tables. Open the document to see why, and [settle it](/foundry/explore/records-and-entities#settle-a-review). |
 | The load reads no documents | Its version reads no document sets. Generate a version that picks some. |
 | Delete failed | Select **Retry delete** in the load's menu in **Data loads**. |
 
-## Explorer and Analyst
+## Explorer and questions
 
 | Message or state | Cause and fix |
 | --- | --- |
@@ -2511,11 +2740,22 @@ Find the message Foundry shows, then its cause and fix.
 | You don't have read access to this database | The Explorer, Records and entity pages read the database a load wrote. Ask an owner or admin for **Query read** on its Helix project; see [Members and roles](/foundry/workspace/members-and-roles#what-new-members-can-read). |
 | Queries are paused: this workspace has no active Helix plan | The Explorer, Records and entity pages can't read the database. Select **Choose a plan** for the Helix dashboard's billing. **Queries are paused for billing** means the plan's billing stopped them: **Open Helix billing**. |
 | … can't be asked about until it's written | The load is still writing. Wait for it to finish. |
-| You can't read this ontology's database | The Analyst reads the database a load wrote. Ask an owner or admin for **Query read** on its Helix project. |
+| You can't read this ontology's database | Questions read the database a load wrote. Ask an owner or admin for **Query read** on its Helix project. |
 | This ontology can't answer that | What the load holds doesn't say. Select **Draft a new version with this** to generate a version that can. |
 | Stopped at this question's limit | It used a question's $0.50, 20 steps or 4 minutes. Ask something narrower. |
 | Waiting for this month's questions budget | The workspace's questions budget is spent. The question runs once the month allows it, or cancel it. |
 | The workspace has asked 30 questions in the last hour | Try again later. |
+| You have asked 10 questions in the last hour, or You have spent this month's $10.00 of questions | You're restricted to shared sources, so you also have limits of your own: 10 questions an hour and $10 a month. Try again later. |
+| Too many questions have been asked here in the last hour, or This workspace's questions are used up for the month | The workspace's limit is reached. Try again later. |
+
+## Founder and Workflows
+
+| Message or state | Cause and fix |
+| --- | --- |
+| You have sent 30 messages in the last hour | Founder takes 30 messages an hour from each person, apart from the limits on questions about the data. Try again later. |
+| The workspace has spent this month's $30.00 of Founder | Founder's monthly budget is spent. It's apart from questions' budget. Try again next month. |
+
+For what Workflows refuse, see [Limits](/foundry/reference/limits#workflows).
 
 ## AI models
 
@@ -2542,6 +2782,7 @@ Find the message Foundry shows, then its cause and fix.
 | --- | --- |
 | A member sees only some ontologies, or part of one | They're restricted to the sources shared with them. Give them more under [Access](/foundry/workspace/access), or lift the restriction there. |
 | **Restricted** can't be turned off | They still hold sources, their own or a team's. Take those away first. |
+| Not shared with you | The sources shared with you don't cover all of this ontology's current load. Ask an owner or admin to share them under [Access](/foundry/workspace/access). |
 | An ontology shows **Load again to share** | Its current load was made before Foundry kept track of what each load reads. Load it again. |
 
 ## Next steps

@@ -53,10 +53,10 @@ Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickst
 - [Records and entities](https://docs.helix-db.com/foundry/explore/records-and-entities): Read a Helix Foundry load as tables by type, open a record's links and sources, and see everything about one entity — Page type: Guide
 
 ## Analyst
-- [Ask the Analyst questions about your data](https://docs.helix-db.com/foundry/ask/ask-questions): Ask a Helix Foundry ontology's load questions in plain language in the Analyst, follow each step, read charts and tables, and open the records, rows and quotes its answers cite — Page type: Guide
+- [Ask Founder questions about your data](https://docs.helix-db.com/foundry/ask/ask-questions): Ask a Helix Foundry ontology's load questions in plain language with Founder, follow each step, read charts and tables, and open the records, rows and quotes its answers cite — Page type: Guide
 
 ## Agents
-- [Use Foundry from your agent](https://docs.helix-db.com/foundry/agents/helix-mcp): Connect Claude Code, Codex or another MCP client to the Helix MCP to read and ask Helix Foundry ontologies, and to set them up with a confirmation for every change — Page type: Guide
+- [Use Foundry from your agent](https://docs.helix-db.com/foundry/agents/helix-mcp): Connect Claude Code, Codex or another MCP client to the Helix MCP to read and ask Helix Foundry ontologies, and to set them up with a confirmation for most changes — Page type: Guide
 - [Give your agent a memory](https://docs.helix-db.com/foundry/agents/agent-memory): Use a Helix Foundry API source as your agent's memory: it sends notes through the Helix MCP, reads them back by keyword with helix_foundry_recall, and your ontologies turn them into entities and facts — Page type: Guide
 
 ## Workspace
@@ -64,11 +64,11 @@ Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickst
 - [Share sources with people and agents](https://docs.helix-db.com/foundry/workspace/access): Choose which connections, tables and document sets a Helix Foundry member, team or agent key can read, and what a restricted member sees — Page type: Guide
 - [Plans and billing](https://docs.helix-db.com/foundry/workspace/plans-and-billing): Compare Helix Foundry Free, Pro and Max, which differ in how often connectors sync, upgrade a workspace, switch tiers, cancel, resume and manage payment, and see the Helix Cloud plan your ontologies' databases use — Page type: Guide
 - [AI models](https://docs.helix-db.com/foundry/workspace/ai-models): Choose where a Helix Foundry workspace's drafts, document reads and questions run: the default, or your own Anthropic API key on Pro or Max — Page type: Guide
-- [Usage and spending caps](https://docs.helix-db.com/foundry/workspace/usage): See what a Helix Foundry workspace has spent on AI this month, on loads, API sources, questions and workflow run assessments, against each monthly cap, and how generations are capped — Page type: Guide
+- [Usage and spending caps](https://docs.helix-db.com/foundry/workspace/usage): See what a Helix Foundry workspace has spent on AI this month, on loads, API sources, questions and use case run assessments, against each monthly cap, and how generations are capped — Page type: Guide
 
 ## Reference
-- [Helix Foundry limits](https://docs.helix-db.com/foundry/reference/limits): Every Helix Foundry limit in one place: syncs, API sources, documents, generations, loads, Analyst questions, spending, the Helix MCP and reads — Page type: Reference
-- [Troubleshooting Helix Foundry](https://docs.helix-db.com/foundry/reference/troubleshooting): What Helix Foundry's sign-in, connection, sync, API source, document, generation, database, load, Analyst, AI model and Helix MCP messages mean, and what to do — Page type: Troubleshooting
+- [Helix Foundry limits](https://docs.helix-db.com/foundry/reference/limits): Every Helix Foundry limit in one place: syncs, API sources, documents, generations, loads, questions, Founder, workflows, dashboards, spending, the Helix MCP and reads — Page type: Reference
+- [Troubleshooting Helix Foundry](https://docs.helix-db.com/foundry/reference/troubleshooting): What Helix Foundry's sign-in, connection, sync, API source, document, generation, database, load, question, Founder, AI model and Helix MCP messages mean, and what to do — Page type: Troubleshooting
 
 ## HelixDB — Start Here
 - [Introduction](https://docs.helix-db.com/database/helix-db/start-here/introduction): HelixDB is a graph database with native vector and full-text search, built on object storage — Page type: Concept

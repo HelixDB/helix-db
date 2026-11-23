@@ -35,8 +35,11 @@ you use for Helix Cloud; your workspaces come with it.
 | **Generation** | A request to Foundry's agent to draft a new version of the ontology from the tables, API sources and document sets you pick. |
 | **Version** | One draft of the ontology. Versions never change; you choose which one is current. |
 | **Load** | One write of the current version into the ontology's database: your tables, then the documents of its sets. A **refresh** is a load Foundry starts itself when the data changed. |
-| **Analyst** | Questions about a load in plain language, answered with the sources they came from. Foundry opens on it. |
+| **Founder** | Foundry's assistant, in private chats. It answers from your ontologies' loads through the Analyst and prepares changes you confirm. Foundry opens on it. |
+| **Analyst** | The engine Founder asks: questions about a load in plain language, answered with the sources they came from. |
 | **Explorer** | The graph and records view of a load, read from the database with your session. |
+| **Dashboard** | Tiles of saved queries over an ontology's load, drawn as charts or tables. |
+| **Workflow** | Steps Foundry runs for you on a schedule, by hand, or when a sync, load, upload or draft finishes. Nothing runs until you approve it. |
 
 The work flows in one direction:
 
@@ -45,7 +48,7 @@ flowchart LR
   A[Connect data and upload documents] --> B[Generate a draft]
   B --> C[Review and make it current]
   C --> D[Load into the database]
-  D --> E[Ask the Analyst and explore]
+  D --> E[Ask Founder and explore]
   A -. syncs .-> D
 ```
 
@@ -67,12 +70,14 @@ A generation sends your synced tables, and up to five of the newest documents of
 set it picks, to Foundry's agent, which drafts the version. A load sends your
 documents' text to AI models, which find the names and facts they hold and check them.
 Reading tables into a load uses no models. The Analyst sends your question, and what
-each step reads from the load, to AI models.
+each step reads from the load, to AI models. Founder sends your messages, and what its
+tools read, to AI models, and so does each Founder step of a workflow.
 
 By default these run on hosted providers through Helix, today Anthropic's Claude models.
 On Pro or Max, an owner can run them on the workspace's own Anthropic key instead; see
-[AI models](/foundry/workspace/ai-models). What they cost counts against the
-workspace's [monthly caps](/foundry/workspace/usage).
+[AI models](/foundry/workspace/ai-models). What loads and questions cost counts against
+the workspace's [monthly caps](/foundry/workspace/usage). Each generation attempt has a
+spending cap of its own.
 
 ## Next steps
 

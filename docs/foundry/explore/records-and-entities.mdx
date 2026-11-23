@@ -39,7 +39,8 @@ document.
 </Frame>
 
 Select **Open in graph** to find it in the Explorer, or **Open its page** for the
-entity's page.
+entity's page. If you're [restricted to some sources](/foundry/workspace/access#restricted-members),
+Records shows only the records you can read, and a record has no **Open in graph**.
 
 ## An entity's page
 
@@ -54,7 +55,8 @@ breaks).
 </Frame>
 
 Every page here reads one load. Use the **Load** picker to read another; links between
-pages keep it. **Ask about this** asks a question about the record in a drawer; see
+pages keep it. **Ask about this** opens a new chat about the record, with your message already
+started as `About <record>: `. Finish the question and send it; see
 [the Analyst](/foundry/ask/ask-questions#ask-about-a-record).
 
 **Derived** shows only for a version with rules. Its facts are worked out when the page
@@ -72,10 +74,10 @@ settle this review**.
 
 | On a card | What it does | When it applies |
 | --- | --- | --- |
-| **Approve** a claim held for a person to check | Writes the link the document's sentence states | This load at once, and later loads. If a name in it still needs review, the first load after that name is settled writes it. |
+| **Approve** a claim held for a person to check | Writes the link the document's sentence states | This load at once, and later loads. If a name in it still needs review, this load keeps it held until that name is settled, then writes it. |
 | **Reject** a held claim | Writes nothing, and takes the card out of Needs review | This load and later ones |
 | **Keep value**, or **Replace the table's value with** one a document states | Keeps one of the values documents disagree on, or overrides a table's value | This load at once, and later loads. A chosen value holds even after the table changes; a document dated after your decision still wins. |
-| **Link this name to** a record, or **Not in data** | Settles which record a name means, or that none does | From the next load. Load again to see it. |
+| **Link this name to** a record, or **Not in data**, then **Settle review** | Settles which record a name means (here and in other documents where nothing else links it), or that none does (this document only) | This load at once, and later loads. On a name the load already linked, a new choice or **Undo link** applies from the next load. |
 
 A link that holds one value, such as a contract's single customer, says on its card what
 an approval replaces. Approve those one at a time.
@@ -90,9 +92,16 @@ On a group:
   asking for the links those reviews suggest. The new version waits for your review;
   the current one stays until you choose otherwise.
 
-**Saved decisions** lists every decision. Removing one undoes it: a value leaves the
-current load at once, a rejected claim is listed again, and a name decision is undone
-from the next load.
+To work through every open review of the current load in one place, open **Review**
+under the ontology in the Ontologies panel; its count is how many are open. It lists the
+decisions that write the most facts first, with the same controls as a card. There is no
+**Approve all** there.
+
+**Saved decisions** lists the decisions for this document or record. **Remove decision**
+undoes one: a value leaves the current load at once, a rejected claim is listed again,
+and a name decision stays in this load but later loads won't read it. **Take back
+approval** takes an approval out of the current load at once, and its claim is held for
+review again.
 
 ## Next steps
 

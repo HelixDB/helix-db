@@ -14,8 +14,8 @@ and admins can start it.
 
 ## Start the sample
 
-On **Get started**, select **See it on a sample company (1 min)** under **Start with a
-sample company**. **Acme Corp, a sample company** opens and runs each step by itself;
+In a workspace with no ontology yet, **Get started** offers the sample: select **See it
+on a sample company (1 min)** under **Start with a sample company**. **Acme Corp, a sample company** opens and runs each step by itself;
 each step opens as its work finishes and stays open.
 
 <Steps>
@@ -44,8 +44,8 @@ each step opens as its work finishes and stays open.
     **See the load** opens its page.
   </Step>
 
-  <Step title="Ask the Analyst">
-    Once the load is written, the page asks the first suggested question and shows the
+  <Step title="Ask about the sample">
+    Once the load finishes, the page asks the first suggested question and shows the
     answer with the records and documents it came from. Then:
 
     - under **Ask another**, a suggestion opens its thread in the
@@ -61,13 +61,21 @@ each step opens as its work finishes and stays open.
   </Step>
 </Steps>
 
-If a step fails, the page says why, with **Try again**. Reopening or reloading the page
-carries on where it was and makes nothing twice.
+If setting up fails, the page says why, with **Try again**. Reopening or reloading the
+page carries on where it was and makes nothing twice. If the load fails, the Loading step
+says why, with **See the load**. To load again, use **Load data** on the ontology's
+overview.
+
+An agent with the Helix MCP can add the sample too. It creates an ontology named **Acme
+Corp customers**, adds the sample's connection and documents to it with the
+`add_sample_data` operation, then generates it from the sample.
 
 ## While you explore the sample
 
-While the sample is the workspace's only ontology, every page shows the banner **Sample
-data: you're exploring Acme Corp, a made-up company.** For owners and admins it links
+While the sample is the workspace's only ontology, every page except the new-ontology
+page shows the banner **Sample data: you're exploring Acme Corp, a made-up company.**
+Once you have your own ontology, it shows only on the sample's pages. For owners and
+admins it links
 **Back to getting started**, or, once the sample's question is answered, **Get started
 with your own data**.
 
@@ -91,6 +99,9 @@ a day later if the workspace still has no data of its own.
 
 Delete the **Acme Corp customers** ontology from its overview, then its connection and
 documents in **Connectors**.
+
+Deleting the ontology keeps the Helix database the sample made, named Acme Corp
+customers. Delete it in the Helix dashboard if you don't want it.
 
 ## Next steps
 

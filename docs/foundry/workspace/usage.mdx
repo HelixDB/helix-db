@@ -1,13 +1,13 @@
 ---
 title: "Usage and spending caps"
-description: "See what a Helix Foundry workspace has spent on AI this month, on loads, API sources, questions and workflow run assessments, against each monthly cap, and how generations are capped"
+description: "See what a Helix Foundry workspace has spent on AI this month, on loads, API sources, questions and use case run assessments, against each monthly cap, and how generations are capped"
 sidebarTitle: "Usage"
 pageType: "Guide"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-Reading documents into loads, answering questions and assessing workflow runs use AI
+Reading documents into loads, answering questions and assessing use case runs use AI
 models, so they cost money; reading tables doesn't. Each has a monthly cap per
 workspace, the same on every plan. **Usage**, in the account menu at the foot of the
 sidebar, shows what the workspace has spent this month.
@@ -21,12 +21,16 @@ sidebar, shows what the workspace has spent this month.
 | **This month** | Everything below, once | |
 | **Loads** | Reading documents, and API sources' pieces, into your ontologies' loads | $50 |
 | **API sources** | Part of Loads: extracting API sources' pieces that no one started a load for | $20 |
-| **Questions** | Answering questions in the Analyst and through the Helix MCP | $15 |
-| **Run assessments** | Assessing how much your ontologies helped your agents' [workflow runs](/foundry/agents/helix-mcp#workflows) | $20 |
+| **Questions** | Answering questions about your data, from Founder and through the Helix MCP | $15 |
+| **Run assessments** | Assessing how much your ontologies helped your agents' [use case runs](/foundry/agents/helix-mcp#use-cases), shown on each ontology's Usage page | $20 |
+
+Founder's own turns and the Founder steps of Workflows have budgets of their own, $30
+and $20 a month, and aren't in Usage.
 
 Each row's bar fills as the month's spend nears its cap. Point at a row for what it
 counts; point at the total for the day the caps start again, the first of each month
-(UTC). Everyone in the workspace sees it. Spend on the workspace's
+(UTC). Everyone in the workspace sees it, except members limited to
+[source grants](/foundry/workspace/access). Spend on the workspace's
 [own model key](/foundry/workspace/ai-models) counts toward the caps too.
 
 ## When a cap is reached
@@ -34,11 +38,12 @@ counts; point at the total for the day the caps start again, the first of each m
 | Cap | What happens |
 | --- | --- |
 | A load: $10 | The load stops **Partial**, with its tables written. The documents it didn't reach are read into it once it's current and the month has budget. |
-| Loads: $50 a month | New loads are refused, and new documents aren't read, until next month. Work no person started, such as [refreshes](/foundry/ontologies/load-data#automatic-refreshes) and reading documents as they arrive, stops at $40, which leaves the last $10 for loads you start. |
+| Loads: $50 a month | New loads are refused, and new documents aren't read, until next month. Work no person started, such as [refreshes](/foundry/ontologies/load-data#automatic-refreshes) and reading connectors' new documents, stops at $40, which leaves the last $10 for loads and uploads you start. |
 | API sources: $5 per source, $20 a month | Extraction no person started stops for the month: new pieces wait for next month, and ontologies keep the pieces they have. |
 | A question: $0.50 | The question stops at its limit. Ask something narrower. |
-| Questions: $15 a month | A question waits until the month's budget can hold it, or you cancel it. |
-| Run assessments: $20 a month | Runs that finish once it's reached aren't assessed. |
+| Questions: $15 a month | New questions are refused until next month once the month's spend leaves less than one question's $0.50. A question held back by others still running waits until the budget can hold it, or until you cancel it. |
+| A member or agent key limited to source grants: $10 a month, within the workspace's | Their new questions are refused until next month. |
+| Run assessments: $20 a month | Runs that finish once the month's spend is within $1 of it aren't assessed. |
 
 A refresh that runs with the month spent still writes your tables, and reuses what
 earlier loads read from documents at no cost.
@@ -49,7 +54,7 @@ Drafting an ontology isn't in Usage and has no monthly cap. Instead:
 
 - each generation attempt stops at $5 of model use;
 - a generation makes at most 3 attempts;
-- a workspace starts at most 10 generations and version edits an hour.
+- a workspace starts at most 10 generations an hour. Version edits don't count toward this.
 
 On the workspace's [own key](/foundry/workspace/ai-models#your-own-anthropic-key),
 drafts run on that key and still aren't in Usage: see their cost in your Anthropic

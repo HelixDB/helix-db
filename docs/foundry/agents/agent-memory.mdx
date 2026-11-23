@@ -20,11 +20,12 @@ load.
 
 <Steps>
   <Step title="Create an API source">
-    In **Connectors**, select **Add data**, then **API source**. Name it, such as
-    "Agent memory", and describe what its notes hold: Foundry's agent reads the
-    description when it drafts an ontology from the source. An agent can also create
-    one with the MCP's `create_event_source` action, after your confirmation, and
-    give its text field there.
+    Owners and admins create one: in **Connectors**, select **Add data**, then **API
+    source**. Name it, such as "Agent memory", and describe what its notes hold:
+    Foundry's agent reads the description when it drafts an ontology from the source.
+    An agent can also create one with the MCP's `create_event_source` operation
+    (`helix_foundry_prepare_operation`, then `helix_foundry_execute_operation` once
+    you confirm), and give its text field there.
   </Step>
 
   <Step title="Choose its text field">
@@ -33,7 +34,9 @@ load.
     field**: a field its pieces have, or **Another field…** by name before any arrive.
     With a text field, the source's newest 500 notes also become documents, which an
     ontology reading them by [entity extraction](/foundry/data/api-sources#how-ontologies-read-it)
-    spends about 1 cent a note on.
+    spends about 1 cent a note on. Extraction no person started spends at most $5 a
+    month per source and $20 across the workspace's API sources; past that, new notes
+    wait for next month or a load you start. Recall still finds them.
   </Step>
 
   <Step title="Connect your agent">
@@ -75,7 +78,7 @@ agent may keep.
 | --- | --- |
 | `workspace_id` | The workspace. May be left out when you have only one. |
 | `event_source_id` | The API source. |
-| `query` | Optional: up to 10 words, 200 bytes. Only notes whose id, fields or text hold every word, whatever its case, are returned. Left out, the newest notes are. |
+| `query` | Optional: up to 10 words, 200 bytes. Only notes whose id, fields or text contain every word, whatever its case, are returned. A field is matched as the note shows it, which cuts a long value at 500 characters. Left out, the newest notes are. |
 | `limit` | Optional: at most 50 notes, 20 when left out. |
 
 Each note comes back as Markdown, its fields then its text, with its id, when it was
@@ -105,9 +108,9 @@ agent keys, send tokens and members whose access is limited to some
 
 | Limit | Value |
 | --- | --- |
-| Notes per recall | 50, 20 by default, with at most 64 KiB of text |
+| Notes per recall | 50, 20 by default, with at most 64 KiB of text (the newest note always comes back, however long) |
 | Query | 10 words, 200 bytes |
-| Source table | 64 MiB. Recall reads the whole source on every call, so a larger source is refused (`FOUNDRY_EVENT_SOURCE_TOO_LARGE`): send new notes to a new source before then. |
+| Source table | 64 MiB uncompressed. Recall reads the whole source on every call, so a larger source is refused (`FOUNDRY_EVENT_SOURCE_TOO_LARGE`): send new notes to a new source before then. |
 | Waiting sends read | The newest 100 |
 
 Recall is part of hosted Foundry's Helix MCP; a local install doesn't offer it.
