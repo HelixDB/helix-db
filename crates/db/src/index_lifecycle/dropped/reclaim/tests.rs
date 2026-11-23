@@ -1,5 +1,6 @@
 //! Contracts of the reclaim's pure rules: which compactions a plan is made
-//! of, which sorted runs are worth rewriting, and when a reclaim gives way.
+//! of, which sorted runs are worth rewriting, and beside what a reclaim
+//! starts a compaction.
 
 use super::*;
 

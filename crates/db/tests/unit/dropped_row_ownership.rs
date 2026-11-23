@@ -32,13 +32,13 @@ fn expected_owner(first: u8, second: u8) -> RowOwner {
     let lane = VectorStorageLane::ALL
         .into_iter()
         .find(|lane| lane.scan_prefix().as_ref() == [first]);
-    if let Some(lane) = lane {
-        return RowOwner::of_vector_lane(lane);
+    match lane {
+        Some(lane) => RowOwner::of_vector_lane(lane),
+        None if first == ScopedKey::key_prefix() => {
+            RecordKind::try_from_u8(second).map_or(RowOwner::Never, RowOwner::of_record_kind)
+        }
+        None => KeyPrefix::from_u8(first).map_or(RowOwner::Never, RowOwner::of_key_prefix),
     }
-    if first == ScopedKey::key_prefix() {
-        return RecordKind::try_from_u8(second).map_or(RowOwner::Never, RowOwner::of_record_kind);
-    }
-    KeyPrefix::from_u8(first).map_or(RowOwner::Never, RowOwner::of_key_prefix)
 }
 
 #[test]
@@ -438,10 +438,11 @@ proptest! {
             Just(0x03u8), Just(0x06), Just(0xF0), Just(0xF1), Just(0xFD), Just(0xFE), Just(0xFF)
         ]),
     ) {
-        let mut logical = logical;
-        if let (Some(first), Some(slot)) = (first, logical.first_mut()) {
-            *slot = first;
-        }
+        // The biased byte, when there is one, replaces the first.
+        let logical = match first {
+            Some(first) if !logical.is_empty() => [&[first][..], &logical[1..]].concat(),
+            Some(_) | None => logical,
+        };
         let scope = tenant.map_or(DataScope::LegacyUnscoped, |tenant| {
             DataScope::Tenant(TenantId::from_u128(tenant))
         });
@@ -460,11 +461,12 @@ proptest! {
         prop_assume!(scope != DataScope::LegacyUnscoped || logical.first() != Some(&0xFD));
         let matched = owned_row(&key);
         prop_assert_eq!(matched.is_some(), allowed);
-        if let Some(row) = matched {
-            prop_assert!(key.starts_with(row.prefix));
-            let mut sibling = row.prefix.to_vec();
-            sibling.put_slice(b"another suffix");
-            prop_assert_eq!(owned_row(&sibling).map(|row| row.owner), Some(row.owner));
-        }
+        let Some(row) = matched else {
+            return Ok(());
+        };
+        prop_assert!(key.starts_with(row.prefix));
+        let mut sibling = row.prefix.to_vec();
+        sibling.put_slice(b"another suffix");
+        prop_assert_eq!(owned_row(&sibling).map(|row| row.owner), Some(row.owner));
     }
 }
