@@ -22,12 +22,14 @@ use crate::encoding::property::Property;
 use crate::encoding::v2::values::property::encode_properties;
 use crate::index_lifecycle::lifecycle::drop_index_operation;
 use crate::index_lifecycle::outbox::{
-    claim_operation, execute_claimed_step, observe_operation_pointer, retry_operation,
-    ClaimPermission, OperationPointerObservation, WriteDuringStepDriver,
+    claim_operation, execute_claimed_step, execute_claimed_step_with_evidence,
+    observe_operation_pointer, retry_operation, ClaimPermission, OperationPointerObservation,
+    WriteDuringStepDriver,
 };
 use crate::index_lifecycle::worker::IndexWorkerWakeHandle;
 use crate::index_lifecycle::{
-    ClaimSequence, IndexDdlReceipt, IndexOperationExecutionState, IndexStateV2, WriterEpoch,
+    ClaimContinuation, ClaimSequence, DroppedGenerationValue, IndexDdlReceipt,
+    IndexOperationExecutionState, IndexStateV2, WriterEpoch,
 };
 use crate::search::vector::distance::Euclidean;
 use crate::search::vector::{SearchParams, SimHashMode};
@@ -2003,11 +2005,25 @@ async fn a_source_emptied_before_the_first_stored_row_activates_an_empty_index()
 /// on deleting, and a step that loses its commit is repeated. No step in
 /// between stores a metadata row, and the attempt that follows stores the
 /// index an uninterrupted build stores and counts its entities once.
+///
+/// That holds on a store that admits dropped-generation entries as on one
+/// that does not: the generation is still building, so no entry names it,
+/// no compaction discards a row of it, and the process deletes every row
+/// itself and stores no entry.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_crash_in_the_write_pass_deletes_the_rows_and_builds_the_same_index() {
+    for admitted in [false, true] {
+        crash_in_the_write_pass(admitted).await;
+    }
+}
+
+async fn crash_in_the_write_pass(admitted: bool) {
     let limits = entity_limits(16);
     let uninterrupted = uninterrupted_rows("vector-bulk-uninterrupted", &[]).await;
     let db = test_db("vector-bulk-crash-in-write").await;
+    if admitted {
+        dropped::admit_fixture(&db).await;
+    }
     let definition = definition(None);
     let expected = seed_standard(&db).await;
     let (build_id, index_id, generation) = create_build(&db, SCOPE, &definition, SOURCE - 1).await;
@@ -2124,6 +2140,7 @@ async fn a_crash_in_the_write_pass_deletes_the_rows_and_builds_the_same_index() 
     let index = active_index(&db, &definition).await;
     assert!(index.stored_rows(&db).await.unwrap() == uninterrupted);
     assert_index_holds(&db, &index, &expected, &[]).await;
+    assert_eq!(dropped::load_entries(&db).await.unwrap(), vec![]);
     db.close().await.expect("vector test database closes");
 }
 
@@ -5228,6 +5245,323 @@ async fn an_abort_leaves_no_bulk_stage_wherever_the_attempt_is() {
     }
 }
 
+/// Where an abort, or a drop, meets a bulk build on a store that admits
+/// dropped-generation entries.
+#[derive(Debug, Clone, Copy)]
+enum Given {
+    /// An attempt is counted and has read nothing.
+    Counted,
+    /// The read pass runs.
+    Reading,
+    /// The write pass has stored part of the graph, in the process that
+    /// holds it.
+    Writing,
+    /// A restarted process has deleted some of the applied state of a partly
+    /// written graph.
+    DiscardingAppliedState,
+    /// A restarted process has deleted the applied state of a partly written
+    /// graph and some of its physical rows.
+    DiscardingPhysicalRows,
+    /// Every attempt the build gets died in its write pass.
+    Exhausted,
+    /// The build finished: its index is active, and is dropped.
+    Finished,
+}
+
+/// Every row of the store.
+async fn store_rows(db: &Db) -> BTreeMap<Bytes, Bytes> {
+    let mut rows = db
+        .scan_prefix(Bytes::new(), ..)
+        .await
+        .expect("the store is readable");
+    let mut stored = BTreeMap::new();
+    while let Some(row) = rows.next().await.expect("a stored row is readable") {
+        stored.insert(row.key, row.value);
+    }
+    stored
+}
+
+/// On a store that admits dropped-generation entries, an abort ends in the
+/// generation's entry wherever the bulk attempt is, and so does the drop of
+/// an index that was built in bulk. The cleanup deletes the rows no
+/// compaction filter may match, and every other row the attempts wrote,
+/// under the physical id or the generation, is under a prefix the entry
+/// gives to compactions: nothing is left that neither deletes. A build of
+/// the same definition afterwards is built in bulk beside those rows.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_admitted_abort_or_drop_leaves_every_bulk_row_to_its_entry() {
+    let limits = entity_limits(16);
+    for given in [
+        Given::Counted,
+        Given::Reading,
+        Given::Writing,
+        Given::DiscardingAppliedState,
+        Given::DiscardingPhysicalRows,
+        Given::Exhausted,
+        Given::Finished,
+    ] {
+        let db = test_db(&format!("vector-bulk-entry-{given:?}")).await;
+        dropped::admit_fixture(&db).await;
+        let definition = definition(None);
+        let expected = seed_standard(&db).await;
+        let before = store_rows(&db).await;
+        let (build_id, index_id, generation) =
+            create_build(&db, SCOPE, &definition, SOURCE - 1).await;
+        let building = building_index(&db, &definition, build_id).await;
+        let IndexStateVectorPhysical {
+            layout: VectorPhysicalLayout::Unpartitioned { physical_index_id },
+        } = IndexStateVectorPhysical::from_record(&read_index(&db, SCOPE, &definition).await)
+            .expect("building record is vector")
+        else {
+            panic!("fixture build is unpartitioned");
+        };
+        let stored = || async {
+            building.stored_rows(&db).await.unwrap().len()
+                + applied_rows(&db, index_id, generation).await
+        };
+        let mut claim_sequence = 1;
+        let driver = bulk_driver(1, BUDGET, 16);
+        // Rows the generation holds when its abort or drop is accepted.
+        let held = match given {
+            Given::Counted => {
+                start_attempt(&db, &driver, build_id, &mut claim_sequence).await;
+                0..=0
+            }
+            Given::Reading => {
+                prepare_with(
+                    &db,
+                    &driver,
+                    build_id,
+                    &mut claim_sequence,
+                    tokio::spawn(std::future::pending::<Result<Prepared>>()),
+                )
+                .await;
+                parked_steps(&db, &driver, build_id, &mut claim_sequence, limits, 1).await;
+                0..=0
+            }
+            Given::Writing => {
+                drive_steps(
+                    &db,
+                    &driver,
+                    build_id,
+                    &mut claim_sequence,
+                    limits,
+                    COUNT + 2,
+                )
+                .await;
+                assert!(!nothing_held(&driver), "{given:?}");
+                1..=usize::MAX
+            }
+            Given::DiscardingAppliedState | Given::DiscardingPhysicalRows => {
+                die(&db, build_id, &mut claim_sequence, Death::Writing(3)).await;
+                let physical = building.stored_rows(&db).await.unwrap().len();
+                assert_eq!(applied_rows(&db, index_id, generation).await, 48);
+                // Eight deletes a step, of the applied state first.
+                let mut steps = 0;
+                loop {
+                    drive_steps(
+                        &db,
+                        &driver,
+                        build_id,
+                        &mut claim_sequence,
+                        operation_limits(8),
+                        1,
+                    )
+                    .await;
+                    steps += 1;
+                    let left = (
+                        applied_rows(&db, index_id, generation).await,
+                        building.stored_rows(&db).await.unwrap().len(),
+                    );
+                    match (given, left) {
+                        (Given::DiscardingAppliedState, (applied, left)) => {
+                            assert!((1..48).contains(&applied), "{given:?}: {applied}");
+                            assert_eq!(left, physical, "{given:?}");
+                            break;
+                        }
+                        (Given::DiscardingPhysicalRows, (0, left)) if left < physical => {
+                            assert!(left > 0, "{given:?}");
+                            break;
+                        }
+                        (Given::DiscardingPhysicalRows, (_, left)) => {
+                            assert_eq!(left, physical, "{given:?}");
+                            assert!(steps < 16, "{given:?}: the applied state is not deleted");
+                        }
+                        (
+                            Given::Counted
+                            | Given::Reading
+                            | Given::Writing
+                            | Given::Exhausted
+                            | Given::Finished,
+                            _,
+                        ) => unreachable!("the arm above names both"),
+                    }
+                }
+                assert!(attempts(&db, build_id).await.is_some(), "{given:?}");
+                1..=usize::MAX
+            }
+            Given::Exhausted => {
+                for _ in 0..BulkBuildAttempts::LIMIT {
+                    die(&db, build_id, &mut claim_sequence, Death::Writing(2)).await;
+                }
+                // The next process has begun to delete the last attempt's rows.
+                drive_steps(
+                    &db,
+                    &driver,
+                    build_id,
+                    &mut claim_sequence,
+                    operation_limits(8),
+                    1,
+                )
+                .await;
+                1..=usize::MAX
+            }
+            Given::Finished => {
+                assert_eq!(
+                    drive(&db, &driver, build_id, &mut claim_sequence, limits)
+                        .await
+                        .0,
+                    CommittedOperationStep::Completed,
+                    "{given:?}"
+                );
+                assert_eq!(
+                    driver.build_reports().path(build_id),
+                    Some(VectorBuildPath::Bulk),
+                    "{given:?}"
+                );
+                assert_index_holds(&db, &active_index(&db, &definition).await, &expected, &[])
+                    .await;
+                1..=usize::MAX
+            }
+        };
+        assert!(held.contains(&stored().await), "{given:?}");
+        assert_eq!(
+            dropped::load_entries(&db).await.unwrap(),
+            vec![],
+            "{given:?}"
+        );
+
+        let receipt = drop_index_operation(&db, SCOPE, &definition)
+            .await
+            .expect("the index is dropped or its build aborted");
+        let ending = match (given, receipt) {
+            (Given::Finished, IndexDdlReceipt::Accepted { operation_id, .. }) => operation_id,
+            (
+                Given::Counted
+                | Given::Reading
+                | Given::Writing
+                | Given::DiscardingAppliedState
+                | Given::DiscardingPhysicalRows
+                | Given::Exhausted,
+                IndexDdlReceipt::ExistingOperation { operation_id },
+            ) if operation_id == build_id => build_id,
+            (given, receipt) => panic!("{given:?}: the drop was answered with {receipt:?}"),
+        };
+        assert_eq!(
+            drive(&db, &driver, ending, &mut claim_sequence, limits)
+                .await
+                .0,
+            CommittedOperationStep::Completed,
+            "{given:?}"
+        );
+        assert!(nothing_held(&driver), "{given:?}");
+        assert_eq!(driver.bulk.preparing.available_permits(), 1, "{given:?}");
+        assert!(
+            matches!(
+                read_index(&db, SCOPE, &definition).await.state(),
+                IndexStateV2::Dropped { .. }
+            ),
+            "{given:?}"
+        );
+        let entry = dropped::DroppedGeneration {
+            index_id,
+            generation,
+        };
+        assert_eq!(
+            dropped::load_entries(&db).await.unwrap(),
+            vec![(
+                entry,
+                DroppedGenerationValue {
+                    scope: SCOPE,
+                    rows: DroppedGenerationRows::UnpartitionedVector { physical_index_id },
+                }
+            )],
+            "{given:?}"
+        );
+
+        // What compactions discard once the entry is armed, and what that
+        // leaves of the rows the build added to the store.
+        let registry = dropped::Registry::default();
+        registry.refresh(&db).await.expect("the entry arms");
+        let armed = registry.armed();
+        let [(armed_entry, armed)] = &armed[..] else {
+            panic!("{given:?}: one entry is armed, not {armed:?}");
+        };
+        assert_eq!(*armed_entry, entry, "{given:?}");
+        let owned = armed
+            .owners
+            .iter()
+            .flat_map(|owner| owner.prefixes())
+            .collect::<Vec<_>>();
+        let is_owned = |key: &Bytes| owned.iter().any(|prefix| key.starts_with(prefix));
+        let after = store_rows(&db).await;
+        assert!(
+            held.contains(&after.keys().filter(|key| is_owned(key)).count()),
+            "{given:?}: the cleanup left the filtered rows to compactions"
+        );
+        let vector_rows = VectorStorageLane::ALL
+            .map(|lane| DataKey::data_prefix(SCOPE, lane.scan_prefix()))
+            .into_iter()
+            .chain(
+                [RecordKind::BuildDelta, RecordKind::AppliedState]
+                    .map(|kind| IndexKey::data_prefix(SCOPE, ScopedKey::logical_prefix(kind))),
+            )
+            .collect::<Vec<_>>();
+        let orphans = after
+            .keys()
+            .filter(|key| !before.contains_key(*key) && !is_owned(key))
+            .filter(|key| vector_rows.iter().any(|prefix| key.starts_with(prefix)))
+            .collect::<Vec<_>>();
+        assert!(
+            orphans.is_empty(),
+            "{given:?}: neither the cleanup nor the entry deletes {orphans:?}"
+        );
+
+        // The definition is built again, in bulk, beside the entry's rows.
+        let (rebuild_id, _, rebuilt) = create_build(&db, SCOPE, &definition, SOURCE - 1).await;
+        assert!(rebuilt > generation, "{given:?}");
+        let rebuilder = bulk_driver(1, BUDGET, 16);
+        assert_eq!(
+            drive(&db, &rebuilder, rebuild_id, &mut claim_sequence, limits)
+                .await
+                .0,
+            CommittedOperationStep::Completed,
+            "{given:?}"
+        );
+        assert_eq!(
+            rebuilder.build_reports().path(rebuild_id),
+            Some(VectorBuildPath::Bulk),
+            "{given:?}"
+        );
+        assert_index_holds(&db, &active_index(&db, &definition).await, &expected, &[]).await;
+        let registry = dropped::Registry::default();
+        registry
+            .refresh(&db)
+            .await
+            .expect("the entry arms beside the rebuilt index");
+        assert_eq!(
+            registry
+                .armed()
+                .iter()
+                .map(|(entry, _)| *entry)
+                .collect::<Vec<_>>(),
+            vec![entry],
+            "{given:?}"
+        );
+        db.close().await.expect("vector test database closes");
+    }
+}
+
 /// The last step of the write pass leaves the bulk stage in the commit that
 /// stores the metadata row. When that commit is lost the bulk stage is
 /// still stored over a graph without metadata: the process that holds the
@@ -7325,6 +7659,100 @@ async fn an_abort_of_a_waiting_build_is_not_parked() {
             .await
             .0,
         CommittedOperationStep::Completed
+    );
+    assert!(nothing_held(&driver));
+    assert_eq!(driver.bulk.parked_until(build_id), None);
+    drop(other_build);
+    db.close().await.expect("vector test database closes");
+}
+
+/// On a store that admits dropped-generation entries the abort of a build
+/// that waits is not parked either, and its last step commits the
+/// generation's entry and tells the writer's registry, as the last step of
+/// any operation does: the retirer hears of the entry though what the build
+/// waited for never came.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_abort_of_a_waiting_build_stores_its_entry_and_tells_the_registry() {
+    let db = test_db("vector-bulk-abort-waiting-entry").await;
+    dropped::admit_fixture(&db).await;
+    let definition = definition(None);
+    seed_standard(&db).await;
+    let (build_id, index_id, generation) = create_build(&db, SCOPE, &definition, SOURCE - 1).await;
+    let driver = bulk_driver(2, BUDGET, 16);
+    let limits = entity_limits(16);
+    let mut claim_sequence = 1;
+    let other_build = Arc::clone(&driver.bulk.preparing)
+        .try_acquire_owned()
+        .expect("no build is preparing");
+    parked_steps(&db, &driver, build_id, &mut claim_sequence, limits, 1).await;
+
+    drop_index_operation(&db, SCOPE, &definition)
+        .await
+        .expect("building vector converts to abort cleanup");
+    let aborting = read_operation(&db, SCOPE, build_id).await;
+    assert!(driver.bulk.parked_until(build_id).is_some());
+    assert_eq!(driver.parked_until(&aborting), None);
+
+    let registry = dropped::Registry::default();
+    let told = || futures::FutureExt::now_or_never(registry.changed()).is_some();
+    let writer_epoch = WriterEpoch::from_bytes([0x6B; 16]).expect("writer epoch is non-nil");
+    let mut progressed = 0;
+    let ended = loop {
+        let observation = observe_operation_pointer(&db, build_id, writer_epoch, NOW_MILLIS)
+            .await
+            .expect("the operation pointer is readable");
+        let OperationPointerObservation::Eligible(eligible) = observation else {
+            panic!("the aborting operation is eligible: {observation:?}");
+        };
+        let claimed = claim_operation(
+            &db,
+            &eligible,
+            writer_epoch,
+            ClaimSequence::new(claim_sequence).expect("claim sequence is non-zero"),
+            NOW_MILLIS,
+            ClaimPermission::Normal,
+        )
+        .await
+        .expect("the claim commits")
+        .expect("the revision is claimable");
+        claim_sequence += 1;
+        let step = execute_claimed_step_with_evidence(
+            &db,
+            &claimed,
+            &driver,
+            limits,
+            NOW_MILLIS,
+            ClaimContinuation::Release,
+            &registry,
+        )
+        .await
+        .expect("the abort's step commits")
+        .evidence
+        .outcome;
+        if step != CommittedOperationStep::Progressed {
+            break step;
+        }
+        progressed += 1;
+        assert!(progressed < 64, "the abort does not end");
+        assert!(
+            !told(),
+            "a step that ends nothing tells the registry nothing"
+        );
+        assert_eq!(dropped::load_entries(&db).await.unwrap(), vec![]);
+    };
+    assert_eq!(ended, CommittedOperationStep::Completed);
+    assert!(told(), "the step that ended the abort told the registry");
+    assert_eq!(
+        dropped::load_entries(&db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(entry, _)| entry)
+            .collect::<Vec<_>>(),
+        vec![dropped::DroppedGeneration {
+            index_id,
+            generation
+        }]
     );
     assert!(nothing_held(&driver));
     assert_eq!(driver.bulk.parked_until(build_id), None);

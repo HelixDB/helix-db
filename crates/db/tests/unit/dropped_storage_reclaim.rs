@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
@@ -29,15 +29,23 @@ use slatedb::object_store::{
 use slatedb::{CompactionJobContext, DbReadOps, IsolationLevel};
 
 use super::*;
+use crate::config::{
+    IndexLifecycleThroughputTuning, SearchIndexBackfillLimits, SearchIndexBatchLimits,
+    VectorBulkBuildMemory, VectorBulkBuildTuning,
+};
+use crate::encoding::v2::keys::indexes::vector::VectorStorageLane;
 use crate::encoding::v2::keys::scope::TenantId;
+use crate::encoding::v2::keys::{DataKey, ManagedIndexKey, RecordKind, ScopedKey};
 use crate::encoding::v2::values::encode_metadata_value;
 use crate::index_lifecycle::dropped::ownership::OwnerKey;
 use crate::index_lifecycle::dropped::reclaim::{
     DroppedStorageReclaim, LeftInPlace, ReclaimObstacle, Reclaimer, Worth,
 };
 use crate::index_lifecycle::dropped::{self, Armed, QuarantinedDroppedGeneration};
+use crate::index_lifecycle::outbox::step_pause::{StepMatcher, StepPause};
 use crate::index_lifecycle::{
-    DroppedGenerationValue, IndexGenerationId, IndexId, IndexV2MetadataValue,
+    DroppedGenerationValue, IndexGenerationId, IndexId, IndexOperationProgress,
+    IndexV2MetadataValue, VectorBuildProgress, VectorBuildStage, VectorPhysicalIndexId,
 };
 use crate::{HelixDB, HelixDbSource, HelixStorage, ProcessLocalDatabaseToken};
 
@@ -4031,6 +4039,450 @@ async fn a_quarantined_entry_fails_no_creation_and_is_removed_only_on_request() 
         Err(HelixDbError::WriterModeRequired { .. })
     ));
     reader.close().await.expect("the reader closes");
+}
+
+/// Source vectors of a contract's bulk build: more than the fewest
+/// [`open_bulk`] builds in bulk, and several write steps' worth.
+const BULK_SOURCE: usize = 96;
+
+/// Opens a writer over `object_store` that builds a vector index of at
+/// least 16 vectors in bulk, eight source rows a write step, and whose
+/// compaction scheduler never proposes a compaction.
+async fn open_bulk(object_store: Arc<dyn ObjectStore>, database: &str) -> HelixDB {
+    let never = ["min_compaction_sources", "max_compaction_sources"]
+        .map(|option| (option.to_string(), "1000000".to_string()));
+    let defaults = SearchIndexBackfillLimits::default();
+    let batch = defaults.batch();
+    let eight_rows = SearchIndexBatchLimits::try_new(
+        NonZeroUsize::new(8).expect("eight is positive"),
+        batch.max_input_bytes(),
+        batch.max_output_operations(),
+        batch.max_output_bytes(),
+        batch.max_single_vector_output_bytes(),
+    )
+    .expect("the step limits validate");
+    HelixDB::open_with_object_store_and_config(
+        database.to_string(),
+        object_store,
+        crate::DbConfig::new()
+            .with_slate_settings(slatedb::Settings {
+                compactor_options: Some(slatedb::config::CompactorOptions {
+                    scheduler_options: HashMap::from(never),
+                    ..slatedb::config::CompactorOptions::default()
+                }),
+                ..slatedb::Settings::default()
+            })
+            .with_index_lifecycle_throughput_tuning(
+                IndexLifecycleThroughputTuning::default().with_vector_bulk_build(
+                    VectorBulkBuildTuning::try_new(
+                        1,
+                        // Accounted, not allocated: room for the whole write
+                        // buffer of several builds.
+                        VectorBulkBuildMemory::Bytes(
+                            NonZeroU64::new(64 << 30).expect("the budget is positive"),
+                        ),
+                        16,
+                    )
+                    .expect("the bulk tuning validates"),
+                ),
+            )
+            .with_search_index_backfill_limits(
+                SearchIndexBackfillLimits::try_new(
+                    eight_rows,
+                    defaults.edge_property_read_batch(),
+                    defaults.text_artifacts(),
+                    defaults.text_compaction(),
+                )
+                .expect("the backfill limits validate"),
+            ),
+    )
+    .await
+    .expect("the writer opens")
+}
+
+/// A step of a bulk build's write pass that follows one whose rows are
+/// stored.
+fn writing(progress: &IndexOperationProgress) -> bool {
+    matches!(
+        progress,
+        IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+            VectorBuildStage::BulkBuild(bulk)
+        )) if bulk.scan.cursor.is_some()
+    )
+}
+
+/// A step at the bulk stage outside the write pass: the attempt waits,
+/// reads or links, or the rows of an abandoned one are being deleted.
+fn not_writing(progress: &IndexOperationProgress) -> bool {
+    matches!(
+        progress,
+        IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+            VectorBuildStage::BulkBuild(bulk)
+        )) if bulk.scan.cursor.is_none()
+    )
+}
+
+/// Runs one DDL statement and returns the operation it started or met,
+/// without waiting for it.
+async fn started(db: &HelixDB, statement: Traversal<Terminal, WriteEnabled>) -> String {
+    let receipt = db
+        .query_scoped(
+            QueryRequest::write(
+                write_batch()
+                    .var_as("operation", statement)
+                    .returning(["operation"]),
+            ),
+            DataScope::LegacyUnscoped,
+        )
+        .await
+        .expect("the statement is accepted");
+    receipt["operation"]["operation_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the statement names an operation: {receipt}"))
+        .to_string()
+}
+
+/// Waits for `operation_id` to end as `ended`.
+async fn ended(db: &HelixDB, operation_id: &str, ended: &str) {
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let status = db
+                .query_scoped(
+                    QueryRequest::read(
+                        read_batch()
+                            .var_as("status", g().get_index_operation(operation_id))
+                            .returning(["status"]),
+                    ),
+                    DataScope::LegacyUnscoped,
+                )
+                .await
+                .expect("the operation status reads");
+            match status["status"]["status"].as_str() {
+                Some(state) if state == ended => break,
+                Some("queued" | "running") => tokio::time::sleep(POLL).await,
+                state => panic!("the operation reached {state:?}, not {ended}"),
+            }
+        }
+    })
+    .await
+    .expect("the operation ends in time");
+}
+
+/// Builds the index of `label` and proves its write pass ran: the build
+/// stored the graph it linked in memory.
+async fn build_in_bulk(db: &HelixDB, label: &str) {
+    let pause = StepPause::arm(db.inner_db().as_ref(), writing);
+    let build = started(db, g().create_index_if_not_exists(spec(label))).await;
+    tokio::time::timeout(WAIT, pause.reached())
+        .await
+        .expect("the build reaches its write pass");
+    pause.release();
+    ended(db, &build, "succeeded").await;
+}
+
+/// Every vector row of the legacy scope, of any physical index or
+/// generation: the three storage lanes, and the build deltas and applied
+/// state.
+async fn vector_rows(db: &HelixDB) -> BTreeMap<Bytes, Bytes> {
+    let prefixes = VectorStorageLane::ALL
+        .map(|lane| DataKey::data_prefix(DataScope::LegacyUnscoped, lane.scan_prefix()))
+        .into_iter()
+        .chain(
+            [RecordKind::BuildDelta, RecordKind::AppliedState].map(|kind| {
+                ManagedIndexKey::data_prefix(
+                    DataScope::LegacyUnscoped,
+                    ScopedKey::logical_prefix(kind),
+                )
+            }),
+        )
+        .collect::<Vec<_>>();
+    rows(writer(db).db())
+        .await
+        .into_iter()
+        .filter(|(key, _)| prefixes.iter().any(|prefix| key.starts_with(prefix)))
+        .collect()
+}
+
+/// Reclaims until the one entry stored has retired, and proves the store
+/// then holds exactly the vector rows it held `before` the generation was
+/// created: no row of it is left that neither its cleanup nor a compaction
+/// deleted, and no other index lost one.
+async fn assert_reclaimed_to(db: &HelixDB, before: &BTreeMap<Bytes, Bytes>) {
+    let entries = stored_entries(db).await;
+    assert_eq!(entries.len(), 1, "one generation was given up: {entries:?}");
+    reclaim_every_entry(db).await;
+    let deadline = Instant::now() + WAIT;
+    let mut now = vector_rows(db).await;
+    while now != *before && Instant::now() < deadline {
+        tokio::time::sleep(POLL).await;
+        now = vector_rows(db).await;
+    }
+    let orphans = now
+        .keys()
+        .filter(|key| !before.contains_key(*key))
+        .collect::<Vec<_>>();
+    let lost = before
+        .iter()
+        .filter(|(key, value)| now.get(*key) != Some(*value))
+        .map(|(key, _)| key)
+        .collect::<Vec<_>>();
+    assert!(
+        orphans.is_empty() && lost.is_empty(),
+        "{} orphan rows, such as {:?}; lost or changed {lost:?}",
+        orphans.len(),
+        orphans.first()
+    );
+    assert_eq!(db.dropped_index_storage(), DroppedIndexStorage::default());
+}
+
+/// A bulk writer with a bulk-built `Kept` index and the sources of `Gone`.
+/// Returns it with the vector rows it holds.
+async fn bulk_store(
+    object_store: Arc<dyn ObjectStore>,
+    database: &str,
+) -> (HelixDB, BTreeMap<Bytes, Bytes>) {
+    let db = open_bulk(object_store, database).await;
+    db.wait_for_background_migrations().await;
+    for seed in 0..BULK_SOURCE {
+        add(&db, "Kept", seed).await;
+        add(&db, "Gone", seed).await;
+    }
+    build_in_bulk(&db, "Kept").await;
+    let before = vector_rows(&db).await;
+    assert!(!before.is_empty());
+    (db, before)
+}
+
+/// Proves an index that was built in bulk is dropped like any other: its
+/// drop leaves an entry, and a reclaim leaves no row of it, while the
+/// bulk-built index beside it keeps every row and answers.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dropped_bulk_built_index_leaves_no_row_after_a_reclaim() {
+    let token = ProcessLocalDatabaseToken::new("dropped-bulk-built").unwrap();
+    let (db, before) = bulk_store(token.object_store(), token.database()).await;
+    let kept = nearest(&db, "Kept", 3, 5).await;
+    build_in_bulk(&db, "Gone").await;
+    assert_eq!(nearest(&db, "Gone", 3, 5).await.len(), 5);
+    assert_ne!(vector_rows(&db).await, before);
+
+    drop_index(&db, "Gone").await;
+    assert_reclaimed_to(&db, &before).await;
+    assert_eq!(nearest(&db, "Kept", 3, 5).await, kept);
+    db.close().await.expect("the writer closes");
+}
+
+/// Aborts the bulk build of `Gone` while a step that `held` matches is
+/// staged and not committed, and proves a reclaim then leaves no row of the
+/// generation. `stores_rows` says whether the build had stored any.
+async fn abort_meets_a_bulk_build(database: &str, held: StepMatcher, stores_rows: bool) {
+    let token = ProcessLocalDatabaseToken::new(database).unwrap();
+    let (db, before) = bulk_store(token.object_store(), token.database()).await;
+    let pause = StepPause::arm(db.inner_db().as_ref(), held);
+    let build = started(&db, g().create_index_if_not_exists(spec("Gone"))).await;
+    tokio::time::timeout(WAIT, pause.reached())
+        .await
+        .expect("the build reaches the step");
+    assert_eq!(vector_rows(&db).await != before, stores_rows);
+
+    assert_eq!(started(&db, g().drop_index(spec("Gone"))).await, build);
+    // The held step finds its claim superseded and commits nothing.
+    pause.release();
+    ended(&db, &build, "aborted").await;
+    assert_reclaimed_to(&db, &before).await;
+    assert_eq!(nearest(&db, "Kept", 3, 5).await.len(), 5);
+    db.close().await.expect("the writer closes");
+}
+
+/// Proves an abort that meets a bulk build before its write pass, while the
+/// attempt is counted and waits, reads or links, ends in an entry that
+/// retires with no row left.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_abort_before_a_bulk_builds_write_pass_leaves_no_row_after_a_reclaim() {
+    abort_meets_a_bulk_build("dropped-bulk-abort-before-write", not_writing, false).await;
+}
+
+/// Proves an abort that meets a bulk build in its write pass, with part of
+/// the graph stored and no metadata row, ends in an entry whose reclaim
+/// leaves no row of the partly written graph.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_abort_in_a_bulk_builds_write_pass_leaves_no_row_after_a_reclaim() {
+    abort_meets_a_bulk_build("dropped-bulk-abort-in-write", writing, true).await;
+}
+
+/// Proves an abort that arrives while a writer deletes, row by row, the
+/// rows of a bulk attempt another process abandoned leaves no row behind:
+/// what the deletion had not reached is the entry's, and a reclaim discards
+/// it.
+///
+/// The second writer takes the store while the first holds a step of its
+/// write pass, as a process that replaces a killed one does. Its first step
+/// deletes the attempt's applied state; the abort is accepted while its
+/// second, which deletes physical rows, is staged and not committed.
+#[test]
+fn an_abort_while_an_abandoned_bulk_attempt_is_deleted_leaves_no_row_after_a_reclaim() {
+    isolated(|| async {
+        let token = ProcessLocalDatabaseToken::new("dropped-bulk-abort-in-discard").unwrap();
+        let (abandoning, before) = bulk_store(token.object_store(), token.database()).await;
+        let write = StepPause::arm(abandoning.inner_db().as_ref(), writing);
+        let build = started(&abandoning, g().create_index_if_not_exists(spec("Gone"))).await;
+        tokio::time::timeout(WAIT, write.reached())
+            .await
+            .expect("the build reaches its write pass");
+        let applied_state = ManagedIndexKey::data_prefix(
+            DataScope::LegacyUnscoped,
+            ScopedKey::logical_prefix(RecordKind::AppliedState),
+        );
+        let applied = |rows: &BTreeMap<Bytes, Bytes>| {
+            rows.keys()
+                .filter(|key| key.starts_with(&applied_state))
+                .count()
+        };
+        let written = vector_rows(&abandoning).await;
+        assert!(applied(&written) > applied(&before));
+        // A step that progresses does not wait for its upload: what the
+        // attempt stored is durable before another writer opens over it.
+        writer(&abandoning)
+            .db()
+            .flush()
+            .await
+            .expect("the attempt's rows are uploaded");
+
+        // The step of the second writer that follows its first deleting one.
+        let delete = StepPause::arm_in_process(not_writing);
+        let db = open_bulk(token.object_store(), token.database()).await;
+        tokio::time::timeout(WAIT, delete.reached())
+            .await
+            .expect("the second writer deletes the abandoned attempt's rows");
+        let left = vector_rows(&db).await;
+        assert_eq!(applied(&left), applied(&before));
+        assert_eq!(
+            left.len() - before.len(),
+            written.len() - before.len() - (applied(&written) - applied(&before)),
+            "the physical rows of the abandoned attempt are still stored"
+        );
+
+        assert_eq!(started(&db, g().drop_index(spec("Gone"))).await, build);
+        delete.release();
+        ended(&db, &build, "aborted").await;
+        // The first writer is fenced: its held step commits nothing.
+        drop(write);
+        drop(abandoning.close().await);
+        assert_reclaimed_to(&db, &before).await;
+        assert_eq!(nearest(&db, "Kept", 3, 5).await.len(), 5);
+        db.close().await.expect("the writer closes");
+    });
+}
+
+/// Proves no compaction discards a row of a generation at the bulk stage,
+/// whatever entry names it. The cross-check reads the index record, not the
+/// operation's stage, and the record of a build at the bulk stage is a
+/// building one as at the serial stage: an entry that names the generation
+/// and the physical id its attempt writes under is quarantined while the
+/// attempt is part-way through its write pass, two compactions of every
+/// table keep every row of the partly written graph, and the build then
+/// stores the rest and answers.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_compaction_discards_a_row_of_a_generation_at_the_bulk_stage() {
+    let token = ProcessLocalDatabaseToken::new("dropped-bulk-stage-quarantine").unwrap();
+    let (db, before) = bulk_store(token.object_store(), token.database()).await;
+    let scope = DataScope::LegacyUnscoped;
+    let pause = StepPause::arm(db.inner_db().as_ref(), writing);
+    let build = started(&db, g().create_index_if_not_exists(spec("Gone"))).await;
+    tokio::time::timeout(WAIT, pause.reached())
+        .await
+        .expect("the build reaches its write pass");
+    let building = |rows: &BTreeMap<Bytes, Bytes>| {
+        rows.iter()
+            .filter(|(key, _)| !before.contains_key(*key))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let written = building(&vector_rows(&db).await);
+    // The owners the stored rows of the attempt name: its generation, in
+    // the applied state, and its physical id, in the filtered lanes.
+    let owners = written
+        .keys()
+        .filter_map(|key| dropped::ownership::owned_row(key))
+        .map(|row| row.owner)
+        .collect::<HashSet<_>>();
+    let (entry, physical_index_id) = match owners.iter().collect::<Vec<_>>()[..] {
+        [OwnerKey::Generation {
+            index_id,
+            generation,
+            ..
+        }, OwnerKey::PhysicalIndex {
+            physical_index_id, ..
+        }]
+        | [OwnerKey::PhysicalIndex {
+            physical_index_id, ..
+        }, OwnerKey::Generation {
+            index_id,
+            generation,
+            ..
+        }] => (
+            DroppedGeneration {
+                index_id: IndexId::new(*index_id).unwrap(),
+                generation: IndexGenerationId::new(*generation).unwrap(),
+            },
+            *physical_index_id,
+        ),
+        _ => panic!("the attempt writes under one generation and one physical id: {owners:?}"),
+    };
+    writer(&db)
+        .db()
+        .put(
+            entry.key(),
+            encode_metadata_value(&IndexV2MetadataValue::DroppedGeneration(
+                DroppedGenerationValue {
+                    scope,
+                    rows: DroppedGenerationRows::UnpartitionedVector {
+                        physical_index_id: VectorPhysicalIndexId::new(physical_index_id).unwrap(),
+                    },
+                },
+            )),
+        )
+        .await
+        .expect("the fixture entry is written");
+
+    let quarantined = vec![QuarantinedDroppedGeneration {
+        index_id: entry.index_id.get(),
+        generation: entry.generation.get(),
+        scope,
+        rows: dropped::DroppedEntryRows::UnpartitionedVector { physical_index_id },
+        contradiction: dropped::DroppedEntryContradiction::GenerationStillOwned,
+        since: *CLOCKLESS,
+    }];
+    // Every table is rewritten, twice, with the entry stored and the build
+    // at the bulk stage.
+    for _ in 0..2 {
+        assert_eq!(
+            clockless(pass(&db).await),
+            DroppedIndexStorage {
+                quarantined: quarantined.clone(),
+                ..DroppedIndexStorage::default()
+            }
+        );
+        assert_eq!(writer(&db).dropped().armed(), vec![]);
+        compact_every_table(&db).await;
+    }
+    assert_eq!(building(&vector_rows(&db).await), written);
+
+    // Without the entry the build goes on from the rows it stored.
+    assert_eq!(
+        db.remove_quarantined_dropped_index_entry(
+            entry.index_id.get(),
+            entry.generation.get(),
+            WAIT
+        )
+        .await
+        .expect("the removal runs"),
+        crate::QuarantinedEntryRemoval::Removed
+    );
+    pause.release();
+    ended(&db, &build, "succeeded").await;
+    assert_eq!(nearest(&db, "Gone", 3, 5).await.len(), 5);
+    assert_eq!(stored_entries(&db).await, vec![]);
+    db.close().await.expect("the writer closes");
 }
 
 /// What [`supersede`] found.
