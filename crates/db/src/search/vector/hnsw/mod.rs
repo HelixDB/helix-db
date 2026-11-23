@@ -1,5 +1,6 @@
 //! HNSW graph construction, mutation, and search algorithms.
 
+pub(super) mod bulk;
 pub(super) mod index;
 pub(super) mod model;
 pub(super) mod mutation;
