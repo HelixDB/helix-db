@@ -62,6 +62,14 @@
 //! compaction runs, and never more; a compactor with a single slot is never
 //! reclaimed. Nothing cancels a reclaim's compaction once it is submitted.
 //!
+//! A reclaim holds the retirer's pass lock while it looks, plans and
+//! submits, and not while its compaction runs: passes go on meanwhile, so a
+//! drop committed during a long rewrite is armed and counted, and a removal
+//! of a quarantined entry waits for no rewrite. The writer's own reclaim
+//! waits for its compaction for two minutes at most (`RECLAIM_WAIT`), since
+//! its task runs no pass while it waits; a compaction that outlives the
+//! wait goes on, and the pass its end starts retires what it discarded.
+//!
 //! Looking for a free slot and submitting are two steps. The scheduler can
 //! fill the slots that were free in between, and the compactor then has one
 //! compaction more than it runs at a time, until one of the scheduler's own
@@ -105,14 +113,16 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use slatedb::compactor::{CompactionSpec, CompactionStatus, CompactorStateView, SourceId};
+use slatedb::compactor::{
+    Compaction, CompactionSpec, CompactionStatus, CompactorStateView, SourceId,
+};
 use slatedb::config::{FlushOptions, FlushType};
 use slatedb::VersionedManifest;
 use tokio::time::Instant;
 
 use crate::error::{HelixDbError, Result};
 
-use super::retire::{Logged, Retirer};
+use super::retire::Retirer;
 use super::{DroppedIndexStorage, TableId};
 
 /// Interval between reads of an awaited compaction's status.
@@ -232,8 +242,10 @@ pub enum DroppedStorageReclaim {
     /// Every table the plan named was rewritten without the rows of the
     /// discardable dropped generations.
     Compacted {
-        /// Dropped generations whose entries the passes that followed
-        /// deleted.
+        /// Dropped generations whose entries this reclaim's own passes
+        /// deleted. A background pass that ran while a compaction of the
+        /// reclaim was in flight may have deleted one first, which is then
+        /// not counted here: `entries` says what is left either way.
         retired: usize,
         /// Dropped generations still awaiting compaction: dropped after the
         /// reclaim began, still read by an older reader, left in place, or
@@ -456,7 +468,7 @@ impl Plan {
     /// The compactions that rewrite every table of `layout` among `tracked`
     /// and no sorted run without one, less the sorted runs `reclaimer` does
     /// not rewrite. `tracked` gives the estimated bytes of dropped rows in
-    /// each table.
+    /// each table, which count for no more than the table's stored bytes.
     ///
     /// Runs to rewrite that follow one another go in one compaction. That
     /// reads and writes the same bytes as rewriting each by itself, and
@@ -468,9 +480,12 @@ impl Plan {
         tracked: &HashMap<TableId, u64>,
         reclaimer: Reclaimer,
     ) -> Self {
+        // An estimate can be long: a block counts in full for each entry
+        // found in it, and for each prefix its tail. No table holds more
+        // dropped bytes than it has, so none counts for more.
         let dropped = |tables: &mut dyn Iterator<Item = &LaidTable>| {
             tables
-                .filter_map(|laid| tracked.get(&laid.table))
+                .filter_map(|laid| Some((*tracked.get(&laid.table)?).min(laid.bytes)))
                 .sum::<u64>()
         };
         // The newest tracked L0 table and every older one.
@@ -592,42 +607,51 @@ impl Retirer {
     /// Compacts the store so that the rows of every discardable dropped
     /// generation are gone from the tables its [`Plan`] names, waiting no
     /// later than `deadline` for anything: a pass or another reclaim under
-    /// way, or a compaction of its own. Logs what it did.
+    /// way, or a compaction of its own. It submits no compaction once
+    /// `deadline` has passed. Logs what it did.
     pub(crate) async fn reclaim(
         &self,
         deadline: Instant,
         reclaimer: Reclaimer,
     ) -> Result<DroppedStorageReclaim> {
-        let Ok(mut logged) = tokio::time::timeout_at(deadline, self.pass.lock()).await else {
-            // What the registry holds as it stands: nothing was looked at.
-            return Ok(DroppedStorageReclaim::Incomplete {
-                entries: self.writer().dropped().armed().len(),
-                obstacle: ReclaimObstacle::TimedOut,
-            });
-        };
-        let outcome = self.compact(deadline, reclaimer, &mut logged).await?;
+        let outcome = self.compact(deadline, reclaimer).await?;
         // A store that takes a few writes is reclaimed again each time it
         // falls idle, and a reclaim that declines the same runs each time
         // says so once.
-        if logged.reclaim != Some(outcome) {
+        let mut last = self.reclaimed.lock();
+        if *last != Some(outcome) {
             tracing::info!(
                 ?outcome,
                 ?reclaimer,
                 "reclaim of dropped index storage ended"
             );
-            logged.reclaim = Some(outcome);
+            *last = Some(outcome);
         }
         Ok(outcome)
     }
 
+    /// [`Self::reclaim`], less its log line.
+    ///
+    /// The pass lock is held to look at the store, plan and submit, and
+    /// given back for as long as a compaction of this reclaim runs: a pass,
+    /// a removal or another reclaim waits for a pass's worth of work, never
+    /// for a rewrite. A reclaim that plans meanwhile finds the sources in
+    /// use and ends [`ReclaimObstacle::Busy`].
     async fn compact(
         &self,
         deadline: Instant,
         reclaimer: Reclaimer,
-        logged: &mut Logged,
     ) -> Result<DroppedStorageReclaim> {
         let db = self.writer().db();
         let registry = self.writer().dropped();
+        let incomplete = |obstacle| DroppedStorageReclaim::Incomplete {
+            entries: registry.armed().len(),
+            obstacle,
+        };
+        let Ok(mut logged) = tokio::time::timeout_at(deadline, self.pass.lock()).await else {
+            // What the registry holds as it stands: nothing was looked at.
+            return Ok(incomplete(ReclaimObstacle::TimedOut));
+        };
         registry.refresh(db).await?;
         let armed = registry.armed();
         if armed.is_empty() {
@@ -647,16 +671,12 @@ impl Retirer {
             });
         }
         // A pass first: the plan is made of the tables the proofs track.
-        let mut retired = self.look(logged).await?;
+        let mut retired = self.look(&mut logged).await?;
         let mut rewritten_bytes = 0u64;
         let mut dropped_bytes = 0u64;
         // A source is rewritten once: one whose rows a compaction kept is
         // left to a later reclaim.
         let mut rewritten = HashSet::new();
-        let incomplete = |obstacle| DroppedStorageReclaim::Incomplete {
-            entries: registry.armed().len(),
-            obstacle,
-        };
         // Imperative: each turn plans from what is stored now and awaits one
         // compaction.
         let left = loop {
@@ -682,6 +702,10 @@ impl Retirer {
             }) else {
                 break plan.left;
             };
+            // The wait is over: what is left is for the next reclaim.
+            if Instant::now() >= deadline {
+                return Ok(incomplete(ReclaimObstacle::TimedOut));
+            }
             if !reclaimer.starts_beside(active.len(), self.slots) {
                 return Ok(incomplete(ReclaimObstacle::Busy));
             }
@@ -720,9 +744,13 @@ impl Retirer {
                 destination,
                 "reclaiming dropped generations: compacting"
             );
-            let ended = self
-                .compacted(CompactionSpec::new(sources.clone(), destination), deadline)
+            let submitted = self
+                .admin
+                .submit_compaction(CompactionSpec::new(sources.clone(), destination))
                 .await?;
+            // The compaction runs without the pass lock.
+            drop(logged);
+            let ended = self.ended(&submitted, deadline).await?;
             // Only an end that was not observed is settled by the manifest.
             let sources_stored = match ended {
                 Ended::Unobserved => {
@@ -730,15 +758,20 @@ impl Retirer {
                 }
                 Ended::Completed | Ended::Short(_) => false,
             };
-            match ended.obstacle(sources_stored) {
+            let relocked = match ended.obstacle(sources_stored) {
                 Some(obstacle) => return Ok(incomplete(obstacle)),
-                None => {
-                    rewritten.extend(sources);
-                    rewritten_bytes += bytes;
-                    dropped_bytes += dropped;
-                    retired += self.look(logged).await?;
-                }
-            }
+                None => tokio::time::timeout_at(deadline, self.pass.lock()).await,
+            };
+            let Ok(relocked) = relocked else {
+                // The compaction ended; the pass that holds the lock, or the
+                // next, retires what it discarded.
+                return Ok(incomplete(ReclaimObstacle::TimedOut));
+            };
+            logged = relocked;
+            rewritten.extend(sources);
+            rewritten_bytes += bytes;
+            dropped_bytes += dropped;
+            retired += self.look(&mut logged).await?;
         };
         Ok(DroppedStorageReclaim::planned_out(
             !rewritten.is_empty(),
@@ -761,15 +794,15 @@ impl Retirer {
         Ok(view)
     }
 
-    /// Submits `spec` and waits for it to finish, no later than `deadline`.
-    /// Nothing cancels it: one that outlives the wait, or this process, goes
-    /// on.
+    /// Waits for the compaction `submitted` to finish, no later than
+    /// `deadline`. Nothing cancels it: one that outlives the wait, or this
+    /// process, goes on.
     ///
     /// SlateDB refuses a compaction by marking its record failed, so a
     /// refusal is read here like any other end.
-    async fn compacted(&self, spec: CompactionSpec, deadline: Instant) -> Result<Ended> {
+    async fn ended(&self, submitted: &Compaction, deadline: Instant) -> Result<Ended> {
         let mut closed = self.closed.subscribe();
-        let id = self.admin.submit_compaction(spec).await?.id();
+        let id = submitted.id();
         // Imperative: each turn awaits a status read, then the poll interval.
         loop {
             if *closed.borrow() {

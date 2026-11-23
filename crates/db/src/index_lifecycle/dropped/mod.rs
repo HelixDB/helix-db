@@ -92,8 +92,10 @@
 //!
 //! Whether a drop leaves an entry depends on the store alone, not on the
 //! writer that runs it. A writer that runs no compaction worker in its own
-//! process still leaves entries and arms them, but discards and retires
-//! nothing: its entries wait for a writer that compacts in process.
+//! process still leaves entries, and does nothing more with them: it runs
+//! no retirement task, so it arms none, discards no row and retires
+//! nothing. Its entries wait for a writer that compacts in process; see
+//! [`DroppedStorageCompactor::None`].
 //!
 //! # What does not scale
 //!
@@ -324,6 +326,36 @@ pub(crate) async fn admit_fixture(db: &Db) {
         .await
         .expect("fixture store admits dropped-generation entries");
     assert!(admitted(db).await.expect("storage version reads"));
+}
+
+/// Puts a fixture store that holds no dropped-generation entry back at
+/// [`IndexStorageVersion::LABEL_IDENTITY`], as a store that has only been
+/// served by writers that do not move it: its drops and aborts delete their
+/// rows one by one. An open with leave to migrate admits it again.
+///
+/// # Errors
+///
+/// An entry is stored, which an image at that version could not read; or a
+/// failed read or write.
+#[cfg(feature = "index-lifecycle-testing")]
+pub(crate) async fn unadmit_fixture(db: &Db) -> Result<()> {
+    if !load_entries(db).await?.is_empty() {
+        return Err(HelixDbError::InvariantViolation(
+            "a store that holds a dropped-generation entry cannot refuse them".to_string(),
+        ));
+    }
+    db.put(
+        ManagedIndexKey::Global {
+            kind: GlobalKey::StorageVersion,
+        }
+        .to_bytes(),
+        encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
+            IndexStorageVersion::LABEL_IDENTITY,
+        )),
+    )
+    .await
+    .map_err(HelixDbError::from_storage_commit)?;
+    Ok(())
 }
 
 /// Compacts on request until `db` holds no dropped-generation entry, for
@@ -983,6 +1015,23 @@ enum Entry {
     Quarantined(Quarantined),
 }
 
+impl Entry {
+    /// Whether the entry's proof tracks tables.
+    const fn tracks(&self) -> bool {
+        match self {
+            Self::Armed(Armed {
+                proof: Proof::Tracking { .. },
+                ..
+            }) => true,
+            Self::Armed(Armed {
+                proof: Proof::Unproven | Proof::Draining { .. },
+                ..
+            })
+            | Self::Quarantined(_) => false,
+        }
+    }
+}
+
 /// The rows a dropped-generation entry records as given up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DroppedEntryRows {
@@ -1081,11 +1130,54 @@ pub enum DroppedStoragePass {
     },
 }
 
+/// What a writer's own compactor does for dropped index generations, which
+/// follows from how many compactions it runs at a time in its process.
+///
+/// ```
+/// use db::DroppedStorageCompactor;
+///
+/// assert_eq!(DroppedStorageCompactor::of(None), DroppedStorageCompactor::None);
+/// assert_eq!(DroppedStorageCompactor::of(Some(1)), DroppedStorageCompactor::SingleSlot);
+/// assert_eq!(DroppedStorageCompactor::of(Some(4)), DroppedStorageCompactor::Reclaims);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DroppedStorageCompactor {
+    /// Several compactions at a time: the writer arms entries, its
+    /// compactions discard their rows, and it rewrites the sorted runs that
+    /// hold them by itself once it has been idle.
+    #[default]
+    Reclaims,
+    /// One compaction at a time: the writer arms entries and its ordinary
+    /// compactions discard their rows, but it never rewrites a sorted run
+    /// for them, by itself or on request: that would take its only slot.
+    SingleSlot,
+    /// No compaction worker in this process: the writer arms no entry,
+    /// discards no row and counts nothing. The entries its drops leave wait
+    /// for a writer that compacts in process.
+    None,
+}
+
+impl DroppedStorageCompactor {
+    /// The kind of a compactor that runs `slots` compactions at a time in
+    /// the writer's process; `None` when it runs none there.
+    pub const fn of(slots: Option<usize>) -> Self {
+        match slots {
+            None => Self::None,
+            Some(0 | 1) => Self::SingleSlot,
+            Some(_) => Self::Reclaims,
+        }
+    }
+}
+
 /// What a writer knows of the dropped index generations whose entries are
 /// still stored, as of its last look. Every count is of generations unless
 /// it says otherwise.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DroppedIndexStorage {
+    /// What this writer's compactor does for dropped generations. A writer
+    /// whose compactor is [`DroppedStorageCompactor::None`] reports nothing
+    /// else: it never looks.
+    pub compactor: DroppedStorageCompactor,
     /// Armed, with no proof under way: just dropped, or a compaction kept
     /// their rows since.
     pub unproven: usize,
@@ -1102,7 +1194,9 @@ pub struct DroppedIndexStorage {
     /// Distinct tables the `tracking` generations wait for.
     pub tracked_tables: usize,
     /// An estimate of the stored bytes of the `tracking` generations' rows
-    /// in those tables: what the store gets back when they are compacted.
+    /// in those tables: about what the store gets back when they are
+    /// compacted. It is summed generation by generation, so a block two of
+    /// them have rows in counts twice, and it can exceed the tables' size.
     /// Rows of generations not yet `tracking` are not counted.
     pub tracked_bytes: u64,
     /// The part of that the writer leaves where it is; `None` when a reclaim
@@ -1121,7 +1215,8 @@ pub struct DroppedIndexStorage {
     /// compaction to reach them.
     pub tracking_since: Option<Instant>,
     /// How this writer's last background pass ended; `None` before its
-    /// first, which arms the entries the store holds.
+    /// first, which arms the entries the store holds, and always on a writer
+    /// that runs none.
     pub last_pass: Option<DroppedStoragePass>,
     /// Entries the catalog contradicts. Their rows are kept.
     pub quarantined: Vec<QuarantinedDroppedGeneration>,
@@ -1160,9 +1255,15 @@ pub(crate) enum Unquarantined {
 #[derive(Debug, Default)]
 struct State {
     entries: HashMap<DroppedGeneration, Entry>,
+    /// How many of `entries` have a proof that tracks tables. Kept beside
+    /// them so that asking whether any does, which the background task does
+    /// at every write, reads one number.
+    tracking: usize,
     compactions: CompactionActivity,
     /// How the last background pass ended.
     last_pass: Option<DroppedStoragePass>,
+    /// What the writer's compactor does; see [`Registry::compacts`].
+    compactor: DroppedStorageCompactor,
 }
 
 /// The dropped generations one writer knows of, and what its compactions do
@@ -1255,7 +1356,9 @@ impl Registry {
                 }
                 (Entry::Armed(_) | Entry::Quarantined(_), _) => {}
             }
-            state.entries.insert(entry, next);
+            // What a refresh puts in tracks no table.
+            let replaced = state.entries.insert(entry, next);
+            state.tracking -= usize::from(replaced.as_ref().is_some_and(Entry::tracks));
         }
         if armed > 0 {
             tracing::info!(entries = armed, gate, "armed dropped-generation entries");
@@ -1282,6 +1385,7 @@ impl Registry {
     pub(crate) fn storage(&self) -> DroppedIndexStorage {
         let state = self.state.lock();
         let mut storage = DroppedIndexStorage {
+            compactor: state.compactor,
             last_pass: state.last_pass.clone(),
             ..DroppedIndexStorage::default()
         };
@@ -1328,23 +1432,24 @@ impl Registry {
         storage
             .quarantined
             .sort_unstable_by_key(|entry| (entry.index_id, entry.generation));
+        assert_eq!(
+            state.tracking, storage.tracking,
+            "the count of tracking proofs follows every change of a proof"
+        );
         storage
     }
 
+    /// Records what the writer's compactor does for dropped generations.
+    /// The open that knows the compactor's settings says so once.
+    pub(crate) fn compacts(&self, compactor: DroppedStorageCompactor) {
+        self.state.lock().compactor = compactor;
+    }
+
     /// Whether some armed entry's proof tracks tables: only then does it
-    /// matter to a proof which tables the manifest holds.
+    /// matter to a proof which tables the manifest holds. Reads one number,
+    /// however many entries there are.
     pub(crate) fn tracks_tables(&self) -> bool {
-        self.state.lock().entries.values().any(|state| match state {
-            Entry::Armed(Armed {
-                proof: Proof::Tracking { .. },
-                ..
-            }) => true,
-            Entry::Armed(Armed {
-                proof: Proof::Unproven | Proof::Draining { .. },
-                ..
-            })
-            | Entry::Quarantined(_) => false,
-        })
+        self.state.lock().tracking > 0
     }
 
     /// The estimated bytes of dropped rows in each table a proof tracks,
@@ -1400,8 +1505,12 @@ impl Registry {
         state.compactions.running += 1;
         let mut discardable = HashSet::new();
         let mut kept = false;
-        for state in state.entries.values_mut() {
-            let Entry::Armed(armed) = state else {
+        let State {
+            entries, tracking, ..
+        } = &mut *state;
+        for entry in entries.values_mut() {
+            let tracked = entry.tracks();
+            let Entry::Armed(armed) = entry else {
                 continue;
             };
             if context
@@ -1412,6 +1521,7 @@ impl Registry {
             } else {
                 armed.kept += 1;
                 armed.proof = Proof::Unproven;
+                *tracking -= usize::from(tracked);
                 kept = true;
             }
         }
@@ -1498,13 +1608,21 @@ impl Registry {
     /// no longer armed. Returns whether the step applied.
     pub(crate) fn advance(&self, entry: DroppedGeneration, kept: u64, proof: Proof) -> bool {
         let mut state = self.state.lock();
-        let Some(Entry::Armed(armed)) = state.entries.get_mut(&entry) else {
+        let State {
+            entries, tracking, ..
+        } = &mut *state;
+        let Some(Entry::Armed(armed)) = entries.get_mut(&entry) else {
             return false;
         };
         if armed.kept != kept {
             return false;
         }
         if armed.proof != proof {
+            let tracks = |proof: &Proof| match proof {
+                Proof::Tracking { .. } => 1,
+                Proof::Unproven | Proof::Draining { .. } => 0,
+            };
+            *tracking = *tracking - tracks(&armed.proof) + tracks(&proof);
             armed.proof = proof;
             armed.progressed = Instant::now();
         }
@@ -1523,7 +1641,8 @@ impl Registry {
         if armed.kept != kept {
             return false;
         }
-        state.entries.remove(&entry);
+        let retired = state.entries.remove(&entry);
+        state.tracking -= usize::from(retired.as_ref().is_some_and(Entry::tracks));
         true
     }
 

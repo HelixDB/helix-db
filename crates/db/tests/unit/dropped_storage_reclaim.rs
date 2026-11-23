@@ -1448,7 +1448,10 @@ async fn a_table_that_starts_and_ends_under_an_entry_counts_its_prefixes_between
 /// Proves a caller's wait bounds the whole reclaim, the wait for a pass or
 /// another reclaim under way included: while one holds the pass lock, a
 /// reclaim returns timed out once its wait is over, having looked at
-/// nothing and submitted nothing, and with the lock free it does its work.
+/// nothing and submitted nothing, and so does the removal of a quarantined
+/// entry, which answers busy. A reclaim whose wait is already over when it
+/// has planned submits nothing either. With the lock free and time to wait
+/// it does its work.
 #[tokio::test]
 async fn a_reclaims_wait_bounds_the_wait_for_a_pass_under_way() {
     let (db, prefixes) = two_runs_and_a_drop("dropped-reclaim-lock-wait").await;
@@ -1483,7 +1486,33 @@ async fn a_reclaims_wait_bounds_the_wait_for_a_pass_under_way() {
     );
     assert!(started.elapsed() >= wait, "{:?}", started.elapsed());
     assert_eq!(submitted().await, before);
+    let started = Instant::now();
+    assert_eq!(
+        tokio::time::timeout(
+            WAIT,
+            db.remove_quarantined_dropped_index_entry(9_000, 1, wait)
+        )
+        .await
+        .expect("the wait bounds the removal though a pass is under way")
+        .expect("the removal runs"),
+        crate::QuarantinedEntryRemoval::Busy
+    );
+    assert!(started.elapsed() >= wait, "{:?}", started.elapsed());
     drop(under_way);
+    // The lock is free and the plan has a run to rewrite, but the wait is
+    // over by the time it would be submitted.
+    let outcome = retirer
+        .reclaim(tokio::time::Instant::now(), Reclaimer::Caller)
+        .await
+        .expect("the reclaim runs");
+    assert_eq!(
+        outcome,
+        DroppedStorageReclaim::Incomplete {
+            entries: 1,
+            obstacle: ReclaimObstacle::TimedOut,
+        }
+    );
+    assert_eq!(submitted().await, before);
     let outcome = retirer
         .reclaim(tokio::time::Instant::now() + WAIT, Reclaimer::Caller)
         .await
@@ -1500,6 +1529,111 @@ async fn a_reclaims_wait_bounds_the_wait_for_a_pass_under_way() {
         "{outcome:?}"
     );
     assert_discarded(&db, &prefixes).await;
+    db.close().await.expect("the writer closes");
+}
+
+/// Proves a reclaim does not hold the pass lock while its compaction runs:
+/// with a caller's reclaim waiting on a compaction nothing runs, a pass
+/// runs at once and arms and counts an index dropped meanwhile, a removal
+/// answers, and the reclaim then ends timed out with both entries left.
+#[tokio::test]
+async fn a_reclaim_gives_the_pass_lock_back_while_its_compaction_runs() {
+    let token = ProcessLocalDatabaseToken::new("dropped-reclaim-lock-released").unwrap();
+    // A scheduler that proposes nothing and a worker that claims nothing: a
+    // submitted compaction stays in flight.
+    let db = HelixDB::open_with_object_store_and_config(
+        token.database().to_string(),
+        token.object_store(),
+        crate::DbConfig::new().with_slate_settings(slatedb::Settings {
+            compactor_options: Some(slatedb::config::CompactorOptions {
+                poll_interval: Duration::from_millis(50),
+                scheduler_options: HashMap::from(
+                    ["min_compaction_sources", "max_compaction_sources"]
+                        .map(|option| (option.to_string(), "1000000".to_string())),
+                ),
+                worker: Some(slatedb::config::CompactionWorkerOptions {
+                    compactions_poll_interval: Duration::from_secs(3_600),
+                    ..slatedb::config::CompactionWorkerOptions::default()
+                }),
+                ..slatedb::config::CompactorOptions::default()
+            }),
+            ..slatedb::Settings::default()
+        }),
+    )
+    .await
+    .expect("the writer opens");
+    db.wait_for_background_migrations().await;
+    for seed in 0..48 {
+        add(&db, "Gone", seed).await;
+        add(&db, "Later", seed).await;
+    }
+    create_index(&db, "Gone").await;
+    create_index(&db, "Later").await;
+    drop_index(&db, "Gone").await;
+    let retirer = retirer(&db).await;
+    assert_eq!(retirer.pass().await.expect("the pass runs").tracking, 1);
+
+    // Far longer than a pass takes, far shorter than the lock would be held.
+    let prompt = Duration::from_secs(5);
+    let wait = 3 * prompt;
+    let reclaim = tokio::spawn({
+        let retirer = Arc::clone(&retirer);
+        async move {
+            retirer
+                .reclaim(tokio::time::Instant::now() + wait, Reclaimer::Caller)
+                .await
+        }
+    });
+    tokio::time::timeout(WAIT, async {
+        while !admin(&db)
+            .read_compactions(None)
+            .await
+            .expect("the compactions read")
+            .iter()
+            .flat_map(|compactions| compactions.recent_compactions())
+            .any(|compaction| compaction.active())
+        {
+            tokio::time::sleep(POLL).await;
+        }
+    })
+    .await
+    .expect("the reclaim submits its compaction");
+
+    drop_index(&db, "Later").await;
+    let storage = tokio::time::timeout(prompt, retirer.pass())
+        .await
+        .expect("a pass runs while the reclaim's compaction is in flight")
+        .expect("the pass runs");
+    assert_eq!(
+        storage.unproven + storage.draining + storage.tracking,
+        2,
+        "{storage:?}"
+    );
+    assert_eq!(writer(&db).dropped().armed().len(), 2);
+    assert_eq!(
+        tokio::time::timeout(
+            prompt,
+            db.remove_quarantined_dropped_index_entry(9_000, 1, prompt)
+        )
+        .await
+        .expect("a removal answers while the reclaim's compaction is in flight")
+        .expect("the removal runs"),
+        crate::QuarantinedEntryRemoval::Absent
+    );
+    assert!(
+        !reclaim.is_finished(),
+        "the reclaim still waits for its compaction"
+    );
+    assert_eq!(
+        reclaim
+            .await
+            .expect("the reclaim task joins")
+            .expect("the reclaim runs"),
+        DroppedStorageReclaim::Incomplete {
+            entries: 2,
+            obstacle: ReclaimObstacle::TimedOut,
+        }
+    );
     db.close().await.expect("the writer closes");
 }
 
@@ -2265,15 +2399,34 @@ async fn a_reclaim_that_outlives_its_wait_returns_and_its_compaction_goes_on() {
     create_index(&db, "Gone").await;
     drop_index(&db, "Gone").await;
     let prefixes = armed_prefixes(&db).await;
-    assert_eq!(
-        db.reclaim_dropped_index_storage(Duration::ZERO)
+    let submitted = || async {
+        admin(&db)
+            .read_compactions(None)
             .await
-            .unwrap(),
-        DroppedStorageReclaim::Incomplete {
-            entries: 1,
-            obstacle: ReclaimObstacle::TimedOut,
+            .expect("the compactions read")
+            .iter()
+            .flat_map(|compactions| compactions.recent_compactions())
+            .count()
+    };
+    let before = submitted().await;
+    // Time to plan and submit, and far too little for the compaction, which
+    // is validated, claimed and committed at polls a second and more apart.
+    // A reclaim so slow that its wait is over before it submits submits
+    // nothing, and is asked again.
+    let wait = Duration::from_millis(300);
+    tokio::time::timeout(WAIT, async {
+        while submitted().await == before {
+            assert_eq!(
+                db.reclaim_dropped_index_storage(wait).await.unwrap(),
+                DroppedStorageReclaim::Incomplete {
+                    entries: 1,
+                    obstacle: ReclaimObstacle::TimedOut,
+                }
+            );
         }
-    );
+    })
+    .await
+    .expect("a reclaim submits its compaction within its wait");
     assert_eq!(stored_entries(&db).await.len(), 1);
     tokio::time::timeout(WAIT, async {
         while pass(&db).await != DroppedIndexStorage::default() {
@@ -2286,10 +2439,12 @@ async fn a_reclaim_that_outlives_its_wait_returns_and_its_compaction_goes_on() {
     db.close().await.expect("the writer closes");
 }
 
-/// Proves a writer that runs no compaction worker of its own retires and
-/// reclaims nothing: its drops still leave entries, and it still arms them.
+/// Proves a writer that runs no compaction worker of its own does nothing
+/// with dropped generations but leave their entries: it runs no retirement
+/// task, so it arms none, counts none, and refuses a reclaim and a removal;
+/// its handle says that its compactor is the reason.
 #[tokio::test]
-async fn a_writer_without_a_compaction_worker_retires_nothing() {
+async fn a_writer_without_a_compaction_worker_arms_and_retires_nothing() {
     let db = HelixDB::open_with_config(
         HelixDbSource::InMemory {
             database: "dropped-retire-no-worker".to_string(),
@@ -2315,11 +2470,17 @@ async fn a_writer_without_a_compaction_worker_retires_nothing() {
         db.reclaim_dropped_index_storage(WAIT).await,
         Err(HelixDbError::Config(_))
     ));
-    armed_prefixes(&db).await;
+    assert!(matches!(
+        db.remove_quarantined_dropped_index_entry(1, 1, WAIT).await,
+        Err(HelixDbError::Config(_))
+    ));
+    // Long enough for a first pass, had there been a task to run one.
+    tokio::time::sleep(QUIET).await;
+    assert_eq!(writer(&db).dropped().armed(), vec![]);
     assert_eq!(
-        clockless(db.dropped_index_storage()),
+        db.dropped_index_storage(),
         DroppedIndexStorage {
-            unproven: 1,
+            compactor: crate::DroppedStorageCompactor::None,
             ..DroppedIndexStorage::default()
         }
     );
@@ -3799,7 +3960,7 @@ async fn a_quarantined_entry_fails_no_creation_and_is_removed_only_on_request() 
     let handle = &db;
     let remove = |index_id: u64, generation: u64| async move {
         handle
-            .remove_quarantined_dropped_index_entry(index_id, generation)
+            .remove_quarantined_dropped_index_entry(index_id, generation, WAIT)
             .await
             .expect("the removal runs")
     };
@@ -3864,7 +4025,9 @@ async fn a_quarantined_entry_fails_no_creation_and_is_removed_only_on_request() 
         .await
         .expect("the reader opens");
     assert!(matches!(
-        reader.remove_quarantined_dropped_index_entry(1, 1).await,
+        reader
+            .remove_quarantined_dropped_index_entry(1, 1, WAIT)
+            .await,
         Err(HelixDbError::WriterModeRequired { .. })
     ));
     reader.close().await.expect("the reader closes");

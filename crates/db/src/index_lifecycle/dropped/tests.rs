@@ -61,9 +61,11 @@ fn quarantined(contradiction: Contradiction) -> Entry {
 fn registry_of(entries: HashMap<DroppedGeneration, Entry>) -> Registry {
     Registry {
         state: parking_lot::Mutex::new(State {
+            tracking: entries.values().filter(|entry| entry.tracks()).count(),
             entries,
             compactions: CompactionActivity::default(),
             last_pass: None,
+            compactor: DroppedStorageCompactor::default(),
         }),
         changed: tokio::sync::Notify::new(),
     }
@@ -322,6 +324,62 @@ fn a_proof_step_applies_only_while_no_filter_has_kept_the_entry_since() {
     assert!(registry.retire(entry(1), 1));
     assert_eq!(registry.armed(), Vec::new());
     assert_eq!(registry.discardable(&job(Some(u64::MAX))), HashSet::new());
+}
+
+/// What a writer's compactor does for dropped generations follows from how
+/// many compactions it runs at a time in its process, and the registry
+/// reports what the open told it.
+#[test]
+fn a_compactor_reclaims_only_with_a_slot_to_spare_and_arms_only_with_a_worker() {
+    for (slots, compactor) in [
+        (None, DroppedStorageCompactor::None),
+        (Some(0), DroppedStorageCompactor::SingleSlot),
+        (Some(1), DroppedStorageCompactor::SingleSlot),
+        (Some(2), DroppedStorageCompactor::Reclaims),
+        (Some(4), DroppedStorageCompactor::Reclaims),
+    ] {
+        assert_eq!(DroppedStorageCompactor::of(slots), compactor, "{slots:?}");
+        let registry = registry(&[(1, 10)]);
+        assert_eq!(
+            registry.storage().compactor,
+            DroppedStorageCompactor::Reclaims
+        );
+        registry.compacts(compactor);
+        assert_eq!(registry.storage().compactor, compactor, "{slots:?}");
+    }
+}
+
+/// The registry answers whether any proof tracks tables from a count it
+/// keeps, which every change of a proof moves: a step to tracking and away
+/// from it, a filter that keeps the rows, and a retirement.
+#[test]
+fn the_count_of_tracking_proofs_follows_every_change_of_a_proof() {
+    let registry = registry(&[(1, 10), (2, 10), (3, 99)]);
+    let tracks = |expected: usize| {
+        assert_eq!(registry.tracks_tables(), expected > 0);
+        // The report counts by scanning, and asserts the two agree.
+        assert_eq!(registry.storage().tracking, expected);
+    };
+    tracks(0);
+    assert!(registry.advance(entry(1), 0, tracking(&[7])));
+    assert!(registry.advance(entry(2), 0, tracking(&[7, 8])));
+    assert!(registry.advance(entry(3), 0, tracking(&[9])));
+    tracks(3);
+    // The same proof again, and another set of tables: still three.
+    assert!(registry.advance(entry(1), 0, tracking(&[7])));
+    assert!(registry.advance(entry(2), 0, tracking(&[8])));
+    tracks(3);
+    // Back to waiting for compactions.
+    assert!(registry.advance(entry(1), 0, Proof::Unproven));
+    tracks(2);
+    // A filter whose retention is behind entry 3's gate keeps its rows.
+    registry.discardable(&job(Some(50)));
+    tracks(1);
+    assert!(registry.retire(entry(2), 0));
+    tracks(0);
+    // Retiring an entry that tracks nothing changes nothing.
+    assert!(registry.retire(entry(1), 0));
+    tracks(0);
 }
 
 #[test]
@@ -649,6 +707,7 @@ fn storage_counts_each_entry_by_what_its_proof_waits_for() {
     assert_eq!(
         storage,
         DroppedIndexStorage {
+            compactor: DroppedStorageCompactor::Reclaims,
             unproven: 2,
             retained: 1,
             draining: 1,

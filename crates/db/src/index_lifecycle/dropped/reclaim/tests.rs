@@ -249,6 +249,51 @@ fn a_plan_leaves_a_run_that_is_not_worth_rewriting_unless_a_caller_asks() {
     );
 }
 
+/// An estimate can exceed its table: a block counts in full for each entry
+/// that has rows in it. A plan counts a table for no more than its stored
+/// bytes, so a run is not rewritten for dropped rows it cannot hold.
+#[test]
+fn a_plan_counts_a_table_for_no_more_than_its_size() {
+    let layout = Layout {
+        l0: vec![l0(90, 10 * MIB)],
+        runs: vec![
+            (5, vec![laid(50, 100 * MIB), laid(51, 1948 * MIB)]),
+            (0, vec![laid(1, 200 * MIB), laid(2, 2 * GIB)]),
+        ],
+    };
+    // Table 50 is estimated at three times its size, which would be more
+    // than an eighth of run 5; table 1 at just its size, an eighth of run 0
+    // short by nothing a cap changes; the L0 table at twice its size.
+    let tracked = tracked(&[(90, 20 * MIB), (50, 300 * MIB), (1, 200 * MIB)]);
+    assert!(worth_rewriting(2048 * MIB, 300 * MIB));
+    assert!(!worth_rewriting(2048 * MIB, 100 * MIB));
+    assert_eq!(
+        Plan::of(&layout, &tracked, IDLE),
+        Plan {
+            rewrites: vec![Rewrite::L0 {
+                sources: vec![view(90)],
+                bytes: 10 * MIB,
+                dropped_bytes: 10 * MIB,
+            }],
+            left: Some(LeftInPlace {
+                dropped_bytes: 100 * MIB + 200 * MIB,
+                run_bytes: 2048 * MIB + 200 * MIB + 2 * GIB,
+                runs: 2,
+            }),
+        }
+    );
+    // A caller rewrites them whatever they hold, and is told the same
+    // capped bytes.
+    assert_eq!(
+        Plan::of(&layout, &tracked, Reclaimer::Caller).rewrites[1..],
+        [runs(
+            &[5, 0],
+            2048 * MIB + 200 * MIB + 2 * GIB,
+            100 * MIB + 200 * MIB
+        )]
+    );
+}
+
 #[test]
 fn a_plan_rewrites_runs_that_follow_one_another_in_one_compaction() {
     // Newest first. Runs 9 and 8 hold dropped rows and follow one another;

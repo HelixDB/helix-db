@@ -439,7 +439,12 @@ fn the_background_paces_are_ordered() {
     assert!(LOOK_GAP <= DRAIN_LOOK_MAX);
     assert!(DRAIN_LOOK_MAX < IDLE_RECLAIM_AFTER);
     assert!(RETRY <= MAX_BACKOFF);
-    assert!(IDLE_RECLAIM_AFTER < RECLAIM_WAIT);
+    // The task runs no pass while it waits for a reclaim's compaction: it
+    // waits longer than it does between two looks, so that a small rewrite
+    // ends within the wait, and no longer than a store must rest before it
+    // is reclaimed, which is minutes and not the hours a large run takes.
+    assert!(DRAIN_LOOK_MAX < RECLAIM_WAIT);
+    assert!(RECLAIM_WAIT <= IDLE_RECLAIM_AFTER);
     assert_eq!(
         Pace::WRITER,
         Pace {

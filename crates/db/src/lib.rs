@@ -101,8 +101,8 @@ pub use config::{DbConfig, HelixConfig};
 pub use index_lifecycle::dropped::reclaim::{DroppedStorageReclaim, LeftInPlace, ReclaimObstacle};
 pub use index_lifecycle::dropped::retire::QuarantinedEntryRemoval;
 pub use index_lifecycle::dropped::{
-    DroppedEntryContradiction, DroppedEntryRows, DroppedIndexStorage, DroppedStoragePass,
-    QuarantinedDroppedGeneration,
+    DroppedEntryContradiction, DroppedEntryRows, DroppedIndexStorage, DroppedStorageCompactor,
+    DroppedStoragePass, QuarantinedDroppedGeneration,
 };
 pub use index_lifecycle::queue::lag::PublicationLagHistogram;
 pub use index_lifecycle::queue::{BlockedIndexEntity, IndexOperationQueueStats};
@@ -2350,10 +2350,14 @@ impl HelixDB {
     /// The writer opened with an empty registry, so until the task's first
     /// pass, which is due at once, its compactions discard nothing.
     async fn start_dropped_generation_retirement(&self, slots: Option<usize>) {
-        let Some(slots) = slots else {
+        let HelixStorage::Writer(writer) = self.inner.storage.handle() else {
             return;
         };
-        let HelixStorage::Writer(writer) = self.inner.storage.handle() else {
+        // What the handle reports of this writer's compactor, task or none.
+        writer
+            .dropped()
+            .compacts(index_lifecycle::dropped::DroppedStorageCompactor::of(slots));
+        let Some(slots) = slots else {
             return;
         };
         let mut retire = self.inner.dropped_retire.lock().await;
@@ -2410,9 +2414,11 @@ impl HelixDB {
     /// slot: when a compaction of its own would, it returns
     /// [`ReclaimObstacle::Busy`] instead, as it always does on a compactor
     /// with a single slot. `wait` bounds the whole call, the wait for a
-    /// background pass or another reclaim under way included. A compaction
-    /// that outlives `wait` goes on, and nothing cancels it; its result
-    /// shows in [`Self::dropped_index_storage`].
+    /// background pass or another reclaim under way included, and once it
+    /// has passed the call submits no further compaction. A compaction that
+    /// outlives `wait` goes on, and nothing cancels it; its result shows in
+    /// [`Self::dropped_index_storage`]. Background passes go on while a
+    /// compaction of this call runs, however long it takes.
     ///
     /// This is a library call for a process that embeds the database as its
     /// writer. The server has no route for it.
@@ -2473,7 +2479,10 @@ impl HelixDB {
     ///
     /// The entry is cross-checked once more first. Only an entry that is
     /// still quarantined is deleted; one that has become consistent is armed
-    /// and retires by itself.
+    /// and retires by itself. The call waits no longer than `wait` for a
+    /// background pass under way, which reads the store and can take a
+    /// while on a large one, and returns
+    /// [`QuarantinedEntryRemoval::Busy`] with nothing done if it must.
     ///
     /// # What it leaves behind
     ///
@@ -2501,6 +2510,8 @@ impl HelixDB {
     ///
     /// ```
     /// # tokio_test::block_on(async {
+    /// use std::time::Duration;
+    ///
     /// use db::{HelixDB, HelixDbSource, QuarantinedEntryRemoval};
     ///
     /// let db = HelixDB::open(HelixDbSource::InMemory {
@@ -2509,7 +2520,9 @@ impl HelixDB {
     /// // Nothing is quarantined, so there is nothing to remove.
     /// assert!(db.dropped_index_storage().quarantined.is_empty());
     /// assert_eq!(
-    ///     db.remove_quarantined_dropped_index_entry(1, 1).await.unwrap(),
+    ///     db.remove_quarantined_dropped_index_entry(1, 1, Duration::from_secs(60))
+    ///         .await
+    ///         .unwrap(),
     ///     QuarantinedEntryRemoval::Absent,
     /// );
     /// db.close().await.unwrap();
@@ -2519,7 +2532,9 @@ impl HelixDB {
         &self,
         index_id: u64,
         generation: u64,
+        wait: Duration,
     ) -> Result<QuarantinedEntryRemoval> {
+        let deadline = tokio::time::Instant::now() + wait;
         let retirer = self.dropped_generation_retirer().await?;
         let (Ok(index_id), Ok(generation)) = (
             index_lifecycle::IndexId::new(index_id),
@@ -2529,10 +2544,13 @@ impl HelixDB {
             return Ok(QuarantinedEntryRemoval::Absent);
         };
         retirer
-            .remove_quarantined(index_lifecycle::dropped::DroppedGeneration {
-                index_id,
-                generation,
-            })
+            .remove_quarantined(
+                index_lifecycle::dropped::DroppedGeneration {
+                    index_id,
+                    generation,
+                },
+                deadline,
+            )
             .await
     }
 
@@ -2541,7 +2559,9 @@ impl HelixDB {
     /// long, how far the proof that their rows are gone has got, an estimate
     /// of the bytes those rows take, how much of that the writer leaves in
     /// place, and which entries the catalog contradicts. Empty on a
-    /// read-only handle, which discards nothing.
+    /// read-only handle, which discards nothing, and on a writer that runs
+    /// no compaction worker in its process, which never looks: its
+    /// [`DroppedIndexStorage::compactor`] says so.
     ///
     /// # Examples
     ///
@@ -2832,14 +2852,13 @@ impl HelixDB {
         let writer = Arc::clone(writer);
         let run_step = async move {
             let _step = step;
-            let stepped = index_lifecycle::worker::process_secondary_once(
+            index_lifecycle::worker::process_secondary_once(
                 writer.db(),
                 &inner.index_capabilities,
                 writer_epoch,
                 &inner.index_claim_sequences,
             )
-            .await?;
-            Ok(stepped)
+            .await
         };
         self.inner.commit_completions.run(run_step)?.await
     }

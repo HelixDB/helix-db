@@ -126,9 +126,12 @@ const MAX_BACKOFF: Duration = Duration::from_secs(600);
 /// How long the store must have been idle before the background task
 /// reclaims; see [`RetireSupervisor`].
 const IDLE_RECLAIM_AFTER: Duration = Duration::from_secs(300);
-/// Longest a background reclaim waits for its compactions. One that outlives
-/// it goes on, and the pass after it retires what it discarded.
-const RECLAIM_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
+/// Longest a background reclaim waits for its compactions. The task runs no
+/// pass while it waits, so a drop committed meanwhile is armed, counted and
+/// reported once the wait is over: minutes, not the hours a large run takes
+/// to rewrite. A compaction that outlives the wait goes on, and the pass its
+/// end starts retires what it discarded.
+pub(super) const RECLAIM_WAIT: Duration = Duration::from_secs(120);
 /// Bytes of block indexes and data blocks a retirer keeps of the tables it
 /// has looked into.
 const TABLE_CACHE_BYTES: u64 = 64 * 1024 * 1024;
@@ -252,9 +255,10 @@ fn held_by_range<'a>(
 /// `from..to` have an index key under the prefix. When none has, the rows
 /// are in the one block before them, if there is one.
 ///
-/// The estimate is exact to one block at each end: the block before `from`
-/// may end with rows under the prefix, and the last block may go on past
-/// them.
+/// The estimate is off by up to one block at each end. It is short when the
+/// block before `from` ends with rows under the prefix, and long when the
+/// last block goes on past them, or when the one block before holds other
+/// rows too.
 fn blocks_under(from: usize, to: usize) -> std::ops::Range<usize> {
     if from < to {
         from..to
@@ -303,15 +307,16 @@ pub enum QuarantinedEntryRemoval {
     Armed,
     /// No such entry is stored.
     Absent,
+    /// A background pass, or a reclaim looking at the store, was under way
+    /// for the whole wait. Nothing was looked at and nothing deleted.
+    Busy,
 }
 
-/// What a retirer last logged.
+/// What a retirer's passes last logged.
 #[derive(Debug, Default)]
 pub(super) struct Logged {
     /// What the last pass that logged left.
     pub(super) storage: DroppedIndexStorage,
-    /// How the last reclaim ended.
-    pub(super) reclaim: Option<super::reclaim::DroppedStorageReclaim>,
 }
 
 /// Watches one writer's tables and retires its dropped-generation entries,
@@ -320,10 +325,14 @@ pub(crate) struct Retirer {
     writer: Arc<HelixWriter>,
     pub(super) admin: Admin,
     pub(super) tables: SstReader,
-    /// Serializes passes, reclaims and removals. Holds what the last pass
-    /// and the last reclaim logged, so that one that changes nothing logs
-    /// nothing.
+    /// Serializes passes, removals, and the looking, planning and
+    /// submitting of reclaims. Nothing holds it while a compaction runs, so
+    /// it is held for a pass's worth of work at most. Holds what the last
+    /// pass logged, so that one that changes nothing logs nothing.
     pub(super) pass: tokio::sync::Mutex<Logged>,
+    /// How the last reclaim ended, so that one that ends the same way logs
+    /// nothing.
+    pub(super) reclaimed: parking_lot::Mutex<Option<super::reclaim::DroppedStorageReclaim>>,
     pub(super) closed: watch::Sender<bool>,
     /// How many compactions the writer's compactor runs at a time; see
     /// [`compaction_slots`](super::compaction_slots).
@@ -360,6 +369,7 @@ impl Retirer {
                 None,
             ),
             pass: tokio::sync::Mutex::new(Logged::default()),
+            reclaimed: parking_lot::Mutex::new(None),
             closed: watch::channel(false).0,
             #[cfg(test)]
             background: watch::channel(None).0,
@@ -374,7 +384,8 @@ impl Retirer {
 
     /// Deletes the stored entry of `entry` if the catalog contradicts it,
     /// as it stands now: the entry is cross-checked again first, and one
-    /// that has become consistent is armed and stays.
+    /// that has become consistent is armed and stays. Waits no later than
+    /// `deadline` for a pass under way, and does nothing if it must.
     ///
     /// Nothing else is deleted. The rows the entry named stay stored, no
     /// compaction discards them, and no later entry can name them: see
@@ -382,8 +393,11 @@ impl Retirer {
     pub(crate) async fn remove_quarantined(
         &self,
         entry: DroppedGeneration,
+        deadline: Instant,
     ) -> Result<QuarantinedEntryRemoval> {
-        let _pass = self.pass.lock().await;
+        let Ok(_pass) = tokio::time::timeout_at(deadline, self.pass.lock()).await else {
+            return Ok(QuarantinedEntryRemoval::Busy);
+        };
         let db = self.writer.db();
         let registry = self.writer.dropped();
         registry.refresh(db).await?;
@@ -611,7 +625,14 @@ impl Retirer {
     /// Neither does one whose rows all lie inside a block that begins with
     /// another owner's row, when its entry is known to be held without it:
     /// that block is not read, so the estimate is short by less than a block
-    /// for each such prefix, and never long.
+    /// for each such prefix.
+    ///
+    /// It can also be long, by less than a block for each prefix: the last
+    /// block of a prefix counts in full though it goes on with other rows,
+    /// and so does a block a prefix is found inside. A block two entries
+    /// have rows in counts in full for each, so the sum over a table's
+    /// entries can exceed the table: a reclaim's plan counts a table for no
+    /// more than its size.
     async fn held_in_part(
         &self,
         sst: &SsTableHandle,
@@ -928,6 +949,12 @@ enum Wake {
 /// cannot make progress, for instance while a reader older than the drop
 /// is open or because no run is worth rewriting, is not repeated on a store
 /// that stays still.
+///
+/// The task waits for a reclaim's compaction for [`RECLAIM_WAIT`] at most,
+/// and runs no pass meanwhile. A rewrite that takes longer goes on by
+/// itself: the task is back to its passes, arms and counts what is dropped
+/// meanwhile, and is told of the rewrite's end by the writer's manifest,
+/// which loses the tables the proofs track.
 ///
 /// # What does not scale
 ///

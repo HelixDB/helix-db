@@ -1798,6 +1798,20 @@ impl HelixDB {
         ))
     }
 
+    /// Puts the store back at the storage version before dropped-generation
+    /// entries, as a store that has only been served by writers that do not
+    /// move it: its drops and aborts then delete their rows one by one. An
+    /// open with leave to migrate admits the store again, so a fixture
+    /// calls this after each open.
+    ///
+    /// # Errors
+    ///
+    /// A read-only handle, a store that already holds an entry, or a failed
+    /// read or write.
+    pub async fn lifecycle_test_refuse_dropped_generation_entries(&self) -> Result<()> {
+        crate::index_lifecycle::dropped::unadmit_fixture(self.lifecycle_test_writer_db()?).await
+    }
+
     fn lifecycle_test_writer(&self) -> Result<&crate::HelixWriter> {
         let HelixStorage::Writer(writer) = self.storage() else {
             return Err(HelixDbError::WriterModeRequired {
