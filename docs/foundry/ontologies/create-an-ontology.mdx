@@ -19,9 +19,9 @@ In **Ontologies**, the panel beside the sidebar lists the workspace's ontologies
 with its database and a dot for the status of its last load. The open ontology's row
 holds its pages: **Overview**, which also lists its schema versions and data loads;
 **Explorer**, its graph and records; **Connections**, the connections and documents it
-reads; **Review**, with how many items are open; and **Usage**, the use cases your
-agents record through the [Helix MCP](/foundry/agents/helix-mcp#workflows) and their
-runs.
+reads; [**Review**](/foundry/ontologies/review), with how many items are open; and
+**Usage**, the use cases your agents record through the
+[Helix MCP](/foundry/agents/helix-mcp#use-cases) and their runs.
 Owners and admins create an ontology with **+** in the panel's head. From eight
 ontologies, a filter finds one by name or database.
 
@@ -57,9 +57,9 @@ You don't name the ontology or choose its database. Foundry:
   soon as it is stored, without a review;
 - emails you when you can ask it questions, or if the draft or the load failed.
 
-If the agent asks questions while it drafts, the draft waits for your answers on the
-generation's page and Foundry emails you. Questions left unanswered for 7 days take the
-agent's recommended answer. If the workspace has spent this month's loads, or the draft
+If the agent needs answers only you can give, it asks on the generation's page, and
+Foundry emails you. The draft carries on once an owner or admin answers; questions left
+unanswered for 7 days take the agent's recommended answer. If the workspace has spent this month's loads, or the draft
 can't be loaded as it is, the draft waits for your review instead, and the email says
 so.
 
@@ -184,7 +184,7 @@ on from there:
 - A draft to review offers **Review** and **Make current**.
 - A current version not loaded yet offers **Load data**.
 - Once loaded, **Explore or ask** offers **Open the Explorer** and **Ask a question**,
-  which opens Founder on the ontology. Founder's answers come from the Analyst.
+  which opens [Founder](/foundry/ask/founder) on the ontology.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/ontology/overview-setup.png" alt="The Renewals overview with Set it up, 5 of 7 required steps done: its name, database, data, goal, draft and current version ticked, Load it open with Version 1 isn't loaded yet and Load data, and Set up with your agent" />
@@ -212,8 +212,8 @@ when the ontology was created. Its **N documents** button opens the ontology's
 version and [Data loads](/foundry/ontologies/load-data#manage-loads) the loads kept.
 
 Open the [Explorer](/foundry/explore/explorer) from **Explorer** under the open
-ontology in the Ontologies panel. **Founder** in the sidebar, whose answers come from
-the [Analyst](/foundry/ask/ask-questions), opens the ontology you last opened.
+ontology in the Ontologies panel. [Founder](/foundry/ask/founder) in the sidebar opens
+on the ontology you last opened, or the newest.
 
 ## Delete an ontology
 
@@ -239,5 +239,8 @@ the database's project sees the ontology without its database's details or conte
   </Card>
   <Card title="Upload documents" icon="file-lines" href="/foundry/data/documents">
     Add the files a load reads for names, facts and tables.
+  </Card>
+  <Card title="Ask Founder" icon="comments" href="/foundry/ask/founder">
+    Ask questions about a loaded ontology and open the sources of each answer.
   </Card>
 </CardGroup>

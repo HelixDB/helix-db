@@ -18,7 +18,7 @@ Foundry runs at [foundry.helix-db.com](https://foundry.helix-db.com), and your a
 reach it through the [Helix MCP](/foundry/agents/helix-mcp). Sign in with the account
 you use for Helix Cloud; your workspaces come with it.
 
-<Frame caption="The whole path in two minutes: synced data, a generated draft, a load, the Explorer and the Analyst.">
+<Frame caption="The whole path in two minutes: synced data, a generated draft, a load, the Explorer and a first answer.">
   <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/start-here/tour-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/start-here/tour.webm"></video>
 </Frame>
 
@@ -34,12 +34,12 @@ you use for Helix Cloud; your workspaces come with it.
 | **Ontology** | The types, links and rules that describe your data, bound to one Helix database. |
 | **Generation** | A request to Foundry's agent to draft a new version of the ontology from the tables, API sources and document sets you pick. |
 | **Version** | One draft of the ontology. Versions never change; you choose which one is current. |
-| **Load** | One write of the current version into the ontology's database: your tables, then the documents of its sets. A **refresh** is a load Foundry starts itself when the data changed. |
-| **Founder** | Foundry's assistant, in private chats. It answers from your ontologies' loads through the Analyst and prepares changes you confirm. Foundry opens on it. |
-| **Analyst** | The engine Founder asks: questions about a load in plain language, answered with the sources they came from. |
+| **Load** | One write of the current version into the ontology's database: your tables, then the documents of its sets. A **refresh**, which Foundry starts itself when the data changes, brings the current load up to date. What a load couldn't decide waits on the ontology's [Review](/foundry/ontologies/review) page. |
+| **Founder** | Foundry's assistant, in private chats. It answers from your ontologies' loads through the Analyst and prepares changes you confirm. Foundry opens on it, and ⌘J (Ctrl J on Windows and Linux) opens it beside any other page. See [Founder](/foundry/ask/founder). |
+| **Analyst** | The engine Founder asks: [questions](/foundry/ask/ask-questions) about a load in plain language, answered with the sources they came from. |
 | **Explorer** | The graph and records view of a load, read from the database with your session. |
-| **Dashboard** | Tiles of saved queries over an ontology's load, drawn as charts or tables. |
-| **Workflow** | Steps Foundry runs for you on a schedule, by hand, or when a sync, load, upload or draft finishes. Nothing runs until you approve it. |
+| **Dashboard** | Tiles of saved queries over your ontologies' loads, drawn as charts or tables. See [Dashboards](/foundry/automate/dashboards). |
+| **Workflow** | Steps Foundry runs for you on a schedule, by hand, or when a sync, load, upload or draft finishes. Nothing runs until you approve it. See [Workflows](/foundry/automate/workflows). |
 
 The work flows in one direction:
 
@@ -71,13 +71,16 @@ set it picks, to Foundry's agent, which drafts the version. A load sends your
 documents' text to AI models, which find the names and facts they hold and check them.
 Reading tables into a load uses no models. The Analyst sends your question, and what
 each step reads from the load, to AI models. Founder sends your messages, and what its
-tools read, to AI models, and so does each Founder step of a workflow.
+tools read, to AI models, and so does each Founder step of a workflow. Assessing your
+agents' [use case runs](/foundry/agents/helix-mcp#use-cases) sends each run's request,
+calls and answer to AI models too.
 
 By default these run on hosted providers through Helix, today Anthropic's Claude models.
 On Pro or Max, an owner can run them on the workspace's own Anthropic key instead; see
-[AI models](/foundry/workspace/ai-models). What loads and questions cost counts against
-the workspace's [monthly caps](/foundry/workspace/usage). Each generation attempt has a
-spending cap of its own.
+[AI models](/foundry/workspace/ai-models). What loads, questions and use case run
+assessments cost counts against the workspace's [monthly caps](/foundry/workspace/usage).
+Founder's turns and workflows' Founder steps have monthly budgets of their own, and each
+generation attempt has a spending cap of its own.
 
 ## Next steps
 
@@ -94,8 +97,11 @@ spending cap of its own.
   <Card title="Generate an ontology" icon="wand-magic-sparkles" href="/foundry/ontologies/generate-and-version">
     Draft types, links and mappings from your tables.
   </Card>
-  <Card title="Ask the Analyst" icon="comments" href="/foundry/ask/ask-questions">
-    Ask your data questions in plain language.
+  <Card title="Ask Founder" icon="comments" href="/foundry/ask/founder">
+    Ask your data questions in plain language, and confirm the changes it prepares.
+  </Card>
+  <Card title="Build a dashboard" icon="chart-line" href="/foundry/automate/dashboards">
+    Keep answers as charts and tables your team can open.
   </Card>
   <Card title="Use Foundry from your agent" icon="robot" href="/foundry/agents/helix-mcp">
     Connect Claude Code, Codex or another agent through the Helix MCP.

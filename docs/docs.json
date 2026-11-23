@@ -148,7 +148,8 @@
             "pages": [
               "foundry/ontologies/create-an-ontology",
               "foundry/ontologies/generate-and-version",
-              "foundry/ontologies/load-data"
+              "foundry/ontologies/load-data",
+              "foundry/ontologies/review"
             ]
           },
           {
@@ -159,9 +160,17 @@
             ]
           },
           {
-            "group": "Analyst",
+            "group": "Founder",
             "pages": [
+              "foundry/ask/founder",
               "foundry/ask/ask-questions"
+            ]
+          },
+          {
+            "group": "Dashboards and workflows",
+            "pages": [
+              "foundry/automate/dashboards",
+              "foundry/automate/workflows"
             ]
           },
           {
@@ -1294,6 +1303,18 @@
     {
       "source": "/rate-limits",
       "destination": "/database/helix-cloud/operate/limits"
+    },
+    {
+      "source": "/founder",
+      "destination": "/foundry/ask/founder"
+    },
+    {
+      "source": "/dashboards",
+      "destination": "/foundry/automate/dashboards"
+    },
+    {
+      "source": "/workflows",
+      "destination": "/foundry/automate/workflows"
     },
     {
       "source": "/rate-limiting",

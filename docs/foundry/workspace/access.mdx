@@ -18,7 +18,7 @@ key then reads only what those sources hold of each ontology.
 | A connection | Every table it syncs, now and later, and the document sets it writes |
 | A table | One table of a connection |
 | A document set | Its documents |
-| People enrichment | The profiles a load looked up |
+| People enrichment | The profiles a load looked up (Helix has paused lookups for now) |
 
 Sharing works on each ontology's current load: the entities, facts and documents that
 those sources filled. Someone who holds every source a load reads reads the whole
@@ -39,9 +39,10 @@ ontology. Someone who holds some of them reads only that part.
     **Part of it**, which names the sources they're missing. **Can't read yet** lists the
     other ontologies, each with the sources it reads.
 
-    Under **Permissions**, **Usage** is on by default. It lets them see the use cases of
-    what they read and record runs: every run of an ontology they read all of, otherwise
-    only the runs they started. A team with **Usage** off turns it off for its members.
+    Under **Permissions**, **Usage** is on by default. It lets them see the
+    [use cases](/foundry/agents/helix-mcp#use-cases) of what they read and record runs:
+    every run of an ontology they read all of, otherwise only the runs they started. A
+    team with **Usage** off turns it off for its members.
 
     <Frame>
       <img src="https://assets.helix-db.com/docs/foundry/workspace/access-sources.png" alt="The Sources dialog for a member: the General set ticked, and Customer contracts listed as part of it under Can read" />
@@ -62,9 +63,10 @@ recorded. Load it again.
 
 Giving a member sources restricts them. A restricted member:
 
-- sees only **Founder**, **Dashboards** (the pinned ones) and **Ontologies** in the
-  sidebar, and opens the Explorer from an ontology: no Connectors, Settings or search,
-  and only the theme and **Sign out** in the account menu;
+- sees only [Founder](/foundry/ask/founder), [Dashboards](/foundry/automate/dashboards)
+  (the pinned ones) and **Ontologies** in the sidebar, and opens the Explorer from an
+  ontology: no Connectors, Settings or search, and only the theme and **Sign out** in
+  the account menu;
 - sees only the ontologies their sources cover, and only what those sources hold of them;
 - asks Founder, which only reads and asks for them, and reads records, entities,
   documents and pinned dashboards, but changes nothing beyond their own questions,
@@ -159,7 +161,7 @@ lists who would stop reading what, and asks first.
 
 Someone reading through sources asks up to 10 questions an hour and spends up to $10 a
 month on questions. Their questions also count toward the workspace's own
-[limits](/foundry/reference/limits#analyst).
+[limits](/foundry/reference/limits#questions).
 
 Reading through sources also shows less than full access does:
 

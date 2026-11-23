@@ -108,13 +108,6 @@ next. Other failures, such as a draft the agent refused, fail at once. An ontolo
 one generation or version edit at a time, and a workspace starts at most 10 generations
 an hour. Version edits don't count toward that.
 
-The agent may stop to ask what only you can answer. The generation then shows **Needs
-answers** and lists its questions. Owners and admins answer them one at a time, or leave
-them to the agent, and it drafts on from the answers. If no one answers by the date
-shown (7 days after it asked), it takes its recommended answers. **Cancel generation**
-ends it without a draft, as **Cancelled**, and **Generate again** opens the form with
-the same choices. Members can read the questions.
-
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/ontology/generation-done.png" alt="A succeeded generation that drafted version 4, with Review version 4" />
 </Frame>
@@ -123,6 +116,20 @@ A generation's page shows its goal, its tables and its steps. Open it from its
 version's page, where the version is named for it, or from a failed generation's row in
 **Schema versions**. A failed generation offers **Try again**, which opens the form
 with the same goal, connectors and document sets.
+
+### When the agent asks you
+
+The agent may stop to ask what only you can answer. The generation then shows **Needs
+answers**, and the draft waits. Its questions show on the generation's page and on the
+ontology's overview, and in [Founder](/foundry/ask/founder)'s chat when Founder relays
+them, as it does for a draft it is building (there the button is **Send answers to the
+draft**). Owners and admins answer them one at a time: choose an option (the agent's
+suggestion is marked **Recommended**) or write their own words. **Skip** passes an
+optional question, and **Let the agent decide the rest** leaves the others to it. Then
+**Send answers**, and it drafts on from them. If no one answers by the date shown (7
+days after it asked), it takes its recommended answers. **Cancel generation**
+ends it without a draft, as **Cancelled**, and **Generate again** opens the form with
+the same choices. Members can read the questions.
 
 ## Schema versions
 
@@ -168,8 +175,8 @@ its **Edit** tab, which makes a new version from your edits:
    constraint**, write it as TOML, and select **Stage item**. Stage as many as you need.
 2. Select **Preview edits**. Foundry checks the edits and says what they would change,
    without storing a version.
-3. Select **Create version**, then **View new version**. Make it current and load it
-   to apply your edits.
+3. Select **Create version**. Once Foundry has checked the edits and saved the version,
+   select **Make current and load** to apply them, or **View version** to open it first.
 
 Edits cover document routes, the identifiers of a type, rules and constraints. A route
 that names a document set adds that set to the new version's reads, so an existing
@@ -206,5 +213,8 @@ current. Members see every generation and version, except
   </Card>
   <Card title="Upload documents" icon="file-lines" href="/foundry/data/documents">
     Put documents into sets for a version to read.
+  </Card>
+  <Card title="Ask Founder" icon="sparkles" href="/foundry/ask/founder">
+    Ask about what the loaded version holds.
   </Card>
 </CardGroup>

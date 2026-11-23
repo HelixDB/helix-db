@@ -205,6 +205,10 @@ and how it is read:
   documents in a set of the source's own, which loads read like any
   [document](/foundry/data/documents).
 
+A generation reads at most 50 tables and 20 document sets. A source read through
+structured mappings counts as one of the tables, and one read by entity extraction as one
+of the sets.
+
 Owners and admins choose the text field, here or in **Documents** on the source's page.
 Saving asks you to confirm and queues one full sync, and the field can't be changed while
 a sync of the source is running. Clearing it removes the source's pieces as documents at
@@ -221,7 +225,9 @@ the workspace's sources; past that, new pieces wait for next month. A load you s
 spends the [loads' budget](/foundry/workspace/usage) instead.
 
 When new pieces sync, ontologies that read the source
-[refresh by themselves](/foundry/ontologies/load-data#automatic-refreshes).
+[refresh by themselves](/foundry/ontologies/load-data#automatic-refreshes), at
+most once per the plan's interval. [Founder](/foundry/ask/founder) answers from
+the current load, so it sees new pieces once a refresh has written them.
 
 ## Limits
 

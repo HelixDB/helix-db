@@ -56,9 +56,10 @@ documents says how many and why: **Ready, N documents not read**.
   <img src="https://assets.helix-db.com/docs/foundry/ontology/load.png" alt="A ready, current load of version 3 with its summary, Review documents, Rule breaks and Open Explorer" />
 </Frame>
 
-When the load leaves items to review, **Review documents** opens the ontology's
-documents that need review. **Rule breaks** lists the records that break the version's
-constraints.
+When the load leaves items to review, **Review documents** opens the documents that
+need review on the ontology's **Connections** page; settle them on its
+[Review](/foundry/ontologies/review) page. **Rule breaks** lists the records that break
+the version's constraints.
 
 The newest load that finishes **Ready** becomes current. A **Partial** load that stopped
 at a spending cap becomes current only when the ontology has no current load. A
@@ -96,7 +97,8 @@ current load, at no cost. A replaced document arrives as a new one and is read a
 uploads are.
 
 Refreshes are on by default for every ontology, with no setting on the website or in the
-Helix MCP to turn them off.
+Helix MCP to turn them off. A [workflow](/foundry/automate/workflows) can also start a
+load, for example after every sync, or run when a load is ready.
 
 A refresh reads again only what changed: documents it read before, with the same text
 and models, cost nothing. When the month's
@@ -150,5 +152,11 @@ until the next month, and new uploads aren't read.
   </Card>
   <Card title="Records and entities" icon="table" href="/foundry/explore/records-and-entities">
     Read each type as a table.
+  </Card>
+  <Card title="Review" icon="list-check" href="/foundry/ontologies/review">
+    Settle what the load couldn't decide.
+  </Card>
+  <Card title="Ask Founder" icon="sparkles" href="/foundry/ask/founder">
+    Ask questions about the current load.
   </Card>
 </CardGroup>

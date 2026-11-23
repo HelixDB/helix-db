@@ -1,28 +1,32 @@
 ---
-title: "Ask Founder questions about your data"
-description: "Ask a Helix Foundry ontology's load questions in plain language with Founder, follow each step, read charts and tables, and open the records, rows and quotes its answers cite"
-sidebarTitle: "Founder"
+title: "Ask questions about your data"
+description: "Ask Founder questions about a Helix Foundry ontology's load in plain language, follow each step, read charts and tables, and open the records, rows and quotes its answers cite"
+sidebarTitle: "Ask questions"
 pageType: "Guide"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-**Founder**, Foundry's main page, answers questions about an ontology's load in plain
-language. It asks the data for you step by step, and its answer cites each record,
-table row, quote and rule it used, so you can open every one.
+Ask [Founder](/foundry/ask/founder), Foundry's main page, a question about your data
+in plain language. It asks the ontology's load for you step by step, and its answer
+cites each record, table row, quote and rule it used, so you can open every one. This
+page covers asking, reading an answer and the limits on questions. For Founder's chats,
+its dock, suggestions and the changes it can make, see [Founder](/foundry/ask/founder).
 
 <Frame caption="Ask a question, follow its steps, read the sourced answer, then follow up.">
   <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/ask/ask-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/ask/ask.webm"></video>
 </Frame>
 
-## Start a thread
+## Ask a question
 
 Foundry opens on Founder, and **Founder** in the sidebar comes back to it. It opens
 the ontology you last opened, or the newest; the **Ontology** picker at the top of the
 page opens another. A new chat asks what you want to know about the ontology, with the
 composer in the middle and, below it, suggestions in four tabs: **Questions**,
 **Dashboards**, **Ontologies** and **Workflows**. Select a card to put its prompt in the
-composer, then edit it or send it.
+composer, then edit it or send it. You can also ask from Founder's dock on any other page
+(<kbd>⌘</kbd> <kbd>J</kbd>, or <kbd>Ctrl</kbd> <kbd>J</kbd> on Windows and Linux); its
+answers show the same way.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/ask/new-thread.png" alt="A new Analyst thread: What do you want to know about Customer contracts?, the composer, two suggested questions, and the Load picker in the top bar" />
@@ -34,8 +38,8 @@ A question is at most 4,000 characters.
 
 Founder reads one load: the current one, unless you choose another in the **Load**
 picker in the top bar. A load can be asked about once it is **Ready** or **Partial**.
-While the ontology has no load, a new thread says **Nothing loaded yet** in place of the
-composer, with **Load data** or, while no version is current, **Finish setting up**.
+While the ontology has no load, a new chat says nothing is loaded yet: Founder can't
+answer questions about the data until it is, but it can help you load it.
 
 A workspace with no ontology opens on [Get started](/foundry/start-here/quickstart)
 instead. A [restricted member](/foundry/workspace/access) who holds no sources yet sees
@@ -61,23 +65,27 @@ sentence around the answer, but never rewrites it.
 - **Results** of its queries show by their shape: a count or a total as one figure,
   groups as bars (or a line over dates), rows as a table. **Chart** and **Table** switch
   a chart between the two. Tables sort by any column, link each record they name to its
-  page, and show their first rows, with **Show all … rows** for the rest.
+  page, and show their first rows, with **Show all … rows** for the rest. **Add to
+  dashboard**, on a chart or table in the answer, puts it on a
+  [dashboard](/foundry/automate/dashboards) as a tile. Members reading through shared
+  sources don't get it.
 
-While a question runs, **Cancel** stops it.
+While a question runs, **Cancel** under it stops it.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/ask/thread.png" alt="A thread asking Who signed the services agreement?, with its last steps, an answer citing eight sources, the follow-up composer, and two threads under Today" />
 </Frame>
 
-Follow up in the same thread: the composer at the bottom asks with the thread's earlier
-answers. A thread takes one question at a time, so a follow-up waits until the answer
-before it is ready.
+Follow up in the same chat: Founder keeps the conversation, so a follow-up can build on
+earlier answers. While Founder works, the composer's send button is **Stop**, which ends
+its turn.
 
 ## Threads
 
 The sidebar lists your chats with Founder under the sections, grouped **Today**,
 **Previous 7 days** and **Older**. **New chat** starts another. Below them, **Earlier
-questions** lists the ontology's questions from before Founder, read only; one still
+questions** lists the ontology's questions on their own, read only (a member reading
+through [shared sources](/foundry/workspace/access) sees only their own); one still
 being answered says **Answering…**. What questions have
 spent this month is under **Usage** in the [account menu](/foundry/workspace/usage).
 
@@ -111,7 +119,7 @@ On an entity's page, select **Ask about this** to start a new chat with "About
 | **Stopped at this question's limit** | The question used its budget, steps or time before it could answer. Ask something narrower. |
 | **It couldn't answer** | It stopped with an error, which it names. |
 | **An attempt failed. Helix will try again** | A passing failure; the question runs again by itself. |
-| **Waiting for this month's questions budget** | The month's budget can't hold what a question may spend. It runs once it can, or you can cancel it. |
+| **Waiting for this month's questions budget** | Questions already running hold what is left of the month's budget. It runs once the month can hold what a question may spend, or you can cancel it. |
 
 ## Limits and spending
 
@@ -127,11 +135,14 @@ within the same limits.
 | Questions running per workspace | 2; others wait, queued |
 | Questions per workspace, per hour | 30 |
 | Per workspace, per month | $15 |
-| Per restricted member | $10 a month and 10 questions an hour, within the workspace's |
+| Per member or agent key reading through [shared sources](/foundry/workspace/access) | $10 a month and 10 questions an hour, within the workspace's |
 | Question | 4,000 characters |
 
-Founder's own turns have a budget of their own, apart from questions'; when one runs
-out, Founder says which.
+A new question is refused once the hour's 30 are asked, or once the month's spend leaves
+less than a question's $0.50.
+
+Founder's own turns have a budget of their own, $30 a month apart from questions'; when
+one runs out, Founder says which. See [Limits](/foundry/reference/limits#founder).
 
 ## Who can ask
 
@@ -144,6 +155,12 @@ Founder only reads the load to answer; it never writes to the database.
 ## Next steps
 
 <CardGroup cols={2}>
+  <Card title="Founder" icon="comments" href="/foundry/ask/founder">
+    Chats, the dock, suggestions and the changes Founder makes.
+  </Card>
+  <Card title="Dashboards" icon="chart-line" href="/foundry/automate/dashboards">
+    Keep an answer's charts and tables on a dashboard.
+  </Card>
   <Card title="Explore the graph" icon="diagram-project" href="/foundry/explore/explorer">
     Search and expand what a load wrote.
   </Card>

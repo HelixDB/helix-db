@@ -1,0 +1,226 @@
+---
+title: "Workflows"
+description: "Have Helix Foundry run steps for you on a schedule or when a sync, load, upload or draft ends: syncs, loads, Founder's checks and emails, approved by you before they run"
+sidebarTitle: "Workflows"
+pageType: "Guide"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
+
+A workflow is a set of steps that [Foundry](/foundry/start-here/introduction) runs
+for you. It runs on a schedule, or when a sync, a load, an upload or a draft ends. Its
+steps can sync a connection, load an ontology, have Founder check your data, and email
+you what Founder found. A workflow runs as the person who made it, with only what they
+may do, and nothing runs until they approve its steps.
+
+**Workflows** is a section of the sidebar. Every member sees all the workspace's
+workflows and can create their own. Members limited to
+[source grants](/foundry/workspace/access) don't see any. Workflows are on every plan.
+
+<Note>
+  Workflows aren't [use cases](/foundry/agents/helix-mcp#use-cases). A use case is a
+  task your own agent records through the Helix MCP. A workflow is a set of steps that
+  Foundry runs itself, though its runs also show on the Usage page of each ontology it
+  uses ([see below](#how-much-ontologies-help)).
+</Note>
+
+## Create a workflow
+
+Select **New workflow** on the Workflows page. You can start in three ways:
+
+- **Describe it.** Under **What should happen?**, say in your own words when the
+  workflow starts and what it does. [Founder](/foundry/ask/founder) drafts the steps
+  and shows them as a card. Select **Create and turn on** on the card to save it and
+  approve exactly those steps. Below the composer are suggestions written for one of
+  your ontologies with a current version, or general examples when none has one.
+  Select a suggestion to put it in the composer. If several ontologies have a current
+  version, **Suggestions for** picks which one.
+- **Start from a template.** If the workspace has no workflows yet, the Workflows page
+  lists templates: **Weekly summary by email**, **Sync, then summarise**, **Load after
+  every sync**, **Check new documents** and **Report on each new load**. You can change
+  every step before it runs.
+- **Start from scratch.** You get only the trigger. Choose what starts the workflow,
+  then add steps.
+
+An agent with the [Helix MCP](/foundry/agents/helix-mcp#workflows) can create one too.
+It still waits for you to approve it in Foundry.
+
+## Triggers
+
+Each workflow has one trigger, the **When** step at the top of the canvas.
+
+| Trigger | Starts a run |
+| --- | --- |
+| **On a schedule** | Every hour at the minute past the hour you choose, every day at a time, or every week on a day at a time, in the time zone you choose |
+| **When a connection finishes syncing** | After a sync of one connection that succeeded, failed, or either |
+| **When a load of an ontology is ready** | After a load of one ontology finishes, fully or partly |
+| **When documents arrive in a set** | After documents land in one document set, whether uploaded or written by a sync |
+| **When a draft of an ontology ends** | After a generation of one ontology succeeds, fails, or either. Version edits don't count. |
+| **Only when I run it** | Never on its own. You run it from its page. |
+
+Foundry checks for finished work about every half minute. It starts a run a couple of
+minutes after the work ends. If several syncs or uploads end close together, they start
+one run.
+
+You can run any approved workflow by hand, whatever its trigger.
+
+## Steps
+
+After the trigger, add steps with **Add step** (or press `A`).
+
+| Step | Does |
+| --- | --- |
+| **Ask Founder** | Gives Founder an instruction of up to 2,000 characters and runs it as you, like a message you send Founder. Write it as you would ask a colleague. To branch on the result, ask a yes-or-no question, or ask how many. |
+| **Sync, load or refresh** | Syncs a connection, loads an ontology's current version, or refreshes the public snapshot of a published [dashboard](/foundry/automate/dashboards). The step waits for the sync or load to finish. |
+| **Check an answer or a count** | Shown as **If**. It reads the step just before it: Founder's yes or no, or a count. The count can be Founder's, the documents that arrived, or the rows a sync wrote. It then goes the **When met** way or the **Otherwise** way. |
+| **Email me** | Emails you what the Founder steps before it found, with a link to the run and any actions waiting for you. The subject is the workflow's name and the optional subject you set. Links are taken out of Founder's words. |
+
+A dashboard refresh only publishes the version of the dashboard that a person last
+published. Edits made since then are never published unattended. A load runs within
+the workspace's [load caps](/foundry/workspace/usage).
+
+### What Founder may do without asking
+
+An **Ask Founder** step has a list, **It may do these without asking you**. Tick up to
+10 syncs, loads or dashboard refreshes there. When Founder prepares one of those, it
+runs at once, as you. Anything else Founder prepares waits for you as a card on the
+run's page. You can **Run** it or **Dismiss** it.
+
+## Edit on the canvas
+
+A workflow's page opens on its **Editor** tab, with the steps on a canvas from top to
+bottom.
+
+- Drag a step to move it. Once the workflow is saved, its layout saves on its own, and
+  moving steps never needs a new approval.
+- Join two steps by dragging from the handle on one step to another. Steps only go
+  forward, so a join can't make a loop.
+- Select a step to change it in the inspector. Press `]` to show or hide the inspector.
+- Press `Backspace` or `Delete` to remove the selected step. **Tidy the layout**, on the
+  canvas toolbar, lays the steps out again.
+- **Outline** shows the steps as a list, for keyboards and screen readers. On a phone,
+  the outline is where you edit.
+
+Only a workflow's owner changes its steps. Other members see the canvas read only.
+The **Settings** tab holds the name, the description, the schedule's time zone, the
+approval and **Delete**.
+
+## Approve and go live
+
+Select **Review and save** to see the workflow in a sentence, with every step as it
+will run unattended. Then choose one of these:
+
+- **Save and turn on** saves the workflow and approves exactly these steps.
+- **Save, turn on later** saves it as **Needs approval**. When you're ready, turn on the
+  **Live** switch and select **Approve and go live**.
+
+Any change to the steps takes the workflow off until you approve it again. Changing
+the name or description, or moving steps, keeps the approval.
+
+Only the owner approves, and only in Foundry, never through an agent. A workflow an
+agent creates or changes waits for its owner. On a Founder card, your click is the
+approval: **Create and turn on**, or **Save** on a change to the steps, approves exactly
+the steps the card showed.
+
+### Pause and resume
+
+Turn **Live** off to pause a workflow. A run that's already going finishes. A paused
+workflow runs only when its owner runs it by hand. The owner can pause their workflow,
+and so can any owner or admin of the workspace. Only the owner resumes it, and its
+trigger then starts runs from that moment on.
+
+Foundry pauses a workflow by itself in two cases:
+
+- **Its runs fail 3 times in a row.** Foundry emails the owner with what the last run
+  said. Fix the cause, then resume the workflow. After each failed run, Foundry also
+  waits longer before the next run, up to a day.
+- **Its owner can no longer act in the workspace.**
+
+Deleting a workflow deletes its runs and stops a run that's still going. Nothing a run
+already did is undone. The owner can delete a workflow, and so can any owner or admin.
+
+## Runs
+
+**Run now** starts the approved steps at once and opens the run. Only the owner can run
+a workflow. The workflow must be approved, with no unsaved changes, and with no run
+still going.
+
+A workflow runs one run at a time:
+
+- if a schedule comes due while a run is still going, Foundry skips that run;
+- if a sync, load, upload or draft ends while a run is going, the new run waits for it.
+
+The **Runs** tab lists the runs, newest first. Open one to see its steps coloured on the
+canvas: what started the run, when it started, how long it took and what it cost. Each
+step shows how it went. A Founder step shows **What Founder reported**, and an **If**
+step shows which way it went. If a step fails, the steps after it don't run. To stop a
+run, select **Cancel run**. The owner can cancel a run, and so can any owner or admin.
+
+The owner, and the workspace's owners and admins, see what each step found and why a
+run failed. Other members see how far a run went and what it cost. A run's Founder
+steps share one conversation, which stays out of the owner's Founder threads. The
+actions those steps left waiting appear on the run's page, and only the owner can run
+them. Foundry keeps runs for 90 days after they end.
+
+The Workflows page sums up the runs of the last 7 or 30 days: **Runs**, **Succeeded**,
+**Failed**, **Waiting for someone** (actions their owners still have to run or
+dismiss) and **Spend**. Below that, it lists every workflow with its status (**Live**,
+**Paused**, **Paused after failures** or **Needs approval**), its runs, its last run and its last failed run.
+
+### How much ontologies help
+
+When a workflow's steps use an ontology, Foundry records each run on that ontology's
+**Usage** page and assesses how much the ontology helped. The assessment counts
+toward the month's [Run assessments](/foundry/workspace/usage) cap. The workflow's
+page shows the results under **How much its ontologies helped**.
+
+## Loops
+
+A workflow can't start itself again:
+
+- **Saving is refused** if a step would sync the connection its trigger waits for, or
+  load the ontology its trigger waits for. The same goes for syncing the connection
+  that writes the document set its trigger waits for.
+- **A run never starts its own workflow again.** A sync or load that a run started
+  doesn't start that workflow, or any workflow that led to that run.
+- **A chain stops after 3 workflows.** When workflows set each other off, the chain
+  ends after 3 in a row.
+
+A run held back by one of these rules shows as **Skipped**, with the reason.
+
+## Limits and budget
+
+| Limit | Value |
+| --- | --- |
+| Workflows per workspace | 50 |
+| Runs per workspace | 200 in any 24 hours. After that, a trigger's run is skipped and **Run now** is refused. Skipped runs don't count. |
+| Founder steps' spend per workspace, per month | $20, apart from Founder's own $30 |
+| Founder step | $0.50 each, with 2 running at once per workspace |
+| Steps per workflow | 50, the trigger included, and 100 joins |
+| Name | 120 characters |
+| Description | 1,000 characters |
+| **Email me** subject | 500 characters |
+| Failed runs in a row before a workflow pauses | 3 |
+| Runs kept | 90 days after they end |
+
+When the month's $20 is spent, Founder steps fail, and with them their runs, until the
+month starts again on the first (UTC). The suggestions on the New workflow page come
+out of Founder's own budget, not this one. See every cap in
+[Limits](/foundry/reference/limits#workflows).
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Founder" icon="message" href="/foundry/ask/founder">
+    Describe a workflow and let Founder set it up.
+  </Card>
+  <Card title="Dashboards" icon="chart-line" href="/foundry/automate/dashboards">
+    Keep a dashboard's public snapshot fresh.
+  </Card>
+  <Card title="Helix MCP" icon="plug" href="/foundry/agents/helix-mcp">
+    Manage workflows from your agent.
+  </Card>
+  <Card title="Ask questions" icon="comments" href="/foundry/ask/ask-questions">
+    How questions about a load are answered.
+  </Card>
+</CardGroup>

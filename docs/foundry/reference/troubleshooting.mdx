@@ -36,7 +36,7 @@ Find the message Foundry shows, then its cause and fix.
 | table … has more than 2000000 rows; choose fewer tables | A table is over the [row limit](/foundry/reference/limits#connections). For a database, edit the connection and leave the table out; for PostHog, shorten the event history. |
 | Syncs fail after a table changed | A selected database table was dropped or renamed. Edit the connection and test it again. |
 | A sync of this connector is already queued or running | Wait for it to finish before syncing, editing or deleting. |
-| **Connect** is off for S3 | The chosen tables are over the [20 GB a connection syncs](/foundry/reference/limits#connections). Choose fewer tables, or a narrower folder. |
+| **Connect** is off for S3 | The chosen tables are over the [20 GiB a connection syncs](/foundry/reference/limits#connections). Choose fewer tables, or a narrower folder. |
 | The tree shows its usual order and can't be rearranged | A newer version of Foundry arranged it. Reload the page. |
 
 ## API sources
@@ -78,9 +78,9 @@ Find the message Foundry shows, then its cause and fix.
 | --- | --- |
 | Retrying | An attempt failed for a passing reason and Foundry will try again; the page says why and when. Nothing to do. |
 | Failed | The generation failed for good. Open it from **Schema versions** and select **Try again** to reopen the form with the same goal, connectors and document sets; choosing fewer tables or a clearer goal helps. |
-| A generation reads at most 20 document sets | Untick a set to choose another. |
-| One generation covers at most 50 tables | Choose fewer connectors or sets: table files count as tables. |
-| A workspace may start 10 ontology generations an hour | Generations and version edits are capped per workspace. Try again later. |
+| A generation reads at most 20 document sets | Untick a set to choose another. An API source read by entity extraction counts as a set. |
+| One generation covers at most 50 tables | Choose fewer connectors, sets or API sources: table files, and API sources read as tables, count as tables. |
+| A workspace may start 10 ontology generations an hour | New generations are capped per workspace; version edits don't count. Try again later. |
 | Syncing… or Reading its files… you can continue once … | A connection you added is on its first sync, or an uploaded table file is still being read. Wait for it, or choose a source that's ready. |
 | … is used by …. Choose another. | A database holds one ontology. Choose another database, or create a new one. |
 | Making a version current is refused | Someone else made another version current at the same time. The page now shows it; make yours current again if you still want it. |
@@ -96,7 +96,7 @@ Find the message Foundry shows, then its cause and fix.
 | Partial, or Stopped early | The load stopped before reading every document. It reached the [spending cap](/foundry/ontologies/load-data#spending-and-limits), the workspace's own AI key was refused or ran out of quota, or the model left some unread. The load's page says which. What it read is in the database, and the documents it didn't reach are read later: after a cap, once it's current and the month has budget. |
 | The workspace has spent this month's $50.00 of loads | New loads are refused until next month. [Usage](/foundry/workspace/usage) shows the month's spend. |
 | The tables synced again during the load | A source changed under the load. Start a new load to write the new snapshot. |
-| A document needs review | The load couldn't settle something in it, such as an unknown or ambiguous name, a quote it couldn't verify, or a fact that conflicts with your tables. Open the document to see why, and [settle it](/foundry/explore/records-and-entities#settle-a-review). |
+| A document needs review | The load couldn't settle something in it, such as an unknown or ambiguous name, a quote it couldn't verify, or a fact that conflicts with your tables. Settle it on the ontology's [Review](/foundry/ontologies/review) page, or open the document to see why and [settle it there](/foundry/explore/records-and-entities#settle-a-review). |
 | The load reads no documents | Its version reads no document sets. Generate a version that picks some. |
 | Delete failed | Select **Retry delete** in the load's menu in **Data loads**. |
 
@@ -113,19 +113,22 @@ Find the message Foundry shows, then its cause and fix.
 | You can't read this ontology's database | Questions read the database a load wrote. Ask an owner or admin for **Query read** on its Helix project. |
 | This ontology can't answer that | What the load holds doesn't say. Select **Draft a new version with this** to generate a version that can. |
 | Stopped at this question's limit | It used a question's $0.50, 20 steps or 4 minutes. Ask something narrower. |
-| Waiting for this month's questions budget | The workspace's questions budget is spent. The question runs once the month allows it, or cancel it. |
+| Waiting for this month's questions budget | Questions already running hold the rest of the workspace's [questions budget](/foundry/reference/limits#questions). It runs once they finish, if the month still has room for it, or cancel it. |
+| The workspace has spent this month's $15.00 of questions | Less of the workspace's [questions budget](/foundry/reference/limits#questions) is left than one question may spend ($0.50). New questions, and ones still queued, are refused until next month. |
 | The workspace has asked 30 questions in the last hour | Try again later. |
 | You have asked 10 questions in the last hour, or You have spent this month's $10.00 of questions | You're restricted to shared sources, so you also have limits of your own: 10 questions an hour and $10 a month. Try again later. |
 | Too many questions have been asked here in the last hour, or This workspace's questions are used up for the month | The workspace's limit is reached. Try again later. |
 
 ## Founder and Workflows
 
+For how Founder works, see [Founder](/foundry/ask/founder).
+
 | Message or state | Cause and fix |
 | --- | --- |
 | You have sent 30 messages in the last hour | Founder takes 30 messages an hour from each person, apart from the limits on questions about the data. Try again later. |
 | The workspace has spent this month's $30.00 of Founder | Founder's monthly budget is spent. It's apart from questions' budget. Try again next month. |
 
-For what Workflows refuse, see [Limits](/foundry/reference/limits#workflows).
+For what Workflows refuse, see [Workflows](/foundry/automate/workflows) and [Limits](/foundry/reference/limits#workflows).
 
 ## AI models
 
@@ -153,7 +156,7 @@ For what Workflows refuse, see [Limits](/foundry/reference/limits#workflows).
 | A member sees only some ontologies, or part of one | They're restricted to the sources shared with them. Give them more under [Access](/foundry/workspace/access), or lift the restriction there. |
 | **Restricted** can't be turned off | They still hold sources, their own or a team's. Take those away first. |
 | Not shared with you | The sources shared with you don't cover all of this ontology's current load. Ask an owner or admin to share them under [Access](/foundry/workspace/access). |
-| An ontology shows **Load again to share** | Its current load was made before Foundry kept track of what each load reads. Load it again. |
+| An ontology shows **Load again to share** | Its current load holds something no source covers: it was made before Foundry kept track of what each load reads, or it applies a review decision whose documents weren't recorded. Load it again. |
 
 ## Next steps
 

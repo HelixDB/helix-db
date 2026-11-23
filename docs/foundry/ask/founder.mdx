@@ -1,0 +1,179 @@
+---
+title: "Work with Founder"
+description: "Chat with Founder, Helix Foundry's assistant: ask about your data and get cited answers, and have it prepare drafts, loads, dashboards and workflows that you run with a click"
+sidebarTitle: "Founder"
+pageType: "Guide"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
+
+**Founder** is [Foundry's](/foundry/start-here/introduction) assistant. Ask it about your data and it answers with cited
+sources. Ask it to do something, such as draft a version, load data or build a
+dashboard, and it prepares the change for you to run. Your chats with Founder are your
+own: no one else in the workspace sees them. The questions Founder asks your data for
+you are the ontology's, though: others who can read it see them, and their answers,
+under **Earlier questions**.
+
+## Where to find it
+
+- **Founder's page.** Foundry opens on Founder, the first section in the sidebar. It
+  works on one ontology at a time: the **Ontology** picker at the top opens another, and
+  the **Load** picker chooses the load it answers from. It starts on the current load.
+- **The dock.** On every other page, press <kbd>⌘</kbd> <kbd>J</kbd> (<kbd>Ctrl</kbd>
+  <kbd>J</kbd> on Windows and Linux), select **Founder** at the foot of the sidebar, or
+  choose **Open Founder** in the command palette. On a wide screen it opens as a column
+  right of the page and stays open as you move around. On a narrower screen it opens as
+  a drawer.
+
+The page and the dock share your chats: a chat you open on Founder's page is the one the
+dock shows on other pages.
+
+Each message also sends the page you're on, shown above the composer as a chip such as
+**Looking at: Customer contracts / v3 load**. Select the chip's **×** to leave the page
+out.
+
+## Chats
+
+**New chat**, at the top of the sidebar's threads, starts a chat. Your chats are listed
+under it, grouped **Today**, **Previous 7 days** and **Older**. In the dock, the menu
+with the chat's title switches chats, starts a **New thread** or deletes the open one
+(**Delete this thread**), along with the actions it prepared.
+
+A new chat asks what you want to know about the ontology. Under the composer,
+**Suggestions** offers prompts written for that ontology in up to four tabs:
+**Questions**, **Dashboards**, **Ontologies** and **Workflows**. Select a card to put its prompt in the
+composer. Nothing is sent until you send it.
+
+Write your message, then press <kbd>Enter</kbd> (<kbd>Shift</kbd> <kbd>Enter</kbd> adds
+a new line). A message is at most 4,000 characters. While Founder works, **Stop** ends
+its reply. You can send again once it has finished.
+
+**Earlier questions**, below your chats, lists the ontology's newest questions: earlier
+ones from before Founder, and those Founder or agents asked (a restricted member sees
+only their own). They are read only: to go on from one, ask Founder in a new chat.
+
+On an entity's page, **Ask about this** opens a new chat with "About &lt;name&gt;: "
+already in the composer.
+
+## How Founder answers
+
+For a question about your data, Founder asks the ontology's load for you. Its
+**Asked the data** step holds the answer, with numbered citations, charts and tables.
+Founder may add a sentence around it, but never rewrites it. **Open the full answer**
+opens it on a page of its own. [Read an answer](/foundry/ask/ask-questions) explains the
+steps, citations and results.
+
+Founder's other steps collapse to their names; open one to see what it read. One
+message asks the data at most 3 questions, and each of its model calls runs at most 8
+tool calls.
+
+From a chart or table in an answer, **Add to dashboard** adds it as a tile to a
+dashboard you can change, or to a new one. See [Dashboards](/foundry/automate/dashboards).
+
+When Founder needs more from you, it asks under **Questions for you**: up to four
+questions, then **Send answers**. When a draft is waiting on its agent's questions,
+Founder can bring them into the chat. **Send answers to the draft** sends your answers
+straight to the generation, as answering on its page does
+([When the agent asks you](/foundry/ontologies/generate-and-version#when-the-agent-asks-you)).
+
+To add a connection, Founder links to its form, such as **Connect Slack**. You enter
+credentials in Foundry's form, never in the chat.
+
+## Changes wait for your click
+
+Founder doesn't change your workspace by itself. It prepares each change as an action
+card: what it does, what it acts on, what to check, and the full request. The card's
+button names what it does, such as **Create**, **Generate**, **Make current**, **Load**
+or **Sync**. Nothing runs until you select it, and it runs as you.
+
+- **Dismiss** drops the card without running anything.
+- A card expires, and says when. **Refresh** prepares the same request again.
+- **Not named by you** means Founder chose what the card acts on. Check it before you
+  run it.
+- A chat holds at most 3 cards waiting for you.
+
+Founder can prepare these changes:
+
+| Area | Changes |
+| --- | --- |
+| Ontologies | Create an ontology, generate a draft, revise a version, make a version current |
+| Loads | Load, make another load current |
+| Data | Sync a connection, add the [sample company's](/foundry/start-here/sample-company) data, create, rename or describe a document set, move a document |
+| Review | Settle a [review](/foundry/ontologies/review) |
+| Dashboards | Create, change, pin, publish, unpublish or delete a dashboard |
+| Workflows | Create, change, run, pause, resume or delete a [workflow](/foundry/automate/workflows). The card shows the steps your click approves. |
+
+### New dashboards you ask for
+
+One change runs without a card. When your message has the word "dashboard" or
+"dashboards" in it and Founder makes a new dashboard, it makes it at once, as you,
+unpinned and unpublished. Its card reads **Made the dashboard "…"**, with **Open the
+dashboard** and **Undo**, which deletes it. Changing, pinning, publishing or deleting a
+dashboard is always a card.
+
+## Who can use it
+
+Everyone signed in to the workspace can chat with Founder. Agent keys can't; agents ask
+through the [Helix MCP](/foundry/agents/helix-mcp#ask-questions) instead.
+
+| Who | What Founder does for them |
+| --- | --- |
+| Owners and admins | Answers, and prepares every change above |
+| Members | Answers, and prepares creating, changing or deleting dashboards and workflows (not pinning or publishing). For anything else, it says where in Foundry an owner or admin does it. |
+| [Restricted members](/foundry/workspace/access#restricted-members) | Answers about the data shared with them, and changes nothing: no cards, no **Load** picker, no **Add to dashboard**. A chat shows only while they still hold every source it used. |
+
+Founder reads only what you can read. To answer questions about an ontology, you need
+to be able to read its database ([Members and roles](/foundry/workspace/members-and-roles#what-new-members-can-read)).
+
+## Limits
+
+Founder's replies have a budget of their own, apart from questions'.
+
+| Limit | Value |
+| --- | --- |
+| Per message | $0.50, 20 model calls and 4 minutes |
+| Message | 4,000 characters |
+| Messages per person, per hour | 30 |
+| Replies running per workspace | 2; others wait |
+| Spend per workspace, per month | $30 |
+| Cards waiting per chat | 3 |
+
+When a limit is reached:
+
+- A reply that reaches its message's step or time limit stops and says so. Ask it to go
+  on. One that reaches its $0.50 says it stopped at the message's spending cap.
+- After 30 messages in an hour, new messages are refused until the hour has passed.
+- Once the month's spend leaves less than one message's $0.50, new messages are refused
+  until the first of next month (UTC).
+- The questions Founder asks for you count toward the
+  [questions' limits](/foundry/reference/limits#questions), not Founder's. When those are
+  spent, Founder says that questions were refused.
+
+Founder's spend isn't in [Usage](/foundry/workspace/usage). Every limit is on
+[Limits](/foundry/reference/limits).
+
+## AI models
+
+Founder runs on the workspace's **Questions** model in
+[Settings › AI models](/foundry/workspace/ai-models): the default, or the workspace's own
+Anthropic key on Pro or Max. It sends your messages, and what its steps read, to that
+model. Founder needs a model that calls tools. If the model chosen can't, the composer
+says so and Founder can't send until an owner changes it in Settings › AI models; drafts,
+loads and questions still run.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Read an answer" icon="comments" href="/foundry/ask/ask-questions">
+    Follow the steps, citations and results of an answer.
+  </Card>
+  <Card title="Dashboards" icon="gauge" href="/foundry/automate/dashboards">
+    Keep answers' charts and tables as tiles.
+  </Card>
+  <Card title="Workflows" icon="bolt" href="/foundry/automate/workflows">
+    Have Founder run on a schedule or after a sync.
+  </Card>
+  <Card title="Helix MCP" icon="plug" href="/foundry/agents/helix-mcp">
+    Ask and change Foundry from your own agent.
+  </Card>
+</CardGroup>

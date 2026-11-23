@@ -8,8 +8,9 @@ pageType: "Guide"
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
 Foundry uses AI models to draft ontologies, read documents into loads, check the facts
-it finds, answer questions, assess use case runs and run Founder. **Settings** → **AI models** says
-where they run. Owners choose; everyone else in the workspace sees the choice.
+it finds, answer questions, assess use case runs and run [Founder](/foundry/ask/founder),
+including the Founder steps of [workflows](/foundry/automate/workflows). **Settings** →
+**AI models** says where they run. Owners choose; everyone else in the workspace sees the choice.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/workspace/ai-models.png" alt="Settings, AI models: Choose where AI runs, with Default chosen and Claude, with your own API key" />
@@ -44,7 +45,7 @@ Anthropic API key instead, under the terms of its Anthropic account.
   </Step>
 </Steps>
 
-Founder runs on the Questions model. Once the test passes, Foundry checks that Founder can
+[Founder](/foundry/ask/founder) runs on the Questions model. Once the test passes, Foundry checks that Founder can
 run on that model. If it can't, the page says why: drafts, loads and questions still run
 on your key, but Founder needs a Questions model that calls tools.
 
@@ -77,5 +78,8 @@ Only owners. Admins and members see where the workspace's AI runs, except member
   </Card>
   <Card title="Plans and billing" icon="credit-card" href="/foundry/workspace/plans-and-billing">
     Upgrade to Pro or Max.
+  </Card>
+  <Card title="Founder" icon="comments" href="/foundry/ask/founder">
+    Ask, change and build with Founder.
   </Card>
 </CardGroup>

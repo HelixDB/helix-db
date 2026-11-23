@@ -13,7 +13,7 @@ The limits Foundry applies, by area. Each guide explains what happens when you r
 
 | Limit | Value |
 | --- | --- |
-| Scheduled syncs | Free once a day, Pro every hour, Max every 15 minutes |
+| Scheduled syncs | Free once a day, Pro every hour, Max every 15 minutes; PostHog once a day on every plan |
 | Rows per table | 2,000,000, and 2 GiB |
 | One sync attempt | 2 hours |
 | Attempts per sync | 3 |
@@ -52,9 +52,9 @@ The limits Foundry applies, by area. Each guide explains what happens when you r
 
 | Limit | Value |
 | --- | --- |
-| File types | `.md`, `.markdown`, `.mdx`, `.txt`, `.pdf`, `.csv`, `.tsv`, `.json`, `.jsonl`, `.ndjson`, `.parquet` |
+| File types | `.md`, `.markdown`, `.mdx`, `.txt`, `.vtt`, `.pdf`, `.csv`, `.tsv`, `.json`, `.jsonl`, `.ndjson`, `.parquet` |
 | Formats ontologies read | All of them: text and PDFs for names and facts, table files as tables |
-| Markdown, MDX and text | 1 byte to 1 MiB |
+| Markdown, MDX, text and WebVTT | 1 byte to 1 MiB |
 | PDF | 3 MiB and 150 pages; its text at most 1 MiB. Scanned PDFs have no text to read. |
 | CSV, TSV, JSON, JSONL and Parquet | 3 MiB; up to 1,000 columns and 1 MiB per row or line |
 | Uploaded documents per workspace | 200; connections' documents don't count |
@@ -68,14 +68,14 @@ The limits Foundry applies, by area. Each guide explains what happens when you r
 | Limit | Value |
 | --- | --- |
 | Goal | 2,000 characters |
-| Tables per generation | 50, synced tables and table files together |
-| Document sets per generation | 20 |
+| Tables per generation | 50: synced tables, table files and API sources read through structured mappings together |
+| Document sets per generation | 20; each API source read by entity extraction counts as one |
 | Documents the agent reads | Up to 5 of the newest in each set |
 | Attempts per generation | 3 |
 | Spend per attempt | $5 |
 | Monthly spend cap | None; not shown in [Usage](/foundry/workspace/usage#generations) |
 | Generations running per ontology | 1 |
-| Generations and version edits per workspace | 10 an hour |
+| Generations per workspace | 10 an hour; version edits don't count |
 
 ## Loads
 
@@ -89,7 +89,7 @@ The limits Foundry applies, by area. Each guide explains what happens when you r
 
 ## Questions
 
-Questions Founder asks for you, and those asked through the Helix MCP's `helix_foundry_ask`.
+[Questions](/foundry/ask/ask-questions) Founder asks for you, and those asked through the Helix MCP's `helix_foundry_ask`.
 
 | Limit | Value |
 | --- | --- |
@@ -97,11 +97,13 @@ Questions Founder asks for you, and those asked through the Helix MCP's `helix_f
 | Question | 4,000 characters |
 | Questions running per workspace | 2 |
 | Questions per workspace, per hour | 30 |
-| Spend per workspace, per month | $15, apart from loads' |
+| Spend per workspace, per month | $15, apart from loads'; a question is refused once less than $0.50 is left |
 | Questions per member or agent key reading through [sources](/foundry/workspace/access), per hour | 10 |
 | Spend per member or agent key reading through sources, per month | $10 |
 
 ## Founder
+
+[Founder](/foundry/ask/founder)'s own turns, apart from the questions it asks.
 
 | Limit | Value |
 | --- | --- |
@@ -114,11 +116,15 @@ Questions Founder asks for you, and those asked through the Helix MCP's `helix_f
 
 ## Use cases
 
+Your agents' [use case runs](/foundry/agents/helix-mcp#use-cases), assessed on each ontology's **Usage** page.
+
 | Limit | Value |
 | --- | --- |
-| Assessing use cases' runs, spend per workspace, per month | $20 |
+| Run assessments, spend per workspace, per month | $20; a run that finishes once the month's spend is within $1 of it isn't assessed |
 
 ## Workflows
+
+See [Workflows](/foundry/automate/workflows).
 
 | Limit | Value |
 | --- | --- |
@@ -129,6 +135,8 @@ Questions Founder asks for you, and those asked through the Helix MCP's `helix_f
 | Failed runs in a row before a workflow pauses | 3 |
 
 ## Dashboards
+
+See [Dashboards](/foundry/automate/dashboards).
 
 | Limit | Value |
 | --- | --- |

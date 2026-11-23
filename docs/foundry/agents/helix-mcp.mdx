@@ -64,7 +64,9 @@ npx skills add HelixDB/skills --skill helix-foundry-onboarding
 On a new workspace's **Get started** page, under **Or start with your own**, **Set up
 with your agent** is chosen first: **Copy prompt** copies a prompt for Claude Code, Codex
 or another agent with the Helix MCP. **Set up with your agent** on an unfinished
-ontology's overview does the same from where that ontology stands.
+ontology's overview does the same from where that ontology stands. With no workspace or
+account yet, tell your agent `setup https://foundry.new`, as the
+[quickstart](/foundry/start-here/quickstart) shows.
 
 The prompt says how to connect the MCP, where setup stands and the steps left, and has
 the agent follow the `helix-foundry-onboarding` skill if it has it. The agent asks you
@@ -82,7 +84,7 @@ before each change it makes.
 | `helix_foundry_get_context` | An ontology's schema and the example questions it answers, for the current load's version |
 | `helix_foundry_get_version`, `helix_foundry_get_generation` | A version's definition, and a generation's goal, sources and outcome |
 | `helix_foundry_get_load`, `helix_foundry_read_graph` | A load, and what it wrote: up to 20 graph reads per call |
-| `helix_foundry_list_documents`, `helix_foundry_list_review_decisions` | The documents an ontology reads, and the review decisions settled on them |
+| `helix_foundry_list_documents`, `helix_foundry_list_review_decisions` | The documents an ontology reads, and the review decisions people settled on it |
 | `helix_foundry_list_reviews` | The current load's reviews, which `settle_review` settles |
 | `helix_foundry_list_connectors`, `helix_foundry_list_connector_kinds`, `helix_foundry_get_sync` | The workspace's connections with their newest sync, one sync's status, and the kinds of source it can add, with which its plan includes |
 | `helix_foundry_list_dashboards`, `helix_foundry_get_dashboard`, `helix_foundry_preview_dashboard_tile` | The workspace's dashboards, one dashboard's tiles, and what a tile would show before it is saved |
@@ -90,17 +92,20 @@ before each change it makes.
 | `helix_foundry_recall` | The notes sent to an API source, newest first or by keyword: see [Agent memory](/foundry/agents/agent-memory) |
 | `helix_foundry_read_guide` | Foundry's own guide to these tools |
 
-Reading a load, through the graph or through the Analyst, needs **Query read** on the
+Reading a load, through the graph or through questions, needs **Query read** on the
 database's Helix project, as on the website.
 
 ## Ask questions
 
-`helix_foundry_ask` asks an ontology's load a question in plain language, as
-the [Analyst](/foundry/ask/ask-questions) does, and waits up to 25 seconds for the answer. A
+`helix_foundry_ask` asks an ontology's load a [question](/foundry/ask/ask-questions) in
+plain language, as [Founder](/foundry/ask/founder) does, and waits up to 25 seconds for the answer. A
 longer question carries on: the agent follows it with `helix_foundry_get_question`, which
 waits up to 25 seconds each call, and stops it with `helix_foundry_cancel_question`. `helix_foundry_list_questions` lists the ontology's
 questions. Questions asked through the MCP count against the same hourly limit and
-monthly budget as the Analyst's.
+monthly budget as those Founder asks.
+
+In a client that draws MCP Apps, the answer shows as a card with its charts and tables,
+and a link to the question in Foundry. Other clients get the answer as text.
 
 ## Changes, with a confirmation
 
@@ -118,13 +123,13 @@ are about to do and ask before they execute it.
 | `set_current_version` | Makes a version current |
 | `create_load`, `set_current_load` | Loads a version, or makes another load current |
 | `sync_connector` | Syncs a connection now |
-| `create_event_source` | Creates an [API source](/foundry/data/api-sources) |
+| `create_event_source` | Creates an [API source](/foundry/data/api-sources), with an optional text field for extraction to read |
 | `upload_document` | Starts a document upload; the agent sends the file, then completes it with `helix_foundry_complete_document_upload` |
 | `create_document_set`, `update_document_set`, `move_document` | Makes, renames or describes a document set, or moves a document to another set |
-| `settle_review` | Settles a load's review, as on an entity's page |
+| `settle_review` | Settles one of the current load's reviews, as on the website: see [Review](/foundry/ontologies/review) |
 | `add_sample_data` | Adds the Acme Corp sample company's connection and documents, for an ontology generated with the sample |
 | `answer_generation_questions` | Answers the questions a generation waits on, which `helix_foundry_get_generation` lists; the agent asks you, never answers for you |
-| `create_dashboard`, `update_dashboard`, `delete_dashboard` | Makes, changes or deletes a dashboard. Any member can make one and change or delete their own; owners and admins any. |
+| `create_dashboard`, `update_dashboard`, `delete_dashboard` | Makes, changes or deletes a [dashboard](/foundry/automate/dashboards). Any member except a [restricted member](/foundry/workspace/access#restricted-members) can make one, change their own while it isn't pinned, and delete it while it is neither pinned nor published; owners and admins any. |
 | `pin_dashboard`, `publish_dashboard`, `unpublish_dashboard` | Pins a dashboard in every member's sidebar, or publishes or removes its public snapshot link. Owners and admins only. |
 
 A change is refused for the same reasons as on the website: your role, the database's
@@ -152,12 +157,15 @@ uses AI models and counts toward the month's
 
 ## Workflows
 
-A workflow runs steps for you on a trigger, as the person who made it. Your agent reads
+A [workflow](/foundry/automate/workflows) runs steps for you on a trigger, as the person
+who made it. Your agent reads
 them with `helix_foundry_list_workflows`, `helix_foundry_get_workflow`,
 `helix_foundry_list_workflow_runs` and `helix_foundry_get_workflow_run`. It can create,
 update, pause, resume, run or delete one through the prepare and execute calls
 (`create_workflow`, `update_workflow`, `pause_workflow`, `resume_workflow`,
-`run_workflow`, `delete_workflow`). Any member can do this for their own workflows. A
+`run_workflow`, `delete_workflow`). Any member can do this for their own workflows, except members limited to
+[source grants](/foundry/workspace/access), and owners and admins can also
+pause or delete anyone's. A
 workflow the agent creates, or whose steps it changes, runs only after its owner
 approves it in Foundry.
 
@@ -217,7 +225,10 @@ goes wrong. Each caller can send 20 an hour, of up to 4,096 bytes each.
   <Card title="Agent memory" icon="brain" href="/foundry/agents/agent-memory">
     Have your agent remember in an API source and recall it later.
   </Card>
-  <Card title="Ask the Analyst" icon="comments" href="/foundry/ask/ask-questions">
-    What the Analyst reads, and its limits.
+  <Card title="Ask questions" icon="comments" href="/foundry/ask/ask-questions">
+    How questions are answered, and their limits.
+  </Card>
+  <Card title="Workflows" icon="bolt" href="/foundry/automate/workflows">
+    Run steps on a schedule or when something happens, as you.
   </Card>
 </CardGroup>

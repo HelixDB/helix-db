@@ -10,8 +10,8 @@ pageType: "Guide"
 An [API source](/foundry/data/api-sources) with a text field can be your agent's memory.
 The agent sends what it learns as notes with `helix_foundry_send_pieces`, and reads
 them back with `helix_foundry_recall`, in this session or a later one. Ontologies that
-read the source turn the notes into entities and facts, so the Analyst and other agents
-can use them too.
+read the source turn the notes into entities and facts, so [Founder](/foundry/ask/founder)
+and other agents can use them too.
 
 A note can be recalled as soon as it is sent. It doesn't have to wait for a sync or a
 load.
@@ -21,7 +21,7 @@ load.
 <Steps>
   <Step title="Create an API source">
     Owners and admins create one: in **Connectors**, select **Add data**, then **API
-    source**. Name it, such as "Agent memory", and describe what its notes hold:
+    source** under **From your app or agent**. Name it, such as "Agent memory", and describe what its notes hold:
     Foundry's agent reads the description when it drafts an ontology from the source.
     An agent can also create one with the MCP's `create_event_source` operation
     (`helix_foundry_prepare_operation`, then `helix_foundry_execute_operation` once
@@ -30,8 +30,8 @@ load.
 
   <Step title="Choose its text field">
     The text field is the top-level field holding each note's text, such as `text`.
-    Recall needs one. Owners and admins choose it on the source's page, under **Text
-    field**: a field its pieces have, or **Another field…** by name before any arrive.
+    Recall needs one. Owners and admins choose it in **Documents** on the source's page,
+    under **Text field**: a field its pieces have, or **Another field…** by name before any arrive.
     With a text field, the source's newest 500 notes also become documents, which an
     ontology reading them by [entity extraction](/foundry/data/api-sources#how-ontologies-read-it)
     spends about 1 cent a note on. Extraction no person started spends at most $5 a
@@ -95,8 +95,9 @@ text holds, so narrow the query, or more than 100 sends are still waiting to syn
 ask again in a minute.
 
 To ask what the notes add up to, such as every customer billed in GBP, load an
-ontology that reads the source by entity extraction, then ask it with
-`helix_foundry_ask` or read its graph with `helix_foundry_read_graph`.
+ontology that reads the source by entity extraction, then ask
+[Founder](/foundry/ask/founder), ask it with `helix_foundry_ask` or read its graph with
+`helix_foundry_read_graph`.
 
 ## Who can recall
 

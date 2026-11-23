@@ -47,13 +47,19 @@ Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickst
 - [Create an ontology](https://docs.helix-db.com/foundry/ontologies/create-an-ontology): Create a Helix Foundry workspace's first ontology, which Foundry names, drafts and loads for you, or another one step by step on an existing or new Helix database, and read its overview — Page type: Guide
 - [Generate and version an ontology](https://docs.helix-db.com/foundry/ontologies/generate-and-version): Ask Helix Foundry's agent to draft an ontology from your synced tables, API sources and document sets, review each version, edit it, and choose the current one — Page type: Guide
 - [Load data into a Helix database](https://docs.helix-db.com/foundry/ontologies/load-data): Write an ontology's current version, your synced tables and your documents into its Helix database, and manage its loads — Page type: Guide
+- [Review what a load couldn't decide](https://docs.helix-db.com/foundry/ontologies/review): Work through the held claims, conflicting values and unlinked names of a Helix Foundry ontology's current load on its Review page, and manage the decisions you save — Page type: Guide
 
 ## Explore
 - [Explore the graph](https://docs.helix-db.com/foundry/explore/explorer): Read what a Helix Foundry load wrote as a graph: search, expand, inspect, pick a load and compare two — Page type: Guide
 - [Records and entities](https://docs.helix-db.com/foundry/explore/records-and-entities): Read a Helix Foundry load as tables by type, open a record's links and sources, and see everything about one entity — Page type: Guide
 
-## Analyst
-- [Ask Founder questions about your data](https://docs.helix-db.com/foundry/ask/ask-questions): Ask a Helix Foundry ontology's load questions in plain language with Founder, follow each step, read charts and tables, and open the records, rows and quotes its answers cite — Page type: Guide
+## Founder
+- [Work with Founder](https://docs.helix-db.com/foundry/ask/founder): Chat with Founder, Helix Foundry's assistant: ask about your data and get cited answers, and have it prepare drafts, loads, dashboards and workflows that you run with a click — Page type: Guide
+- [Ask questions about your data](https://docs.helix-db.com/foundry/ask/ask-questions): Ask Founder questions about a Helix Foundry ontology's load in plain language, follow each step, read charts and tables, and open the records, rows and quotes its answers cite — Page type: Guide
+
+## Dashboards and workflows
+- [Dashboards](https://docs.helix-db.com/foundry/automate/dashboards): Build Helix Foundry dashboards of charts and tables over your ontologies' loads, from Founder or from an answer, pin them for the workspace, and share them inside it or at a public snapshot link — Page type: Guide
+- [Workflows](https://docs.helix-db.com/foundry/automate/workflows): Have Helix Foundry run steps for you on a schedule or when a sync, load, upload or draft ends: syncs, loads, Founder's checks and emails, approved by you before they run — Page type: Guide
 
 ## Agents
 - [Use Foundry from your agent](https://docs.helix-db.com/foundry/agents/helix-mcp): Connect Claude Code, Codex or another MCP client to the Helix MCP to read and ask Helix Foundry ontologies, and to set them up with a confirmation for most changes — Page type: Guide

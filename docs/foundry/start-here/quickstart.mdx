@@ -13,6 +13,14 @@ account or a PostgreSQL database, or documents such as contracts. To see Foundry
 before you connect anything, try the [sample company](/foundry/start-here/sample-company)
 first. Owners and admins can do every step.
 
+<Note>
+  Rather have your agent do it? Tell Claude Code, Codex or another agent
+  `setup https://foundry.new`. It connects the [Helix MCP](/foundry/agents/helix-mcp)
+  and signs you in. With no account yet, it can sign you up on a one-month Helix
+  sandbox, or you can sign up here first to get a workspace with a free Helix plan
+  for 12 months. Then it takes these steps with you.
+</Note>
+
 <Frame caption="The path end to end: synced data, a generated draft, a load, the Explorer and Founder.">
   <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/start-here/tour-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/start-here/tour.webm"></video>
 </Frame>
@@ -92,8 +100,8 @@ first. Owners and admins can do every step.
     [Create your first ontology](/foundry/ontologies/create-an-ontology#create-your-first-ontology).
     You can leave the generation's page meanwhile. If the agent needs answers only you
     can give, it asks on the generation's page, and Foundry emails you if you've left.
-    The draft carries on once an owner or admin answers, or with the agent's own best
-    guesses after a week.
+    The draft carries on once an owner or admin answers, or with the agent's
+    recommended answers after 7 days.
 
     <Frame>
       <img src="https://assets.helix-db.com/docs/foundry/ontology/new-ontology-review.png" alt="Your first ontology at its Review and create step, saying Foundry creates the ontology on a new Helix database, drafts it, makes it current, loads it and emails you, with Create and generate" />
@@ -110,7 +118,9 @@ first. Owners and admins can do every step.
     Once the load is ready, select **Founder** in the sidebar; Foundry also opens on it.
     Write a question, or pick a suggestion under the composer to fill it in, and select
     the arrow. Its answers cite the records, rows and quotes they came from, and the
-    conversation stays in the sidebar.
+    conversation stays in the sidebar. See [Founder](/foundry/ask/founder) for what
+    else it does, such as building [dashboards](/foundry/automate/dashboards), and
+    [Ask questions](/foundry/ask/ask-questions) for reading an answer.
 
     <Frame>
       <img src="https://assets.helix-db.com/docs/foundry/ask/thread.png" alt="A Founder conversation with an answer citing its sources, and the conversations in the sidebar" />
@@ -118,9 +128,9 @@ first. Owners and admins can do every step.
   </Step>
 
   <Step title="Explore it">
-    Select **Ontologies** in the sidebar, then **Explorer** under your ontology. The graph opens on a connected sample of the load. Search
-    with <kbd>/</kbd>, double-click a node to expand it, or switch to **Records** to read
-    each type as a table.
+    Select **Ontologies** in the sidebar, then **Explorer** under your ontology. The graph opens on a connected sample of the load. Jump to
+    a record with <kbd>/</kbd>, double-click a node to expand it, or switch to **Records** to read
+    each type as a table. See [Explorer](/foundry/explore/explorer).
 
     <Frame>
       <img src="https://assets.helix-db.com/docs/foundry/explore/explorer-node.png" alt="The Explorer with a customer selected and its properties and relationships in the inspector" />
@@ -134,7 +144,8 @@ instead: the email asks you to review it, make it current and load it. Open the
 ontology under **Ontologies** to see its types and links. To change it,
 [generate](/foundry/ontologies/generate-and-version#generate-a-draft) or
 [edit](/foundry/ontologies/generate-and-version#edit-a-version) a new version; you
-review every later version before you make it current.
+[review](/foundry/ontologies/generate-and-version#review-a-version) every later version
+before you make it current.
 
 Members can follow along read-only once an ontology exists. Asking and exploring also
 need **Query read** on the database's Helix project, or sources shared with them; see
@@ -143,6 +154,12 @@ need **Query read** on the database's Helix project, or sources shared with them
 ## Next steps
 
 <CardGroup cols={2}>
+  <Card title="Work with Founder" icon="comments" href="/foundry/ask/founder">
+    Ask questions, build dashboards and set up workflows in one place.
+  </Card>
+  <Card title="Build a dashboard" icon="chart-line" href="/foundry/automate/dashboards">
+    Keep the answers you check often on one page.
+  </Card>
   <Card title="Organise documents" icon="file-lines" href="/foundry/data/documents">
     Keep contracts and notes in sets for your ontologies to read.
   </Card>
