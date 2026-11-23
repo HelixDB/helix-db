@@ -288,7 +288,15 @@ impl<'db> Interpreter<'db> {
                         commit: None,
                         durable: Some(durable_started.elapsed()),
                     });
-                result.and_then(|value| durable.map(|()| value))
+                // Applied writes still need reconciliation if durability fails,
+                // even when a later statement failed too. Keep that error in
+                // the log without hiding the durability failure from the caller.
+                if let Err(error) = &result
+                    && let Err(durable_error) = &durable
+                {
+                    tracing::warn!(%error, %durable_error, "Index DDL execution and durability wait failed");
+                }
+                durable.and(result)
             }
             RequestExecutionMode::Read | RequestExecutionMode::GraphWrite => result,
         };
