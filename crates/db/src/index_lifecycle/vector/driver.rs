@@ -3625,6 +3625,20 @@ fn deterministic_layer(
     vector::select_layer(definition.ml(), &mut rng)
 }
 
+/// Most applied-state rows one validation step reads and deletes.
+///
+/// A validation step fences writers, so it must stay short, and it pays a
+/// fixed cost to start. What a row costs is the metadata read that proves its
+/// partition, which a step repeats only when the partition changes: the
+/// entity ceiling bounds those reads as it did when every row paid one, and
+/// this bounds the rows that follow a proven partition for the price of a
+/// delete. At this size an unpartitioned step takes tens of milliseconds and
+/// a build of a million entities validates in a few hundred steps. Under the
+/// entity ceiling of 512 alone it took 2,000 steps and 90 s, measured on S3:
+/// little beside a scan that inserts vectors one at a time for half an hour,
+/// and 40% of a build whose scan stores a graph linked in memory.
+const VALIDATION_STEP_ROWS: usize = 4096;
+
 #[allow(
     clippy::too_many_arguments,
     reason = "descriptor validation cross-checks the independent database, owner, record, policy, and cache identities"
@@ -3669,7 +3683,19 @@ async fn validate_descriptor<D: Distance>(
         let mut accounting = VectorBatchAccounting::new(progress.counters, limits);
         let mut cursor = progress.cursor.clone();
         let mut exhausted = true;
-        while accounting.can_read_another() {
+        // Applied-state rows are not decoded source entities: the step keeps
+        // only their keys. `validated` is the partition the previous row
+        // proved valid. Every read of a step sees one snapshot, so the next
+        // row of that partition proves nothing more: an unpartitioned
+        // generation reads its metadata once a step instead of once an
+        // entity. See [`VALIDATION_STEP_ROWS`] for the two bounds.
+        let mut validated = None::<TextPartition>;
+        let mut partition_checks = 0_usize;
+        loop {
+            if accounting.entities >= VALIDATION_STEP_ROWS {
+                exhausted = false;
+                break;
+            }
             let Some(row) = rows.next().await? else {
                 break;
             };
@@ -3686,16 +3712,24 @@ async fn validate_descriptor<D: Distance>(
             {
                 return Err(corruption("vector applied-state ownership mismatch"));
             }
-            validate_partition_metadata::<D>(
-                transaction,
-                scope,
-                operation,
-                record,
-                definition,
-                &partition,
-                Arc::clone(&simhasher_registry),
-            )
-            .await?;
+            if validated.as_ref() != Some(&partition) {
+                if partition_checks >= limits.max_entities().get() {
+                    exhausted = false;
+                    break;
+                }
+                partition_checks += 1;
+                validate_partition_metadata::<D>(
+                    transaction,
+                    scope,
+                    operation,
+                    record,
+                    definition,
+                    &partition,
+                    Arc::clone(&simhasher_registry),
+                )
+                .await?;
+                validated = Some(partition);
+            }
             let output_bytes = row.key.len() as u64;
             if !accounting.can_admit_input(input_bytes)
                 || !accounting.can_admit_output(VectorWriteMeasurement::zero(), 1, output_bytes)
@@ -3725,9 +3759,6 @@ async fn validate_descriptor<D: Distance>(
                 output_bytes,
             )?;
             cursor = Some(IndexCursor::try_new(row.key).map_err(operation_error)?);
-        }
-        if !accounting.can_read_another() {
-            exhausted = false;
         }
         // Validation revisits entities the scan and catch-up already counted:
         // its rows bound the batch and add bytes and operations, never entities.

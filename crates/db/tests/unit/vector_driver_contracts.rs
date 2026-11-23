@@ -2265,7 +2265,7 @@ pub(super) async fn descriptor_validation_batches_and_blocks() {
             ))
         )
     };
-    let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let mut transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
     // The applied-state lane blocks on a row no batch holds and stops at
     // the input ceiling after its first row.
     assert!(blocked(
@@ -2292,6 +2292,49 @@ pub(super) async fn descriptor_validation_batches_and_blocks() {
         )
         .await
     ));
+    // Every applied-state row of this fixture names another partition, and a
+    // partition costs a metadata read: the lane stops at the entity ceiling's
+    // worth of them, and at the output-operation ceiling after as many rows
+    // as it may delete.
+    let resumed_at = |result: Result<IndexOperationStepResult>| {
+        let Ok(IndexOperationStepResult::Progressed(IndexOperationProgress::VectorBuild(
+            VectorBuildProgress::Constructing(VectorBuildStage::ValidateDescriptor(
+                PrefixScanProgress {
+                    cursor: Some(cursor),
+                    ..
+                },
+            )),
+        ))) = result
+        else {
+            panic!("validation resumes at a cursor");
+        };
+        Bytes::copy_from_slice(cursor.as_bytes())
+    };
+    for (limits, last_deleted) in [
+        (batch_limits(1024, generous, 2, generous), &applied[1].0),
+        (batch_limits(1, generous, 1024, generous), &applied[0].0),
+        (batch_limits(2, generous, 1024, generous), &applied[1].0),
+    ] {
+        drop(transaction);
+        transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        assert_eq!(
+            &resumed_at(
+                validation_result(
+                    &db,
+                    &transaction,
+                    &operation,
+                    &record,
+                    &definition,
+                    None,
+                    limits
+                )
+                .await
+            ),
+            last_deleted
+        );
+    }
+    drop(transaction);
+    let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
     // The mapping lane resumes after its cursor: it blocks on a row no batch
     // holds, stops at the input ceiling after one row, and stops at the
     // entity ceiling.
@@ -2334,34 +2377,45 @@ pub(super) async fn descriptor_validation_batches_and_blocks() {
     ));
     drop(transaction);
 
-    // A mapped partition without physical metadata fails closed.
+    // A mapped partition without physical metadata fails closed, in the
+    // mapping lane and in the applied-state lane. The applied-state lane
+    // checks each partition it meets, not only the first: a batch that may
+    // delete two rows fails on the second entity, whose partition lost its
+    // metadata, before it would hand on a cursor.
     let missing = mapping_values(&db, scope, index_id, generation).await[1].physical_index_id;
-    let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
-    transaction
-        .delete(
-            DataKey::Data {
-                scope,
-                kind: DataKeyKind::Vector(VectorKey::IndexMetadata(VectorIndexMetadataKey::new(
-                    missing.get(),
-                ))),
-            }
-            .to_bytes(),
-        )
-        .unwrap();
-    assert!(matches!(
-        validation_result(
-            &db,
-            &transaction,
-            &operation,
-            &record,
-            &definition,
+    for (cursor, limits) in [
+        (
             Some(mappings[0].0.clone()),
             SearchIndexBackfillLimits::default().batch(),
-        )
-        .await,
-        Err(HelixDbError::IndexCatalogCorruption(_))
-    ));
-    drop(transaction);
+        ),
+        (None, batch_limits(1024, generous, 2, generous)),
+    ] {
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        transaction
+            .delete(
+                DataKey::Data {
+                    scope,
+                    kind: DataKeyKind::Vector(VectorKey::IndexMetadata(
+                        VectorIndexMetadataKey::new(missing.get()),
+                    )),
+                }
+                .to_bytes(),
+            )
+            .unwrap();
+        assert!(matches!(
+            validation_result(
+                &db,
+                &transaction,
+                &operation,
+                &record,
+                &definition,
+                cursor,
+                limits,
+            )
+            .await,
+            Err(HelixDbError::IndexCatalogCorruption(_))
+        ));
+    }
 
     // Applied state that is empty, or names another element kind, is not
     // this build's.
