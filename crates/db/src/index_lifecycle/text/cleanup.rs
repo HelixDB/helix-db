@@ -22,7 +22,7 @@ use crate::encoding::v2::keys as index_keys;
 use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::ManagedIndexKey;
 use crate::error::{HelixDbError, Result};
-use crate::index_lifecycle::outbox::IndexOperationStepResult;
+use crate::index_lifecycle::outbox::{CleanupEnd, IndexOperationStepResult};
 use crate::index_lifecycle::{
     dropped, BuildOperationOutcome, DroppedGenerationRows, IndexCursor, IndexOperationOutcome,
     IndexOperationProgress, IndexOperationRecord, NoCursorProgress, OperationCounters,
@@ -62,7 +62,7 @@ pub(super) async fn step_cleanup(
         // generation after the entry.
         TextCleanupProgress::Finalize(_) if dropped::admitted(transaction).await? => {
             Ok(IndexOperationStepResult::LeftToCompactions {
-                aborted: aborting,
+                ends: CleanupEnd::of(aborting),
                 rows: DroppedGenerationRows::Text,
             })
         }
@@ -609,9 +609,9 @@ mod tests {
                     matches!(
                         last,
                         IndexOperationStepResult::LeftToCompactions {
-                            aborted,
+                            ends,
                             rows: DroppedGenerationRows::Text,
-                        } if aborted == aborting
+                        } if ends == CleanupEnd::of(aborting)
                     ),
                     "{aborting} {begun:?} {last:?}"
                 );

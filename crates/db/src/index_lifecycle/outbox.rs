@@ -158,19 +158,51 @@ pub(crate) enum IndexOperationStepResult {
     /// The canonical lifecycle state and terminal operation commit together,
     /// durably.
     Completed(IndexOperationOutcome),
-    /// A drop, or with `aborted` the abort of a build, ends as
-    /// [`Self::Completed`] does, and the same commit stores the generation's
-    /// dropped-generation entry for `rows`: what is left of the generation
-    /// is for compactions to discard (see [`dropped`]).
+    /// The cleanup `ends` as [`Self::Completed`] does, and the same commit
+    /// stores the generation's dropped-generation entry for `rows`: what is
+    /// left of the generation is for compactions to discard (see
+    /// [`dropped`]).
     ///
     /// This is the only way an entry is written, and the function that
     /// commits it, [`execute_claimed_step_with_evidence`], is the one that
     /// tells the writer's registry: no path that ends a drop can store an
     /// entry and leave the registry untold.
     LeftToCompactions {
-        aborted: bool,
+        ends: CleanupEnd,
         rows: DroppedGenerationRows,
     },
+}
+
+/// Which operation a cleanup that leaves its rows to compactions ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CleanupEnd {
+    /// The drop of an index.
+    Drop,
+    /// The abort of a build.
+    BuildAbort,
+}
+
+impl CleanupEnd {
+    /// Every end a cleanup has.
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 2] = [Self::Drop, Self::BuildAbort];
+
+    /// The end of a cleanup that runs for a drop, or with `aborting` for the
+    /// abort of a build, as the drivers' cleanup steps are told.
+    pub(crate) const fn of(aborting: bool) -> Self {
+        match aborting {
+            true => Self::BuildAbort,
+            false => Self::Drop,
+        }
+    }
+
+    /// The outcome the operation completes with.
+    pub(crate) const fn outcome(self) -> IndexOperationOutcome {
+        match self {
+            Self::Drop => IndexOperationOutcome::DropSucceeded,
+            Self::BuildAbort => IndexOperationOutcome::Build(BuildOperationOutcome::Aborted),
+        }
+    }
 }
 
 /// Non-persisted vector planner/cache measurements from one bounded step.
@@ -1284,12 +1316,8 @@ pub(crate) async fn execute_claimed_step_with_evidence(
         // does; its commit also stores the generation's entry.
         let (step, left) = match step {
             IndexOperationStepResult::TransientFailure => return Ok(None),
-            IndexOperationStepResult::LeftToCompactions { aborted, rows } => (
-                IndexOperationStepResult::Completed(if aborted {
-                    IndexOperationOutcome::Build(BuildOperationOutcome::Aborted)
-                } else {
-                    IndexOperationOutcome::DropSucceeded
-                }),
+            IndexOperationStepResult::LeftToCompactions { ends, rows } => (
+                IndexOperationStepResult::Completed(ends.outcome()),
                 Some(rows),
             ),
             step @ (IndexOperationStepResult::Progressed(_)
@@ -4413,6 +4441,24 @@ mod tests {
         }
     }
 
+    /// A cleanup ends a drop or, when its driver is told it is aborting, the
+    /// abort of a build, and the operation completes with the outcome of
+    /// that end.
+    #[test]
+    fn a_cleanup_ends_a_drop_or_the_abort_of_a_build() {
+        assert_eq!(
+            [false, true].map(CleanupEnd::of),
+            [CleanupEnd::Drop, CleanupEnd::BuildAbort]
+        );
+        assert_eq!(
+            CleanupEnd::ALL.map(CleanupEnd::outcome),
+            [
+                IndexOperationOutcome::DropSucceeded,
+                IndexOperationOutcome::Build(BuildOperationOutcome::Aborted),
+            ]
+        );
+    }
+
     /// A step that leaves a generation's rows to compactions has the
     /// generation's entry stored by the commit that ends the operation, and
     /// that commit tells the writer's registry: this function is the one
@@ -4432,7 +4478,7 @@ mod tests {
         let scope = DataScope::LegacyUnscoped;
         let limits = SearchIndexBackfillLimits::default().batch();
         let left = IndexOperationStepResult::LeftToCompactions {
-            aborted: true,
+            ends: CleanupEnd::BuildAbort,
             rows: DroppedGenerationRows::Secondary,
         };
         let marker = |version| {

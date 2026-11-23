@@ -68,9 +68,9 @@ use crate::search::vector::{
 use super::vector_document;
 use super::{stored_vector_document, VectorIndexedDocument};
 use crate::index_lifecycle::outbox::{
-    CommittedOperationStep, CommittedStepState, IndexOperationDriver, IndexOperationStepExecution,
-    IndexOperationStepPermit, IndexOperationStepResult, PreparedIndexOperationStep, StepCounters,
-    StepResourceUsage, VectorPlanningUsage,
+    CleanupEnd, CommittedOperationStep, CommittedStepState, IndexOperationDriver,
+    IndexOperationStepExecution, IndexOperationStepPermit, IndexOperationStepResult,
+    PreparedIndexOperationStep, StepCounters, StepResourceUsage, VectorPlanningUsage,
 };
 use crate::index_lifecycle::queue::QueueTarget;
 use crate::index_lifecycle::work::{
@@ -2070,7 +2070,7 @@ async fn step_cleanup<D: Distance>(
             return Ok(VectorStepResult::ordinary(match rows {
                 Some(rows) if dropped::admitted(transaction).await? => {
                     IndexOperationStepResult::LeftToCompactions {
-                        aborted: aborting,
+                        ends: CleanupEnd::of(aborting),
                         rows,
                     }
                 }

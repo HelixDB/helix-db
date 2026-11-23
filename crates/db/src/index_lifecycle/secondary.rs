@@ -55,8 +55,9 @@ use crate::encoding::v2::values::{
 };
 use crate::error::{HelixDbError, Result, SecondaryIndexValueError};
 use crate::index_lifecycle::outbox::{
-    CommittedOperationStep, CommittedStepState, IndexOperationDriver, IndexOperationStepExecution,
-    IndexOperationStepPermit, IndexOperationStepResult, PreparedIndexOperationStep,
+    CleanupEnd, CommittedOperationStep, CommittedStepState, IndexOperationDriver,
+    IndexOperationStepExecution, IndexOperationStepPermit, IndexOperationStepResult,
+    PreparedIndexOperationStep,
 };
 use crate::index_lifecycle::repository::ReaderStorageCompatibility;
 use crate::index_lifecycle::work::{
@@ -3181,7 +3182,7 @@ async fn step_cleanup(
         // any other the steps before this one deleted every row.
         SecondaryCleanupProgress::Finalize(_) if dropped::admitted(transaction).await? => {
             return Ok(IndexOperationStepResult::LeftToCompactions {
-                aborted: aborting,
+                ends: CleanupEnd::of(aborting),
                 rows: DroppedGenerationRows::Secondary,
             });
         }
