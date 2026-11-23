@@ -123,6 +123,74 @@
     },
     "tabs": [
       {
+        "tab": "Helix Foundry",
+        "groups": [
+          {
+            "group": "Start Here",
+            "pages": [
+              "foundry/start-here/introduction",
+              "foundry/start-here/quickstart",
+              "foundry/start-here/sample-company",
+              "foundry/start-here/workspaces-and-navigation"
+            ]
+          },
+          {
+            "group": "Data",
+            "pages": [
+              "foundry/data/connect-data",
+              "foundry/data/documents",
+              "foundry/data/connectors",
+              "foundry/data/api-sources"
+            ]
+          },
+          {
+            "group": "Ontologies",
+            "pages": [
+              "foundry/ontologies/create-an-ontology",
+              "foundry/ontologies/generate-and-version",
+              "foundry/ontologies/load-data"
+            ]
+          },
+          {
+            "group": "Explore",
+            "pages": [
+              "foundry/explore/explorer",
+              "foundry/explore/records-and-entities"
+            ]
+          },
+          {
+            "group": "Analyst",
+            "pages": [
+              "foundry/ask/ask-questions"
+            ]
+          },
+          {
+            "group": "Agents",
+            "pages": [
+              "foundry/agents/helix-mcp",
+              "foundry/agents/agent-memory"
+            ]
+          },
+          {
+            "group": "Workspace",
+            "pages": [
+              "foundry/workspace/members-and-roles",
+              "foundry/workspace/access",
+              "foundry/workspace/plans-and-billing",
+              "foundry/workspace/ai-models",
+              "foundry/workspace/usage"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "foundry/reference/limits",
+              "foundry/reference/troubleshooting"
+            ]
+          }
+        ]
+      },
+      {
         "tab": "HelixDB",
         "groups": [
           {
@@ -191,103 +259,30 @@
                 ]
               }
             ]
-          }
-        ]
-      },
-      {
-        "tab": "Helix Cloud",
-        "groups": [
+          },
           {
-            "group": "Start Here",
+            "group": "Helix Cloud",
             "pages": [
               "database/helix-cloud/start-here/using-the-cloud",
               "database/helix-cloud/start-here/working-with-enterprise",
-              "database/helix-cloud/start-here/architecture"
-            ]
-          },
-          {
-            "group": "Connect and automate",
-            "pages": [
-              "database/helix-cloud/connect/mcp"
-            ]
-          },
-          {
-            "group": "Operate",
-            "pages": [
-              "database/helix-cloud/operate/security",
-              "database/helix-cloud/operate/multi-tenancy",
-              "database/helix-cloud/operate/guarantees",
-              "database/helix-cloud/operate/limits",
-              "database/helix-cloud/operate/tradeoffs",
-              "database/helix-cloud/operate/error-handling"
-            ]
-          }
-        ]
-      },
-      {
-        "tab": "Helix Foundry",
-        "groups": [
-          {
-            "group": "Start Here",
-            "pages": [
-              "foundry/start-here/introduction",
-              "foundry/start-here/quickstart",
-              "foundry/start-here/sample-company",
-              "foundry/start-here/workspaces-and-navigation"
-            ]
-          },
-          {
-            "group": "Data",
-            "pages": [
-              "foundry/data/connect-data",
-              "foundry/data/documents",
-              "foundry/data/connectors",
-              "foundry/data/api-sources"
-            ]
-          },
-          {
-            "group": "Ontologies",
-            "pages": [
-              "foundry/ontologies/create-an-ontology",
-              "foundry/ontologies/generate-and-version",
-              "foundry/ontologies/load-data"
-            ]
-          },
-          {
-            "group": "Explore",
-            "pages": [
-              "foundry/explore/explorer",
-              "foundry/explore/records-and-entities"
-            ]
-          },
-          {
-            "group": "Analyst",
-            "pages": [
-              "foundry/ask/ask-questions"
-            ]
-          },
-          {
-            "group": "Agents",
-            "pages": [
-              "foundry/agents/helix-mcp",
-              "foundry/agents/agent-memory"
-            ]
-          },
-          {
-            "group": "Workspace",
-            "pages": [
-              "foundry/workspace/members-and-roles",
-              "foundry/workspace/access",
-              "foundry/workspace/plans-and-billing",
-              "foundry/workspace/ai-models",
-              "foundry/workspace/usage"
-            ]
-          },
-          {
-            "group": "Reference",
-            "pages": [
-              "foundry/reference/limits",
-              "foundry/reference/troubleshooting"
+              "database/helix-cloud/start-here/architecture",
+              {
+                "group": "CONNECT AND AUTOMATE",
+                "pages": [
+                  "database/helix-cloud/connect/mcp"
+                ]
+              },
+              {
+                "group": "OPERATE",
+                "pages": [
+                  "database/helix-cloud/operate/security",
+                  "database/helix-cloud/operate/multi-tenancy",
+                  "database/helix-cloud/operate/guarantees",
+                  "database/helix-cloud/operate/limits",
+                  "database/helix-cloud/operate/tradeoffs",
+                  "database/helix-cloud/operate/error-handling"
+                ]
+              }
             ]
           }
         ]
@@ -1611,8 +1606,7 @@
     {
       "source": "/foundry/documents",
       "destination": "/foundry/data/documents"
-    }
-,
+    },
     {
       "source": "/foundry/access",
       "destination": "/foundry/workspace/access"
