@@ -322,6 +322,10 @@ impl StepResourceUsage {
 /// when the repository transaction that staged the step committed. Every
 /// failure, conflict, or transient release drops it with the step, so a driver
 /// can never observe state derived from uncommitted writes.
+#[allow(
+    clippy::enum_variant_names,
+    reason = "a variant names the family whose driver keeps the state, and only the vector driver keeps any so far"
+)]
 pub(crate) enum CommittedStepState {
     /// Vector planning cache that mirrors the physical rows this step commits.
     VectorBuild(Box<super::vector::OfferedVectorBuild>),

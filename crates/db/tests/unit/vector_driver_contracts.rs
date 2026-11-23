@@ -392,6 +392,7 @@ pub(super) async fn partitioned_drop_resumes_each_mapping_and_removes_every_name
         &generations[0],
         None,
         None,
+        PhysicalRows::All,
         IndexElementKind::Node,
         OperationCounters::default(),
         one_operation,
@@ -413,7 +414,8 @@ pub(super) async fn partitioned_drop_resumes_each_mapping_and_removes_every_name
         &transaction,
         &generations[1],
         None,
-        Some(&first_partition_row),
+        Some(&VectorCleanupResume::Physical(first_partition_row)),
+        PhysicalRows::All,
         IndexElementKind::Node,
         OperationCounters::default(),
         SearchIndexBackfillLimits::default().batch(),
@@ -2824,7 +2826,7 @@ pub(super) async fn partitioned_drop_resumes_within_each_namespace() {
             "the step deleted the second namespace's first rows"
         );
         assert!(
-            match &stepped.committed_state {
+            match &stepped.committed {
                 Some(CommittedStepState::VectorCleanup(VectorCleanupResume::Physical(row))) =>
                     !first_index.owns_cleanup_row(row),
                 Some(
@@ -2833,7 +2835,8 @@ pub(super) async fn partitioned_drop_resumes_within_each_namespace() {
                         | VectorCleanupResume::FirstPhysical { .. }
                         | VectorCleanupResume::FirstWork(_),
                     )
-                    | CommittedStepState::VectorBuild(_),
+                    | CommittedStepState::VectorBuild(_)
+                    | CommittedStepState::VectorBulkBuild(_),
                 ) => false,
                 None => true,
             },
@@ -3011,6 +3014,7 @@ pub(super) async fn delta_cleanup_resumes_past_deleted_rows_and_sweeps_before_fi
             &transaction,
             scope,
             &operation,
+            &[RecordKind::BuildDelta, RecordKind::AppliedState],
             resume.as_ref(),
             OperationCounters::default(),
             limits,

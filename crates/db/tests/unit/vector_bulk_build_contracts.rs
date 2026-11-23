@@ -2148,7 +2148,7 @@ async fn applied_state_deletes_resume_behind_the_last_deleted_key() {
     .await;
     let operation = read_operation(&db, SCOPE, build_id).await;
     let defaults = SearchIndexBackfillLimits::default().batch();
-    let foreign = Bytes::from_static(b"\xFFno row of the generation");
+    let foreign = VectorCleanupResume::Work(Bytes::from_static(b"\xFFno row of the generation"));
     let mut deleted = Vec::new();
     for (resume, limits) in [
         (None, operation_limits(8)),
@@ -2183,6 +2183,7 @@ async fn applied_state_deletes_resume_behind_the_last_deleted_key() {
     let (_, _, Some(eighth)) = &deleted[0] else {
         panic!("a batch that stops early hands on its last key");
     };
+    let eighth = VectorCleanupResume::Work(eighth.clone());
     assert_eq!((deleted[0].0, deleted[0].1), (8, false));
     assert!(deleted[1..]
         .iter()
@@ -2201,7 +2202,7 @@ async fn applied_state_deletes_resume_behind_the_last_deleted_key() {
         SCOPE,
         &operation,
         &[RecordKind::AppliedState],
-        Some(eighth),
+        Some(&eighth),
         OperationCounters::default(),
         defaults,
     )

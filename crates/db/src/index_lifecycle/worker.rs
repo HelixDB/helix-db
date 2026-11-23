@@ -2147,6 +2147,7 @@ mod tests {
                 capability.clone(),
                 capability,
                 Arc::new(NoCompaction),
+                Arc::default(),
             ),
             None,
             Duration::from_secs(3_600),
