@@ -25,10 +25,10 @@ pub use db::{
     DbConfig, EdgeEncoding, EdgeUpdatePolicy, HelixConfig, OpenAttribution, QueryTelemetry,
 };
 pub use definition_differences::{DefinitionDifference, NonEmptyDefinitionDifferences};
-pub use host_memory::memory_ceiling_bytes;
+pub use host_memory::{memory_ceiling_bytes, resident_anonymous_bytes};
 pub use index_lifecycle_throughput::{
     IndexLifecycleConcurrency, IndexLifecycleScanTuning, IndexLifecycleThroughputTuning,
-    IndexLifecycleThroughputTuningError,
+    IndexLifecycleThroughputTuningError, VectorBulkBuildMemory, VectorBulkBuildTuning,
 };
 pub use index_operation_queue::{
     IndexOperationQueueTuning, IndexOperationQueueTuningError, QueueLayout,

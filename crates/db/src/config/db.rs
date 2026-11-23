@@ -389,6 +389,54 @@ impl DbConfig {
         self.index_lifecycle_throughput
     }
 
+    /// Bytes this configuration lets the process hold in memory beside what
+    /// requests and index builds allocate: the SlateDB block and metadata
+    /// caches (the memory tier of a hybrid cache), the full-text split cache,
+    /// the vector memory stores, the vector build planning cache, and the
+    /// writes SlateDB buffers before it stalls writers
+    /// (`max_unflushed_bytes`).
+    ///
+    /// Each term is the limit its owner enforces, not what it holds now. The
+    /// write buffer is counted at its encoded size; the memtables of rows a
+    /// few bytes long hold up to three times that.
+    ///
+    /// ```
+    /// use db::DbConfig;
+    ///
+    /// let config = DbConfig::new();
+    /// let build_cache = config.search_index_backfill().vector_build_cache_bytes().get();
+    /// // 512 MiB of blocks, 128 MiB of metadata, 64 MiB of full-text splits,
+    /// // 256 MiB of vector stores and 1 GiB of unflushed writes.
+    /// assert_eq!(
+    ///     config.configured_memory_bytes(),
+    ///     ((512 + 128 + 64 + 256 + 1024) << 20) + build_cache
+    /// );
+    /// ```
+    pub fn configured_memory_bytes(&self) -> u64 {
+        let slate_cache = match self.cache.mode() {
+            CacheMode::VectorMemoryOnly => 0,
+            CacheMode::Memory { slate_db, .. } => slate_db
+                .block_bytes()
+                .saturating_add(slate_db.metadata_bytes()),
+            CacheMode::Hybrid { slate_db, .. } => slate_db.memory_bytes() as u64,
+        };
+        slate_cache
+            .saturating_add(self.cache.fts_memory_bytes())
+            .saturating_add(self.cache.vector_memory().budget().bytes().unwrap_or(0))
+            .saturating_add(self.search_index_backfill.vector_build_cache_bytes().get())
+            .saturating_add(self.write_buffer_bytes())
+    }
+
+    /// Encoded bytes of writes SlateDB buffers, in its WAL and memtables,
+    /// before it stalls writers (`max_unflushed_bytes`).
+    ///
+    /// ```
+    /// assert_eq!(db::DbConfig::new().write_buffer_bytes(), 1 << 30);
+    /// ```
+    pub fn write_buffer_bytes(&self) -> u64 {
+        self.slate.to_writer_settings(None).max_unflushed_bytes as u64
+    }
+
     /// Durable graph and catalog migration policy.
     pub const fn migrations(&self) -> MigrationTuning {
         self.migrations

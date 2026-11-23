@@ -36,6 +36,39 @@ pub fn memory_ceiling_bytes() -> Option<u64> {
     })
 }
 
+/// Returns the anonymous memory this process holds now, in bytes: its heap,
+/// stacks and other private pages, without file-backed pages the OS can drop.
+///
+/// It is what counts against [`memory_ceiling_bytes`] and cannot be
+/// reclaimed. Returns `None` where the platform does not report it; Linux
+/// does, through `/proc/self/status`.
+///
+/// # Examples
+///
+/// ```
+/// let resident = db::config::resident_anonymous_bytes();
+/// if cfg!(target_os = "linux") {
+///     assert!(resident.is_some_and(|bytes| bytes > 0));
+/// }
+/// ```
+pub fn resident_anonymous_bytes() -> Option<u64> {
+    rss_anon_bytes(&std::fs::read_to_string("/proc/self/status").ok()?)
+}
+
+/// Reads `RssAnon` from `status`, the content of `/proc/self/status`, whose
+/// lines are `Name:<whitespace>value kB`.
+fn rss_anon_bytes(status: &str) -> Option<u64> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("RssAnon:"))?
+        .trim()
+        .strip_suffix("kB")?
+        .trim()
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(1024)
+}
+
 /// Mount points of the cgroup hierarchies that expose memory limits.
 #[derive(Debug, PartialEq, Eq)]
 struct CgroupMounts {
@@ -164,6 +197,25 @@ mod tests {
             unified: root.to_path_buf(),
             memory: root.join("memory"),
         }
+    }
+
+    #[test]
+    fn resident_anonymous_memory_is_read_from_the_status_file() {
+        let status = "Name:\tserver\nVmRSS:\t  900 kB\nRssAnon:\t     512 kB\nRssFile:\t 388 kB\n";
+        assert_eq!(rss_anon_bytes(status), Some(512 * 1024));
+        assert_eq!(rss_anon_bytes("Name:\tserver\nVmRSS:\t900 kB\n"), None);
+        assert_eq!(
+            rss_anon_bytes("RssAnon:\t512\n"),
+            None,
+            "a unit is required"
+        );
+        assert_eq!(rss_anon_bytes("RssAnon:\tmany kB\n"), None);
+        assert_eq!(
+            rss_anon_bytes(&format!("RssAnon:\t{} kB\n", u64::MAX)),
+            None,
+            "a value past u64 bytes is not a size"
+        );
+        assert_eq!(rss_anon_bytes(""), None);
     }
 
     #[test]
