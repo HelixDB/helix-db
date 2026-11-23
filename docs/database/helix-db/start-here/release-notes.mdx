@@ -10,6 +10,18 @@ pageType: "Reference"
 <Update
   label="November 2026"
   rss={{
+    title: "Docker v0.0.18: the datetime string migration no longer stalls on text- or vector-indexed properties",
+    description: "Properties under a text or vector index keep their RFC 3339 strings, and a store whose conversion stalled on v0.0.17 resumes and completes"
+  }}
+>
+- **Fix: the datetime string migration no longer stalls on text- or vector-indexed properties.** On v0.0.17, converting an RFC 3339 property that a text or vector index covers failed its batch, and the job retried it forever, so later properties were never converted. Such a property now keeps its strings, and the server logs `datetime string migration leaves a property with RFC3339 strings as stored` with reason `TextIndexed` or `VectorIndexed`. The check runs again before every conversion batch, so an index created after detection is also respected.
+- **A store stuck on v0.0.17 resumes and completes** on upgrade, with the indexed property left as stored and the rest converted. Equality, range and unique indexes accept datetimes, so their properties are converted as before.
+- **Upgrading:** storage version 7 and the datetime conversion are as in v0.0.17. The migration's job record can now hold the new reasons, which v0.0.17 cannot read, so upgrade straight to v0.0.18 and do not go back to v0.0.17 once it has run.
+</Update>
+
+<Update
+  label="November 2026"
+  rss={{
     title: "Docker v0.0.17: typed datetimes, exact label index keys and Google Cloud Storage",
     description: "date_time parameters are stored as datetimes, stored RFC 3339 strings are converted in the background, label index rows are keyed by the exact label, and Google Cloud Storage is an object storage backend"
   }}
@@ -21,6 +33,7 @@ pageType: "Reference"
 - **Faster index builds:** a build no longer waits on the object store at each step or rescans deltas it has applied.
 - **Background migrations** are isolated, paced and back off independently. Responses report execution, commit and durable-wait time in `Server-Timing`.
 - **Upgrading:** this release changes stored data. The label copy publishes storage version 7, and the datetime conversion rewrites stored values. Both run on first open. After that, v0.0.16 and earlier cannot read the data, so take a backup before you upgrade if you may need to go back.
+- **Known issue:** the datetime conversion stalls on a property that a text or vector index covers, and later properties are never converted. Fixed in v0.0.18 (above); upgrade to it instead.
 </Update>
 
 <Update
