@@ -597,71 +597,67 @@ impl Retirer {
         match whole {
             // Every row of the table is the entry's.
             Some((_, entry)) => Ok(HashMap::from([(entry, sst.estimate_size())])),
-            None => self.held_in_part(sst, prefixes, ends, inside).await,
+            None => self.held_in_part(sst, prefixes, ends).await,
         }
     }
 
     /// [`Self::held`] for a table that reaches a prefix without lying wholly
-    /// under one: `ends` own a prefix the table starts or ends under, and
-    /// `inside` are the prefixes of other entries that sort strictly inside
-    /// it.
+    /// under one: `ends` own a prefix the table starts or ends under.
     ///
     /// The estimate counts, for each prefix found to have rows in the table,
-    /// the blocks those rows are in: exact to one block at each end. A
-    /// prefix with no row in the table adds nothing; neither does one whose
-    /// only rows are inside a block this had no need to read, because its
-    /// entry was already known to be held.
+    /// the blocks those rows are in: exact to one block at each end. Every
+    /// prefix the table can hold a row under is weighed, those of an entry
+    /// in `ends` included. A prefix with no row in the table adds nothing.
+    /// Neither does one whose rows all lie inside a block that begins with
+    /// another owner's row, when its entry is known to be held without it:
+    /// that block is not read, so the estimate is short by less than a block
+    /// for each such prefix, and never long.
     async fn held_in_part(
         &self,
         sst: &SsTableHandle,
         prefixes: &BTreeMap<Bytes, DroppedGeneration>,
         ends: HashSet<DroppedGeneration>,
-        inside: Vec<(&Bytes, DroppedGeneration)>,
     ) -> Result<HashMap<DroppedGeneration, u64>> {
         let first = sst.info.first_entry.as_deref();
         let last = sst.info.last_entry.as_deref();
         let file = self.tables.open_with_handle(sst.clone())?;
         let index = file.index().await?;
-        // Blocks `from..to` have an index key under the prefix.
-        let under = |prefix: &[u8]| {
-            (
-                index.partition_point(|start| start < prefix),
-                index.partition_point(|start| start < prefix || start.starts_with(prefix)),
-            )
-        };
         // The blocks each entry is known to have rows in, one range for
         // each of its prefixes found there.
         let mut blocks = HashMap::<DroppedGeneration, Vec<std::ops::Range<usize>>>::new();
-        // A prefix the table starts or ends under has rows in it.
-        for (prefix, entry) in overlapping(prefixes, first, last).filter(|(prefix, _)| {
-            first.is_some_and(|first| first.starts_with(prefix))
-                || last.is_some_and(|last| last.starts_with(prefix))
-        }) {
-            let (from, to) = under(prefix);
-            blocks
-                .entry(entry)
-                .or_default()
-                .push(blocks_under(from, to));
-        }
+        // The blocks only a read can decide, with the prefixes it decides.
         let mut in_blocks = BTreeMap::<usize, Vec<(&Bytes, DroppedGeneration)>>::new();
-        for (prefix, entry) in inside {
-            let (from, to) = under(prefix);
-            match held_by_index(prefix, from, index.get(from).map(|(_, start)| start)) {
+        for (prefix, entry) in overlapping(prefixes, first, last) {
+            // Blocks `from..to` have an index key under the prefix.
+            let from = index.partition_point(|start| start < &prefix[..]);
+            let to = index
+                .partition_point(|start| start < &prefix[..] || start.starts_with(&prefix[..]));
+            // A prefix the table starts or ends under has rows in it; of any
+            // other the block index says.
+            let starts_under = first.is_some_and(|first| first.starts_with(prefix));
+            let ends_under = last.is_some_and(|last| last.starts_with(prefix));
+            let rows = match starts_under || ends_under {
+                true => Held::Yes,
+                false => held_by_index(prefix, from, index.get(from).map(|(_, start)| start)),
+            };
+            match rows {
+                // The table's first row is in its first block, whatever
+                // shortened key indexes that block.
+                Held::Yes if starts_under => blocks.entry(entry).or_default().push(0..to.max(1)),
                 Held::Yes => blocks
                     .entry(entry)
                     .or_default()
                     .push(blocks_under(from, to)),
                 Held::No => {}
+                // Held whatever the block has: it is not read for this.
+                Held::InBlock(_) if ends.contains(&entry) => {}
                 Held::InBlock(block) => in_blocks.entry(block).or_default().push((prefix, entry)),
             }
         }
         // Imperative: each block is read only while one of its prefixes
         // belongs to an entry the table is not yet known to hold.
         for (block, prefixes) in in_blocks {
-            if prefixes
-                .iter()
-                .all(|(_, entry)| ends.contains(entry) || blocks.contains_key(entry))
-            {
+            if prefixes.iter().all(|(_, entry)| blocks.contains_key(entry)) {
                 continue;
             }
             let rows = file.read_block(block).await?;

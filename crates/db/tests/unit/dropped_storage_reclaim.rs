@@ -1314,44 +1314,32 @@ async fn a_table_wholly_under_a_prefix_counts_in_full_and_one_that_starts_under_
     db.close().await.expect("the writer closes");
 }
 
-/// Proves a prefix of a held entry that has no row in a table adds nothing
-/// to the entry's bytes in it: an entry of one generation owns a prefix for
-/// each of the eleven record kinds, and a table that holds a row of it under
-/// one kind alone, among rows of other generations under every kind, is
-/// counted that row's block and not a block of someone else's for each of
-/// the other ten.
-#[tokio::test]
-async fn a_prefix_without_rows_adds_no_block_to_an_entrys_bytes() {
-    let db = open("dropped-retire-empty-prefixes").await;
+/// The bytes [`Retirer::held`] counts for the one entry that owns every
+/// prefix in `owned`, in a table of one flush that holds `rows` rows under
+/// each given prefix and nothing else. Every row fills a block of its own,
+/// of [`BLOCK_ROW`] bytes and a little framing.
+async fn held_bytes_of_one_table(name: &str, rows: &[(&Bytes, usize)], owned: &[&Bytes]) -> u64 {
+    let db = open(name).await;
     let HelixStorage::Writer(shared) = db.storage() else {
         panic!("the contract opens a writer");
     };
-    let owner = |generation| OwnerKey::Generation {
-        scope: DataScope::LegacyUnscoped,
-        index_id: 7,
-        generation,
-    };
-    let dropped = owner(5).prefixes();
-    assert_eq!(dropped.len(), 11);
     let store: Arc<dyn ObjectStore> = Arc::new(slatedb::object_store::memory::InMemory::new());
-    let path = "dropped-retire-empty-prefixes-rows".to_string();
-    let rows = slatedb::Db::builder(path.clone(), Arc::clone(&store))
+    let path = format!("{name}-rows");
+    let raw = slatedb::Db::builder(path.clone(), Arc::clone(&store))
         .build()
         .await
         .expect("the row store opens");
-    // Each row fills a block of its own. Generations 4 and 6 have one under
-    // every kind, either side of where generation 5 would be.
-    const ROW: usize = 6000;
-    for prefix in owner(4).prefixes().into_iter().chain(owner(6).prefixes()) {
-        rows.put([&prefix[..], b"a"].concat(), vec![7u8; ROW])
+    for (prefix, count) in rows {
+        for row in 0..*count {
+            raw.put(
+                [&prefix[..], format!("{row:04}").as_bytes()].concat(),
+                vec![7u8; BLOCK_ROW as usize],
+            )
             .await
             .expect("the row writes");
+        }
     }
-    // Generation 5 has one row, under one kind.
-    rows.put([&dropped[4][..], b"a"].concat(), vec![7u8; ROW])
-        .await
-        .expect("the row writes");
-    rows.flush_with_options(FlushOptions {
+    raw.flush_with_options(FlushOptions {
         flush_type: FlushType::MemTable,
     })
     .await
@@ -1369,13 +1357,13 @@ async fn a_prefix_without_rows_adds_no_block_to_an_entrys_bytes() {
     let [table] = &tables[..] else {
         panic!("one flush leaves one table: {}", tables.len());
     };
-    assert!(table.estimate_size() > 23 * ROW as u64);
-    let retirer = Retirer::new(Arc::clone(shared), &path, store, SLOTS);
-    let prefixes = dropped
-        .into_iter()
-        .map(|prefix| (prefix, generation_entry(1)))
+    let written = rows.iter().map(|(_, count)| *count as u64).sum::<u64>();
+    assert!(table.estimate_size() > written * BLOCK_ROW);
+    let prefixes = owned
+        .iter()
+        .map(|prefix| ((*prefix).clone(), generation_entry(1)))
         .collect::<BTreeMap<_, _>>();
-    let held = retirer
+    let held = Retirer::new(Arc::clone(shared), &path, store, SLOTS)
         .held(table, &prefixes)
         .await
         .expect("the table is looked into");
@@ -1383,14 +1371,78 @@ async fn a_prefix_without_rows_adds_no_block_to_an_entrys_bytes() {
         panic!("the table holds rows of the one entry");
     };
     assert_eq!(entry, generation_entry(1));
-    // The one block of the one row, to a few bytes of framing.
-    assert!(
-        ROW as u64 <= bytes && bytes < 2 * ROW as u64,
-        "{bytes} of {}",
-        table.estimate_size()
-    );
-    rows.close().await.expect("the row store closes");
+    raw.close().await.expect("the row store closes");
     db.close().await.expect("the writer closes");
+    bytes
+}
+
+/// A row larger than a block, so that it is stored in a block of its own.
+const BLOCK_ROW: u64 = 6000;
+
+/// The prefix of generation `generation` of one index under one record kind:
+/// those of consecutive generations sort next to each other.
+fn sibling_prefix(generation: u64) -> Bytes {
+    OwnerKey::Generation {
+        scope: DataScope::LegacyUnscoped,
+        index_id: 7,
+        generation,
+    }
+    .prefixes()
+    .swap_remove(4)
+}
+
+/// Proves a prefix of a held entry that has no row in a table adds nothing
+/// to the entry's bytes in it, whether or not the table starts and ends
+/// under the entry: the block before where its rows would be belongs to
+/// someone else.
+#[tokio::test]
+async fn a_prefix_without_rows_adds_no_block_to_an_entrys_bytes() {
+    let [g2, g3, g4, g5, g6, g7, g8] = [2, 3, 4, 5, 6, 7, 8].map(sibling_prefix);
+    // The entry has rows under one prefix, strictly inside the table, and
+    // none under two others that sort between rows of other owners.
+    let inside = held_bytes_of_one_table(
+        "dropped-retire-empty-prefixes-inside",
+        &[(&g2, 3), (&g3, 3), (&g5, 1), (&g6, 3), (&g8, 3)],
+        &[&g4, &g5, &g7],
+    )
+    .await;
+    assert!(
+        (BLOCK_ROW..2 * BLOCK_ROW).contains(&inside),
+        "one block: {inside}"
+    );
+    // The table starts and ends under the entry, which owns a prefix
+    // without rows between the rows of two other owners.
+    let at_the_ends = held_bytes_of_one_table(
+        "dropped-retire-empty-prefixes-ends",
+        &[(&g2, 3), (&g3, 3), (&g6, 3), (&g8, 3)],
+        &[&g2, &g5, &g8],
+    )
+    .await;
+    assert!(
+        (6 * BLOCK_ROW..7 * BLOCK_ROW).contains(&at_the_ends),
+        "six blocks: {at_the_ends}"
+    );
+}
+
+/// Proves every prefix of an entry counts where the table holds its rows,
+/// those strictly inside a table that starts and ends under two others of
+/// the same entry included, as the physical indexes of a partitioned vector
+/// generation lie: the entry is counted every block of its rows, not only
+/// those at the table's two ends, and no block of the rows between them
+/// that belong to someone else.
+#[tokio::test]
+async fn a_table_that_starts_and_ends_under_an_entry_counts_its_prefixes_between() {
+    let [g2, g3, g4, g5, g6] = [2, 3, 4, 5, 6].map(sibling_prefix);
+    let bytes = held_bytes_of_one_table(
+        "dropped-retire-prefixes-between",
+        &[(&g2, 4), (&g3, 4), (&g4, 4), (&g5, 4), (&g6, 4)],
+        &[&g2, &g3, &g5, &g6],
+    )
+    .await;
+    assert!(
+        (16 * BLOCK_ROW..17 * BLOCK_ROW).contains(&bytes),
+        "sixteen blocks: {bytes}"
+    );
 }
 
 /// Proves a caller's wait bounds the whole reclaim, the wait for a pass or
