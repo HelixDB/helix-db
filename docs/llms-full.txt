@@ -4133,6 +4133,7 @@ SeaweedFS 4.09 or later enforce both.
 | `HELIX_STRONG_TEXT_SEARCH_MAX_ANALYSIS_BYTES` | Most unpublished text, in analysis bytes, one `strong` text search includes per partition before it fails with `index_backpressure`; defaults to 512 MiB (536,870,912). See [Search consistency](/database/helix-db/query-guides/search-consistency#searches-behind-unpublished-changes) |
 | `HELIX_WAL_FLUSH_INTERVAL_MS` | Milliseconds between WAL uploads, from 1 to 60000; defaults to 100. A durable write waits for the next upload, so a lower value cuts write latency, and each interval with new writes costs one object-store PUT |
 | `HELIX_SST_COMPRESSION` | Block codec of the files the server writes: `none` (the default) or `zstd`. Existing files stay readable after a change, and compaction rewrites them with the new codec |
+| `HELIX_VECTOR_BULK_BUILD_MEMORY_BYTES` | Turns in-memory vector index builds on, which are off when it is unset or `0`: `auto` gives them what the memory limit leaves beside the configured caches and write buffers, and a byte count exactly that much. A vector index that does not fit, or any while they are off, is built one vector at a time, which is much slower. Turning them off moves a build that is in progress to the serial path. Set it only once every server that can become the writer runs a release with in-memory builds: see [How an index is built](/database/helix-db/query-guides/vector-indexes#how-an-index-is-built), also before rolling back to an earlier release |
 | `HELIX_HTTP_ADDR` | HTTP listen address inside the container; defaults to `0.0.0.0:8080` |
 | `HELIX_GRPC_ADDR` | gRPC listen address; the image sets `127.0.0.1:8081`, reachable only inside the container |
 | `RUST_LOG` | Log filter; the image sets `server=info,db=info,slatedb=info` |
@@ -8022,6 +8023,68 @@ bound from the surrounding plan can lower it. Prefiltered searches have their ow
   toward [index backpressure](/database/helix-db/query-guides/search-consistency#index-backpressure).
 - A new generation remains hidden until validation and activation succeed.
 - Dropping an index is also a durable lifecycle operation.
+
+### How an index is built
+
+A vector index is built one vector at a time unless in-memory builds are turned on with
+[`HELIX_VECTOR_BULK_BUILD_MEMORY_BYTES`](/database/helix-db/start-here/local-development/local-server#run-with-seaweedfs-persistence).
+With them on, an index without a tenant property is built in memory when its label's
+vectors fit the memory they are given: the whole graph is linked on every core and
+written once, many times faster. An index that does not fit, and every
+tenant-partitioned index, is still built serially. The
+[operation status](/database/helix-db/query-guides/secondary-indexes#track-an-index-operation)
+of a vector build says which, in `vector_build_path`:
+
+| `vector_build_path` | Meaning |
+| --- | --- |
+| `{"path": "bulk"}` | Built in memory. Reported by every server for as long as the build is at stage `scan`, and afterwards by the server that built it |
+| `{"path": "serial", "reason": "..."}` | Built one vector at a time. Reported only by the server running the build, until it restarts |
+| absent | Not a vector build, not decided yet, or this server did not decide |
+
+`reason` is `bulk_builds_disabled`, `over_memory_budget`, `too_few_vectors` (fewer than
+4,096), `tenant_partitioned`, `earlier_attempts_failed`, `bulk_attempt_failed`,
+`too_many_rows_changed`, or `resumed_serial_scan`.
+
+While a build is on the in-memory path its status also carries `vector_bulk_build`,
+with which attempt it is (`bulk_attempt` of `bulk_attempt_limit`, reported by every
+server; not the operation's own `attempt`, which counts retried steps) and, from the
+server running it, what it is doing:
+
+| `phase` | Other fields | Meaning |
+| --- | --- | --- |
+| `waiting` | `waiting_for`: `turn` or `memory` | Not started. Another build reads or links (one does at a time), or running in-memory builds hold the memory this one needs. A waiting build does not slow other index operations |
+| `reading` | `members_read`, `members` | Reading the label's source rows into memory |
+| `linking` | `vectors_linked`, `vectors` | Linking the graph |
+| `writing` | `nodes_written`, `nodes`, `paused_for_write_buffer` | Writing the graph. The `progress` counters of the operation move only in this phase |
+| `discarding` | `rows_deleted` | Deleting what an attempt that did not finish wrote, before the next one starts |
+
+A restart during the build discards what was written and starts the next attempt, and
+the counters start again from zero. Every attempt counts that a kill, a crash, a stop
+or a deploy ended. After three, the build continues serially
+(`earlier_attempts_failed`). A build that blocks returns to the serial stage first, so
+its retry starts at attempt one. An attempt that fails in a way a serial build cannot
+is not tried again: what it wrote is deleted and the index is built serially at once
+(`bulk_attempt_failed`).
+
+Rows written while an index is built in memory are indexed after the build, like any
+write, and each one that changes after the build read it is first taken out of the
+in-memory graph, which costs far more than writing a row that did not change. A build
+that finds more than about an eighth of its rows changed stops its in-memory attempt,
+deletes what it wrote and builds the index serially at once
+(`too_many_rows_changed`): finishing in memory would take longer.
+
+  Turn in-memory builds on only once every server that can become the writer runs a
+  release that has them. A release from before them (Docker v0.0.18 and earlier) cannot
+  open a database as its writer while any build reports stage `scan` with path `bulk`:
+  it stops at startup, and by trying it takes the writer role from the running server,
+  which then fails every request until it is restarted.
+
+  Before rolling back to such a release during an in-memory build, let the build finish,
+  or restart the current release with `HELIX_VECTOR_BULK_BUILD_MEMORY_BYTES` unset and
+  wait until the build no longer reports path `bulk` (it deletes what it wrote, at about
+  2,600 entities a second, and continues serially under either release), or abort it and
+  wait until it reports `aborted`, which deletes the same rows far more slowly. A status
+  reports `bulk` for as long as that is what a restart would find.
 
 ## Next steps
 
