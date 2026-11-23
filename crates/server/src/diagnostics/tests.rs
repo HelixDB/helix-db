@@ -652,7 +652,8 @@ fn dropped_index_storage_reports_progress_and_warns_on_quarantined_entries() {
             detail: format!(
                 "9 dropped index generations await compaction: {counts} Compactions discard \
                  the rows as they reach them, and the server rewrites the sorted runs that \
-                 hold them itself once it has been idle for a few minutes."
+                 hold them itself once it has been idle for a few minutes, or once the rows \
+                 have waited half an hour on a server that is never idle."
             )
         }
     );

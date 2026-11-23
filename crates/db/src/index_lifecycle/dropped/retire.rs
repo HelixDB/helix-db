@@ -75,12 +75,12 @@
 //! A pass with an armed entry reads `.compactions` and the manifest from
 //! object storage. Finding suspects reads the block index of every table
 //! whose key range reaches an owner prefix without lying wholly under it,
-//! and one data block for each run of prefixes that falls inside a block; a writer that opens onto many
-//! entries pays that once for all of them, in the background. What a pass
-//! reads of a table it keeps in a cache of [`TABLE_CACHE_BYTES`], so a
-//! proof that starts again reads a table again only once the block indexes
-//! in play outgrow that cache; a block index is a few megabytes for a full
-//! table.
+//! and one data block for each run of prefixes that falls inside a block; a
+//! writer that opens onto many entries pays that once for all of them, in
+//! the background. What a pass reads of a table it keeps in a cache of
+//! [`TABLE_CACHE_BYTES`], so a proof that starts again reads a table again
+//! only once the block indexes in play outgrow that cache; a block index is
+//! a few megabytes for a full table.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;

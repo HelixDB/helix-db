@@ -94,7 +94,7 @@ use tokio::time::Instant;
 use crate::error::{HelixDbError, Result};
 
 use super::retire::{Logged, Retirer};
-use super::TableId;
+use super::{DroppedIndexStorage, TableId};
 
 /// Interval between reads of an awaited compaction's status.
 const STATUS_POLL: Duration = Duration::from_secs(1);
@@ -241,6 +241,38 @@ pub enum DroppedStorageReclaim {
         /// Dropped rows in sorted runs that were not worth rewriting.
         left: Option<LeftInPlace>,
     },
+}
+
+impl DroppedStorageReclaim {
+    /// What a reclaim did that came to the end of its plan: whether it
+    /// `rewrote` any table, the entries the passes after its compactions
+    /// `retired`, the `entries` still armed, the bytes its compactions
+    /// rewrote and the dropped rows among them, and the rows it `left`.
+    fn planned_out(
+        rewrote: bool,
+        retired: usize,
+        entries: usize,
+        rewritten_bytes: u64,
+        dropped_bytes: u64,
+        left: Option<LeftInPlace>,
+    ) -> Self {
+        match (rewrote, left) {
+            (false, Some(left)) => Self::Declined { entries, left },
+            // Nothing tracked was there to rewrite, and entries are left:
+            // their proofs wait for compactions in flight.
+            (false, None) if entries > 0 && retired == 0 => Self::Incomplete {
+                entries,
+                obstacle: ReclaimObstacle::Busy,
+            },
+            (true | false, left) => Self::Compacted {
+                retired,
+                entries,
+                rewritten_bytes,
+                dropped_bytes,
+                left,
+            },
+        }
+    }
 }
 
 /// Who runs a reclaim.
@@ -505,22 +537,28 @@ impl Plan {
     }
 }
 
-/// What `writer` leaves in place of the dropped rows its proofs track, going
+/// The dropped generations `writer` still stores, as of its last background
+/// look, with the rows a writer that follows `worth` leaves in place, going
 /// by the manifest it holds in memory. Reads no object storage.
-pub(crate) fn left_in_place(writer: &crate::HelixWriter) -> Option<LeftInPlace> {
-    if !writer.dropped().tracks_tables() {
-        return None;
+pub(crate) fn storage(writer: &crate::HelixWriter, worth: Worth) -> DroppedIndexStorage {
+    let registry = writer.dropped();
+    let left_in_place = registry
+        .tracks_tables()
+        .then(|| {
+            let manifest = writer.db().manifest();
+            let tracked = registry.discardable_tracked(manifest.recent_snapshot_min_seq());
+            Plan::of(
+                &Layout::of(&manifest),
+                &tracked,
+                Reclaimer::IdleStore(worth),
+            )
+            .left
+        })
+        .flatten();
+    DroppedIndexStorage {
+        left_in_place,
+        ..registry.storage()
     }
-    let manifest = writer.db().manifest();
-    let tracked = writer
-        .dropped()
-        .discardable_tracked(manifest.recent_snapshot_min_seq());
-    Plan::of(
-        &Layout::of(&manifest),
-        &tracked,
-        Reclaimer::IdleStore(Worth::WRITER),
-    )
-    .left
 }
 
 /// How an awaited compaction ended.
@@ -532,6 +570,22 @@ enum Ended {
     /// tells which it was.
     Unobserved,
     Short(ReclaimObstacle),
+}
+
+impl Ended {
+    /// What kept the compaction from rewriting its sources, if anything.
+    /// `sources_stored` says whether a table it read is still stored, which
+    /// decides an end that was not observed: SlateDB writes the manifest
+    /// before it records a compaction as completed, and a compaction that
+    /// did not complete leaves its sources stored, so with them gone they
+    /// were rewritten.
+    fn obstacle(self, sources_stored: bool) -> Option<ReclaimObstacle> {
+        match (self, sources_stored) {
+            (Self::Completed, _) | (Self::Unobserved, false) => None,
+            (Self::Unobserved, true) => Some(ReclaimObstacle::Rejected),
+            (Self::Short(obstacle), _) => Some(obstacle),
+        }
+    }
 }
 
 impl Retirer {
@@ -656,47 +710,34 @@ impl Retirer {
                 destination,
                 "reclaiming dropped generations: compacting"
             );
-            let ended = match self
+            let ended = self
                 .compacted(CompactionSpec::new(sources.clone(), destination), deadline)
-                .await?
-            {
-                Ended::Completed => Ok(()),
-                // SlateDB writes the manifest before it records a compaction
-                // as completed, and a compaction that did not complete
-                // leaves its sources stored: gone, they were rewritten.
+                .await?;
+            // Only an end that was not observed is settled by the manifest.
+            let sources_stored = match ended {
                 Ended::Unobserved => {
-                    match Layout::of(&self.manifest().await?).holds_any(&layout.tables_of(&rewrite))
-                    {
-                        true => Err(ReclaimObstacle::Rejected),
-                        false => Ok(()),
-                    }
+                    Layout::of(&self.manifest().await?).holds_any(&layout.tables_of(&rewrite))
                 }
-                Ended::Short(obstacle) => Err(obstacle),
+                Ended::Completed | Ended::Short(_) => false,
             };
-            match ended {
-                Ok(()) => {
+            match ended.obstacle(sources_stored) {
+                Some(obstacle) => return Ok(incomplete(obstacle)),
+                None => {
                     rewritten.extend(sources);
                     rewritten_bytes += bytes;
                     dropped_bytes += dropped;
                     retired += self.look(logged).await?;
                 }
-                Err(obstacle) => return Ok(incomplete(obstacle)),
             }
         };
-        let entries = registry.armed().len();
-        Ok(match (rewritten.is_empty(), left) {
-            (true, Some(left)) => DroppedStorageReclaim::Declined { entries, left },
-            // Nothing tracked was there to rewrite, and entries are left:
-            // their proofs wait for compactions in flight.
-            (true, None) if entries > 0 && retired == 0 => incomplete(ReclaimObstacle::Busy),
-            (_, left) => DroppedStorageReclaim::Compacted {
-                retired,
-                entries,
-                rewritten_bytes,
-                dropped_bytes,
-                left,
-            },
-        })
+        Ok(DroppedStorageReclaim::planned_out(
+            !rewritten.is_empty(),
+            retired,
+            registry.armed().len(),
+            rewritten_bytes,
+            dropped_bytes,
+            left,
+        ))
     }
 
     async fn manifest(&self) -> Result<VersionedManifest> {

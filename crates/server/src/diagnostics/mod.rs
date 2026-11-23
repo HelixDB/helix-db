@@ -1143,7 +1143,8 @@ fn dropped_index_storage(storage: &db::DroppedIndexStorage) -> Check {
             format!(
                 "{progress} Compactions discard the rows as they reach them, and the server \
                  rewrites the sorted runs that hold them itself once it has been idle for a few \
-                 minutes."
+                 minutes, or once the rows have waited half an hour on a server that is never \
+                 idle."
             ),
         ),
         (_, Some(left)) => (

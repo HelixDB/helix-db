@@ -1160,8 +1160,7 @@ impl Registry {
 
     /// Every entry this writer knows of, counted by what it waits for.
     /// [`DroppedIndexStorage::left_in_place`] is not filled in: it takes the
-    /// writer's manifest, which [`crate::HelixDB::dropped_index_storage`]
-    /// has.
+    /// writer's manifest and a rule, which [`reclaim::storage`] has.
     pub(crate) fn storage(&self) -> DroppedIndexStorage {
         let state = self.state.lock();
         let mut storage = DroppedIndexStorage::default();

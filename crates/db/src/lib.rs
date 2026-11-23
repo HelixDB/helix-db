@@ -2540,10 +2540,10 @@ impl HelixDB {
     /// ```
     pub fn dropped_index_storage(&self) -> DroppedIndexStorage {
         match self.storage() {
-            HelixStorage::Writer(writer) => DroppedIndexStorage {
-                left_in_place: index_lifecycle::dropped::reclaim::left_in_place(writer),
-                ..writer.dropped().storage()
-            },
+            HelixStorage::Writer(writer) => index_lifecycle::dropped::reclaim::storage(
+                writer,
+                index_lifecycle::dropped::reclaim::Worth::WRITER,
+            ),
             HelixStorage::Reader(_) => DroppedIndexStorage::default(),
         }
     }

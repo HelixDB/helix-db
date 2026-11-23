@@ -476,3 +476,88 @@ fn a_layout_knows_the_tables_a_rewrite_reads_and_whether_any_is_stored() {
     }
     assert!(!Layout::default().holds_any(&tables(&[1])));
 }
+
+#[test]
+fn an_end_that_was_not_observed_is_settled_by_whether_its_sources_are_stored() {
+    let obstacles = [
+        ReclaimObstacle::Busy,
+        ReclaimObstacle::Rejected,
+        ReclaimObstacle::GaveWay,
+        ReclaimObstacle::TimedOut,
+        ReclaimObstacle::Closed,
+    ];
+    for sources_stored in [false, true] {
+        // A completion that was read needs no second opinion.
+        assert_eq!(Ended::Completed.obstacle(sources_stored), None);
+        // Nor does an end that fell short: it keeps its own reason.
+        for obstacle in obstacles {
+            assert_eq!(
+                Ended::Short(obstacle).obstacle(sources_stored),
+                Some(obstacle)
+            );
+        }
+    }
+    // The record is gone. With the sources gone too the compaction replaced
+    // them; with a source still stored it did not.
+    assert_eq!(Ended::Unobserved.obstacle(false), None);
+    assert_eq!(
+        Ended::Unobserved.obstacle(true),
+        Some(ReclaimObstacle::Rejected)
+    );
+}
+
+#[test]
+fn a_reclaim_that_ends_its_plan_says_what_it_did() {
+    let left = LeftInPlace {
+        dropped_bytes: MIB,
+        run_bytes: 40 * GIB,
+        runs: 1,
+    };
+    let compacted =
+        |retired, entries, rewritten_bytes, dropped_bytes, left| DroppedStorageReclaim::Compacted {
+            retired,
+            entries,
+            rewritten_bytes,
+            dropped_bytes,
+            left,
+        };
+    // It rewrote nothing because nothing was worth it: declined, however
+    // many entries a pass retired on the way.
+    for retired in [0, 2] {
+        assert_eq!(
+            DroppedStorageReclaim::planned_out(false, retired, 3, 0, 0, Some(left)),
+            DroppedStorageReclaim::Declined { entries: 3, left }
+        );
+    }
+    // It rewrote nothing because no proof tracked a table yet, and retired
+    // nothing: the proofs wait for compactions in flight.
+    assert_eq!(
+        DroppedStorageReclaim::planned_out(false, 0, 2, 0, 0, None),
+        DroppedStorageReclaim::Incomplete {
+            entries: 2,
+            obstacle: ReclaimObstacle::Busy,
+        }
+    );
+    // Its first pass retired every entry it could, with nothing to rewrite.
+    assert_eq!(
+        DroppedStorageReclaim::planned_out(false, 1, 0, 0, 0, None),
+        compacted(1, 0, 0, 0, None)
+    );
+    assert_eq!(
+        DroppedStorageReclaim::planned_out(false, 1, 2, 0, 0, None),
+        compacted(1, 2, 0, 0, None)
+    );
+    // No entry is left and none retired: one retired between the first look
+    // and the plan, through a compaction the scheduler ran.
+    assert_eq!(
+        DroppedStorageReclaim::planned_out(false, 0, 0, 0, 0, None),
+        compacted(0, 0, 0, 0, None)
+    );
+    // It rewrote: compacted, with what it left, whatever it retired.
+    for (retired, entries, kept) in [(1, 0, None), (0, 1, None), (1, 1, Some(left))] {
+        assert_eq!(
+            DroppedStorageReclaim::planned_out(true, retired, entries, 3 * GIB, GIB, kept),
+            compacted(retired, entries, 3 * GIB, GIB, kept)
+        );
+    }
+}

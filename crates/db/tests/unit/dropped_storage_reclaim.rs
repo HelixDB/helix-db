@@ -2916,6 +2916,15 @@ async fn the_writer_leaves_dropped_rows_in_a_run_not_worth_rewriting_and_a_calle
             clockless(db.dropped_index_storage()),
             clockless(storage.clone())
         );
+        // The storage report names what a writer that follows this rule
+        // leaves, and counts everything else as the writer's own does.
+        assert_eq!(
+            clockless(dropped::reclaim::storage(writer(&db), never)),
+            clockless(DroppedIndexStorage {
+                left_in_place: Some(left),
+                ..storage.clone()
+            })
+        );
     }
     // An eighth of the run or more is dropped rows: a rule that asks for
     // less than that rewrites it.
