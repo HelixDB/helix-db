@@ -417,6 +417,11 @@ mod tests {
         let status: IndexOperationStatus = simd_json::from_reader(r#"{"status":"blocked","operation_id":"018f0c58-6bc7-7c56-8d3d-9c5f18a0f001","index_id":"42","generation":"3","operation_kind":"build","family":"secondary","stage":"scan","attempt":2,"progress":{"entities":"9","input_bytes":"10","output_operations":"11","output_bytes":"12","future":true},"blocker_code":"uniqueness_violation","future":true}"#.as_bytes())
         .unwrap();
         assert!(matches!(status, IndexOperationStatus::Blocked { .. }));
+        // What a server reports of an in-memory vector build, in fields
+        // this SDK does not model.
+        let status: IndexOperationStatus = simd_json::from_reader(r#"{"status":"running","operation_id":"018f0c58-6bc7-7c56-8d3d-9c5f18a0f001","index_id":"42","generation":"3","operation_kind":"build","family":"vector","stage":"scan","attempt":0,"progress":{"entities":"0","input_bytes":"0","output_operations":"0","output_bytes":"0"},"vector_build_path":{"path":"bulk"},"vector_bulk_build":{"bulk_attempt":2,"bulk_attempt_limit":3,"phase":"writing","nodes_written":"4","nodes":"10","paused_for_write_buffer":false}}"#.as_bytes())
+        .unwrap();
+        assert!(matches!(status, IndexOperationStatus::Running { .. }));
         for (stage, expected) in [
             (
                 "validate_legacy_physical",

@@ -476,6 +476,35 @@ class DslAstTests(unittest.TestCase):
             }
         )
         self.assertEqual(status.status, "blocked")
+        # What a server reports of an in-memory vector build, in fields this
+        # SDK does not model.
+        status = parse_index_operation_status(
+            {
+                "status": "running",
+                "operation_id": operation_id,
+                "index_id": "42",
+                "generation": "3",
+                "operation_kind": "build",
+                "family": "vector",
+                "stage": "scan",
+                "attempt": 0,
+                "progress": {
+                    "entities": "0",
+                    "input_bytes": "0",
+                    "output_operations": "0",
+                    "output_bytes": "0",
+                },
+                "vector_build_path": {"path": "bulk"},
+                "vector_bulk_build": {
+                    "bulk_attempt": 2,
+                    "bulk_attempt_limit": 3,
+                    "phase": "reading",
+                    "members_read": "4",
+                    "members": "10",
+                },
+            }
+        )
+        self.assertEqual(status.status, "running")
         for family, stage in (
             ("vector", "validate_legacy_physical"),
             ("text", "validate_manifests"),

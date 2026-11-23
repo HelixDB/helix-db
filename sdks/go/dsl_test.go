@@ -1474,6 +1474,14 @@ func TestIndexLifecycleResponseDecoders(t *testing.T) {
 	if !ok || blocked.BlockerCode != IndexBlockerUniquenessViolation {
 		t.Fatalf("expected blocked uniqueness status, got %#v", status)
 	}
+	// What a server reports of an in-memory vector build, in fields this SDK does not model.
+	status, err = UnmarshalIndexOperationStatus([]byte(`{"status":"running","operation_id":"` + operationID + `","index_id":"42","generation":"3","operation_kind":"build","family":"vector","stage":"scan","attempt":0,"progress":{"entities":"0","input_bytes":"0","output_operations":"0","output_bytes":"0"},"vector_build_path":{"path":"bulk"},"vector_bulk_build":{"bulk_attempt":2,"bulk_attempt_limit":3,"phase":"discarding","rows_deleted":"40"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := status.(*IndexOperationRunning); !ok {
+		t.Fatalf("expected running status, got %#v", status)
+	}
 	for _, testCase := range []struct {
 		family string
 		stage  string
