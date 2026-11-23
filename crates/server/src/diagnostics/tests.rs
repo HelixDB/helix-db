@@ -623,9 +623,57 @@ fn memory_warns_when_cache_budgets_take_most_of_the_limit() {
 
 #[test]
 fn dropped_index_storage_reports_progress_and_warns_on_quarantined_entries() {
-    let idle = dropped_index_storage(&db::DroppedIndexStorage::default());
-    assert_eq!(idle.summary, "No dropped index storage awaits compaction");
-    assert!(matches!(&idle.outcome, Outcome::Pass { .. }));
+    let ago = |seconds: u64| {
+        std::time::Instant::now()
+            .checked_sub(Duration::from_secs(seconds))
+            .expect("the clock is that far past its origin")
+    };
+    // Nothing is held before the first pass has looked, which says nothing
+    // of what the store holds, and the check claims no storage is back.
+    let unread = dropped_index_storage(&db::DroppedIndexStorage::default());
+    assert_eq!(
+        unread.summary,
+        "No dropped index generation is waiting on this writer"
+    );
+    let Outcome::Pass { detail } = &unread.outcome else {
+        panic!("no entry passes: {unread:?}");
+    };
+    assert!(
+        detail.starts_with(
+            "The first background pass has not run yet, so as far as it knows, this writer \
+             holds no dropped-generation entry. That says nothing of storage still to come \
+             back:"
+        ),
+        "{detail}"
+    );
+    let idle = dropped_index_storage(&db::DroppedIndexStorage {
+        last_pass: Some(db::DroppedStoragePass::Completed { at: ago(125) }),
+        ..db::DroppedIndexStorage::default()
+    });
+    assert_eq!(
+        idle.summary,
+        "No dropped index generation is waiting on this writer"
+    );
+    let Outcome::Pass { detail } = &idle.outcome else {
+        panic!("no entry passes: {idle:?}");
+    };
+    assert!(
+        detail.starts_with(
+            "As of the last background pass, 2 min ago, this writer holds no \
+             dropped-generation entry. That says nothing of storage still to come back:"
+        ),
+        "{detail}"
+    );
+    for claim in ["given its storage back", "storage is back", "reclaimed"] {
+        assert!(!detail.contains(claim), "{detail}");
+    }
+    for unknown in [
+        "counted by the next pass",
+        "below storage version 8",
+        "split files of a dropped text index stay",
+    ] {
+        assert!(detail.contains(unknown), "{detail}");
+    }
 
     let waiting = db::DroppedIndexStorage {
         unproven: 2,
@@ -636,30 +684,32 @@ fn dropped_index_storage_reports_progress_and_warns_on_quarantined_entries() {
         tracked_bytes: 3 * MIB,
         left_in_place: None,
         waiting_since: None,
+        stalled_since: None,
+        tracking_since: None,
+        last_pass: None,
         quarantined: Vec::new(),
     };
     let counts = "2 not yet tracked (1 kept by a compaction whose retention sequence was behind \
                   the drop), 3 waiting for compactions in flight, 4 with about 3.0 MiB of rows \
                   in 1 table.";
     let reclaiming = dropped_index_storage(&waiting);
-    assert_eq!(
-        reclaiming.summary,
-        "Compactions are reclaiming dropped index storage"
-    );
+    assert_eq!(reclaiming.summary, "Dropped index rows wait for compaction");
     assert_eq!(
         reclaiming.outcome,
         Outcome::Pass {
             detail: format!(
                 "9 dropped index generations await compaction: {counts} Compactions discard \
                  the rows as they reach them, and the server rewrites the sorted runs that \
-                 hold them itself once it has been idle for a few minutes, or once the rows \
-                 have waited half an hour on a server that is never idle."
+                 hold them itself once its compactor has had nothing to do for a few minutes. \
+                 A server that is never idle that long keeps the rows until its ordinary \
+                 compactions rewrite those runs."
             )
         }
     );
 
     // Rows the server does not rewrite a run for are reported as left, with
-    // what rewriting them would cost and how to ask for it.
+    // what rewriting them would cost, and nothing a server operator cannot
+    // do is advised.
     for (runs, places) in [
         (1, "1 sorted run of 40.0 GiB in all"),
         (2, "2 sorted runs of 40.0 GiB in all"),
@@ -687,19 +737,20 @@ fn dropped_index_storage_reports_progress_and_warns_on_quarantined_entries() {
             "{detail}"
         );
         assert!(
-            detail.contains(match runs {
-                1 => "when compaction next rewrites that run,",
-                _ => "when compaction next rewrites those runs,",
+            detail.ends_with(match runs {
+                1 => {
+                    "and wait for ordinary compaction to rewrite that run, or for more dropped \
+                     rows to make the rewrite worth it."
+                }
+                _ => {
+                    "and wait for ordinary compaction to rewrite those runs, or for more \
+                     dropped rows to make the rewrite worth it."
+                }
             }),
             "{detail}"
         );
-        assert!(
-            detail.ends_with(
-                "call `HelixDB::reclaim_dropped_index_storage` from a process that opens the \
-                 database as its writer; the server has no route for it."
-            ),
-            "{detail}"
-        );
+        assert!(!detail.contains("HelixDB::"), "{detail}");
+        assert!(!detail.contains("opens the database"), "{detail}");
     }
     // Nothing waits: what would be left is not mentioned.
     assert_eq!(
@@ -712,13 +763,12 @@ fn dropped_index_storage_reports_progress_and_warns_on_quarantined_entries() {
             ..db::DroppedIndexStorage::default()
         })
         .summary,
-        "No dropped index storage awaits compaction"
+        "No dropped index generation is waiting on this writer"
     );
 
-    // The age of the oldest wait is reported once there is one.
-    let two_hours_ago = std::time::Instant::now()
-        .checked_sub(Duration::from_secs(2 * 3_600 + 5))
-        .expect("the clock is more than two hours past its origin");
+    // The age of the oldest wait is reported once there is one, and how
+    // long the generation that has stood still longest has.
+    let two_hours_ago = ago(2 * 3_600 + 5);
     let aged = dropped_index_storage(&db::DroppedIndexStorage {
         waiting_since: Some(two_hours_ago),
         ..waiting.clone()
@@ -731,6 +781,102 @@ fn dropped_index_storage_reports_progress_and_warns_on_quarantined_entries() {
             "9 dropped index generations await compaction, the oldest for 2 h: {counts}"
         )),
         "{detail}"
+    );
+    // Rows that only wait for a compaction to reach them pass however long
+    // they have waited: that wait is by design.
+    for (stalled_since, tracking_since) in [
+        (None, Some(ago(3 * 3_600 + 5))),
+        (Some(ago(125)), Some(ago(3 * 3_600 + 5))),
+    ] {
+        let still = dropped_index_storage(&db::DroppedIndexStorage {
+            waiting_since: Some(ago(3 * 3_600 + 5)),
+            stalled_since,
+            tracking_since,
+            ..waiting.clone()
+        });
+        let Outcome::Pass { detail } = &still.outcome else {
+            panic!("rows that wait for compaction pass: {still:?}");
+        };
+        assert!(
+            detail.starts_with(&format!(
+                "9 dropped index generations await compaction, the oldest for 3 h, the \
+                 longest without progress for 3 h: {counts}"
+            )),
+            "{detail}"
+        );
+    }
+
+    // A generation that has not been matched to tables for long is stuck:
+    // that wait ends by itself in seconds when nothing holds it up.
+    let stuck = dropped_index_storage(&db::DroppedIndexStorage {
+        stalled_since: Some(ago(20 * 60 + 5)),
+        tracking_since: Some(ago(60)),
+        ..waiting.clone()
+    });
+    assert_eq!(
+        stuck.summary,
+        "Dropped index generations are not making progress"
+    );
+    let Outcome::Warn { detail, fix } = &stuck.outcome else {
+        panic!("a stuck generation warns: {stuck:?}");
+    };
+    assert!(
+        detail.starts_with(&format!(
+            "A dropped generation has waited 20 min to be matched to the tables that hold \
+             its rows, which takes seconds once nothing holds it up. 9 dropped index \
+             generations await compaction, the longest without progress for 20 min: {counts}"
+        )),
+        "{detail}"
+    );
+    assert!(fix.contains("read transaction or snapshot"), "{fix}");
+    // Just short of the threshold it is still a healthy wait.
+    assert_eq!(
+        dropped_index_storage(&db::DroppedIndexStorage {
+            stalled_since: Some(ago(14 * 60)),
+            ..waiting.clone()
+        })
+        .summary,
+        "Dropped index rows wait for compaction"
+    );
+
+    // A pass that failed is surfaced with what it failed with and for how
+    // long passes have failed, whether or not anything waits.
+    for held in [db::DroppedIndexStorage::default(), waiting.clone()] {
+        let failing = dropped_index_storage(&db::DroppedIndexStorage {
+            last_pass: Some(db::DroppedStoragePass::Failed {
+                at: ago(31),
+                since: two_hours_ago,
+                error: "object store unavailable".to_string(),
+            }),
+            ..held
+        });
+        assert_eq!(
+            failing.summary,
+            "The background pass over dropped index storage is failing"
+        );
+        let Outcome::Warn { detail, fix } = &failing.outcome else {
+            panic!("a failing pass warns: {failing:?}");
+        };
+        assert!(
+            detail.starts_with(
+                "The last pass failed 31 s ago, and passes have failed for 2 h: object store \
+                 unavailable. While they fail, no dropped generation is armed or retired"
+            ),
+            "{detail}"
+        );
+        assert!(
+            fix.contains("`dropped-generation retirement pass failed`"),
+            "{fix}"
+        );
+    }
+    // A pass that has worked since is not.
+    assert_eq!(
+        dropped_index_storage(&db::DroppedIndexStorage {
+            last_pass: Some(db::DroppedStoragePass::Completed { at: ago(1) }),
+            ..waiting.clone()
+        })
+        .summary,
+        "Dropped index rows wait for compaction"
     );
 
     let tenant =
@@ -779,8 +925,10 @@ fn dropped_index_storage_reports_progress_and_warns_on_quarantined_entries() {
         "{detail}"
     );
     assert!(fix.contains("armed again by itself"));
-    assert!(fix.contains("`HelixDB::remove_quarantined_dropped_index_entry`"));
-    assert!(fix.contains("the rows it named stay stored and are never reclaimed"));
+    assert!(fix.contains("The server has no way to delete one."));
+    // Nothing a server operator cannot do is advised.
+    assert!(!fix.contains("HelixDB::"), "{fix}");
+    assert!(!fix.contains("opens the database"), "{fix}");
 
     let many = quarantined(12);
     assert_eq!(many.summary, "12 dropped index entries are quarantined");

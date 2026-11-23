@@ -72,6 +72,10 @@ const PUBLICATION_LAG_WARNING: Duration = Duration::from_secs(60);
 const LISTED_INSIGHTS: usize = 10;
 /// Most quarantined dropped-index entries the storage check lists.
 const LISTED_QUARANTINED: usize = 10;
+/// How long a dropped generation may wait to be matched to the tables that
+/// hold its rows before the storage check warns. A healthy wait is a pass
+/// and the compactions in flight at the drop: seconds to a few minutes.
+const DROPPED_STALLED_AFTER: Duration = Duration::from_secs(15 * 60);
 /// Docs page on index operations the server holds back.
 const INDEX_TROUBLESHOOTING: &str =
     "https://docs.helix-db.com/database/helix-db/query-guides/troubleshooting";
@@ -1057,14 +1061,26 @@ fn index_publication(stats: &db::IndexOperationQueueStats) -> Check {
 
 fn dropped_index_storage(storage: &db::DroppedIndexStorage) -> Check {
     let waiting = storage.unproven + storage.draining + storage.tracking;
+    // How long the generation that has gone longest without progress has
+    // stood still, whichever state it is in.
+    let still = [storage.stalled_since, storage.tracking_since]
+        .into_iter()
+        .flatten()
+        .min();
     let progress = format!(
-        "{waiting} dropped index {} compaction{}: {} not yet tracked ({} kept by a compaction \
+        "{waiting} dropped index {} compaction{}{}: {} not yet tracked ({} kept by a compaction \
          whose retention sequence was behind the drop), {} waiting for compactions in flight, {} \
          with about {} of rows in {} {}.",
         plural(waiting as u64, "generation awaits", "generations await"),
         storage
             .waiting_since
             .map(|since| format!(", the oldest for {}", elapsed(since.elapsed())))
+            .unwrap_or_default(),
+        still
+            .map(|since| format!(
+                ", the longest without progress for {}",
+                elapsed(since.elapsed())
+            ))
             .unwrap_or_default(),
         storage.unproven,
         storage.retained,
@@ -1123,28 +1139,88 @@ fn dropped_index_storage(storage: &db::DroppedIndexStorage) -> Check {
                       in use or was never built. It costs nothing while it stays: its rows are \
                       kept, and no index is refused an id it names. It is armed again by itself \
                       once the catalog agrees with it, for instance after that index is \
-                      dropped. To delete one that will not be, call \
-                      `HelixDB::remove_quarantined_dropped_index_entry` with its index id and \
-                      generation from a process that opens the database as its writer; the \
-                      server has no route for it. That deletes the entry only: the rows it \
-                      named stay stored and are never reclaimed. Report an entry you cannot \
+                      dropped. The server has no way to delete one. Report an entry you cannot \
                       explain, with the server log line that quarantined it."
                     .into(),
             },
         );
     }
+    match &storage.last_pass {
+        Some(db::DroppedStoragePass::Failed { at, since, error }) => {
+            return Check::new(
+                CheckId::DroppedIndexStorage,
+                "The background pass over dropped index storage is failing",
+                Outcome::Warn {
+                    detail: format!(
+                        "The last pass failed {} ago, and passes have failed for {}: {error}. \
+                         While they fail, no dropped generation is armed or retired and what \
+                         follows is as the last pass that worked left it. {progress}",
+                        elapsed(at.elapsed()),
+                        elapsed(since.elapsed()),
+                    ),
+                    fix: "The server tries again by itself, at intervals that grow to ten \
+                          minutes. Check that object storage is reachable, and the server log \
+                          for `dropped-generation retirement pass failed`."
+                        .into(),
+                },
+            );
+        }
+        Some(db::DroppedStoragePass::Completed { .. }) | None => {}
+    }
+    let stalled = storage
+        .stalled_since
+        .map(|since| since.elapsed())
+        .filter(|stood| *stood >= DROPPED_STALLED_AFTER);
+    match stalled {
+        Some(stood) => {
+            return Check::new(
+                CheckId::DroppedIndexStorage,
+                "Dropped index generations are not making progress",
+                Outcome::Warn {
+                    detail: format!(
+                        "A dropped generation has waited {} to be matched to the tables that \
+                         hold its rows, which takes seconds once nothing holds it up. {progress}",
+                        elapsed(stood),
+                    ),
+                    fix: "Rows are kept while a read transaction or snapshot opened before \
+                          the drop is still open, and until a compaction that was running at \
+                          the drop has ended: look for a long-running request. Report it with \
+                          the server log if neither is the case."
+                        .into(),
+                },
+            );
+        }
+        None => {}
+    }
+    let looked = match &storage.last_pass {
+        Some(db::DroppedStoragePass::Completed { at }) => {
+            format!(
+                "As of the last background pass, {} ago",
+                elapsed(at.elapsed())
+            )
+        }
+        Some(db::DroppedStoragePass::Failed { .. }) | None => {
+            "The first background pass has not run yet, so as far as it knows".to_string()
+        }
+    };
     let (summary, detail) = match (waiting, storage.left_in_place) {
         (0, _) => (
-            "No dropped index storage awaits compaction",
-            "Every dropped index has given its storage back.".into(),
+            "No dropped index generation is waiting on this writer",
+            format!(
+                "{looked}, this writer holds no dropped-generation entry. That says nothing \
+                 of storage still to come back: an index dropped since is counted by the next \
+                 pass, which the drop starts; a store below storage version 8 deletes dropped \
+                 rows itself and never has an entry; and the split files of a dropped text \
+                 index stay in object storage."
+            ),
         ),
         (_, None) => (
-            "Compactions are reclaiming dropped index storage",
+            "Dropped index rows wait for compaction",
             format!(
                 "{progress} Compactions discard the rows as they reach them, and the server \
-                 rewrites the sorted runs that hold them itself once it has been idle for a few \
-                 minutes, or once the rows have waited half an hour on a server that is never \
-                 idle."
+                 rewrites the sorted runs that hold them itself once its compactor has had \
+                 nothing to do for a few minutes. A server that is never idle that long keeps \
+                 the rows until its ordinary compactions rewrite those runs."
             ),
         ),
         (_, Some(left)) => (
@@ -1153,11 +1229,8 @@ fn dropped_index_storage(storage: &db::DroppedIndexStorage) -> Check {
                 "{progress} About {} of them are in {} sorted {} of {} in all, which the server \
                  does not rewrite for them: it rewrites a sorted run by itself only when the \
                  run is no larger than 1.0 GiB or at least an eighth of it is dropped rows. \
-                 They cost their storage and nothing else, and are discarded when compaction \
-                 next rewrites {}, or once more dropped rows make the rewrite worth it. To have \
-                 them rewritten now, call `HelixDB::reclaim_dropped_index_storage` from a \
-                 process that opens the database as its writer; the server has no route for \
-                 it.",
+                 They cost their storage and nothing else, and wait for ordinary compaction to \
+                 rewrite {}, or for more dropped rows to make the rewrite worth it.",
                 bytes(left.dropped_bytes),
                 left.runs,
                 plural(left.runs as u64, "run", "runs"),

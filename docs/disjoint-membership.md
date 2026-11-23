@@ -97,14 +97,22 @@ most version 5 refuse a version-6 store, which they would not keep exact, so a
 rollback after the first open needs a backup taken before the upgrade. Labels
 longer than the label index bound are rejected as invalid queries.
 
-An embedded or controlled-migration writer open moves a version-7 store to
-version 8 in one commit that writes only the marker, so new databases end their
-first open at version 8. A managed failover writer serves a version-7 store as it
-is, and its drops delete their rows one by one. From version 8 a completed index
-drop or build abort leaves a dropped-generation entry and compactions discard
-the generation's rows. Binaries that support at most version
-7 refuse a version-8 store, whose entries they would neither decode nor honour, so
-a rollback after the first open needs a backup taken before the upgrade. Versions
+A version-7 store is moved to version 8 in one commit that writes only the
+marker. The move is performed by: an embedded writer open and a managed
+controlled-migration open, each right after it has started, or found finished,
+the label identity copy; and the background migration worker of any writer, a
+managed failover writer included, right after its copy step publishes version 7.
+A pristine managed store is bootstrapped at version 8, and a new embedded
+database ends its first open there. So a managed failover writer that opens a
+store already at version 7 serves it as it is, and its drops delete their rows
+one by one; one that opens a store at version 6 and publishes the copy moves it
+through 7 to 8. From version 8 a completed index drop or build abort leaves a
+dropped-generation entry and compactions discard the generation's rows. The
+move is one-way: binaries that support at most version 7 refuse a version-8
+store, whose entries they would neither decode nor honour. Every reader must
+therefore run an image that supports version 8 before any writer that performs
+the move opens the store, and a rollback after the move needs a backup taken
+before the upgrade. Versions
 after 8 return the existing unsupported-version error on reader, embedded-writer,
 and managed-failover open; startup must not lower or remove their marker. Managed
 bootstrap still refuses any nonempty store before version dispatch. The
