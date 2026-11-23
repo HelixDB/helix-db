@@ -17,13 +17,13 @@ roles.
 
 ## Sign in
 
-Continue with Google, GitHub or Microsoft. Foundry signs you in with your Helix
-account, so use the same provider you use for Helix Cloud.
+Continue with Google, GitHub or Microsoft, or sign in with your email and password.
+**Create one** makes a new account, and **Forgot your password?** emails you a reset
+link. Foundry signs you in with your Helix account, so use the same sign-in you use for
+Helix Cloud.
 
-Password and single sign-on sign-ins aren't offered on Foundry yet. If your company
-signs in with single sign-on, Foundry says so; use the
-[Helix dashboard](https://helix-db.com/login) instead. If your email isn't verified
-with the provider, verify it there or continue with another provider.
+If your company requires single sign-on, Foundry sends you through it. If your email
+isn't verified yet, Foundry emails you a code to enter on **Check your email**.
 
 ## Choose or create a workspace
 
@@ -41,8 +41,8 @@ the workspace you chose in this browser.
 A workspace without an ontology opens on **Get started**: try the
 [sample company](/foundry/start-here/sample-company), hand the setup to your agent, or
 create the [first ontology](/foundry/ontologies/create-an-ontology#create-your-first-ontology)
-yourself. Until then, the sidebar holds only the workspace menu, **Get started** and
-your account menu, which offers **Plan & billing**, usage, the theme and **Sign out**;
+yourself. Until then, the sidebar holds only **helixfoundry**, the workspace menu,
+**Get started**, **Feedback**, the **Founder** button and your account menu, which offers **Plan & billing**, usage, the theme and **Sign out**;
 there's no search or Settings link. Members see **This workspace isn't set up yet**
 until an owner or admin creates one.
 
@@ -50,12 +50,13 @@ until an owner or admin creates one.
   <img src="https://assets.helix-db.com/docs/foundry/start-here/onboarding.png" alt="A new workspace on Get started, with the sample company card and Or start with your own" />
 </Frame>
 
-## The main page: Analyst
+## The main page: Founder
 
-Foundry opens on the [Analyst](/foundry/ask/ask-questions), on the ontology you last
-opened, or the newest. Ask your data a question there, or pick a suggestion; the
-**Ontology** picker at the top opens another ontology. Select **helixfoundry** at the
-top of the sidebar to come back to it from anywhere.
+Foundry opens on Founder, on the ontology you last opened, or the newest. Ask a
+question there, or pick a suggestion, and Founder answers with sources cited. The
+**Ontology** picker at the top opens another ontology. Select **helixfoundry** at the top
+of the sidebar to come back to it from anywhere. See [Founder](/foundry/ask/founder) for
+what it can do, and [Ask questions](/foundry/ask/ask-questions) for how to read an answer.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/start-here/home.png" alt="The Analyst, Foundry's main page: What do you want to know about Customer contracts? with suggested questions, beside the sidebar with Analyst, Ontologies, Explorer and Connectors, and two threads under New thread" />
@@ -65,15 +66,23 @@ top of the sidebar to come back to it from anywhere.
 
 The sidebar is on every page. From the top:
 
-- **helixfoundry**, which opens the Analyst, and the search button.
+- **helixfoundry**, which opens Founder, and the search button.
 - The workspace menu, to switch workspaces.
-- The sections, by name: **Analyst**, **Ontologies**, **Explorer** and **Connectors**.
-- What the open section adds below them. For the Analyst, **New thread** and the
-  ontology's threads.
-- Your account menu, and **Settings**.
+- The sections, by name: [**Founder**](/foundry/ask/founder),
+  [**Dashboards**](/foundry/automate/dashboards),
+  [**Workflows**](/foundry/automate/workflows) and **Ontologies**.
+  The Explorer has no link of its own: open it from an ontology in the Ontologies panel.
+- What the open section adds below them: for Founder, **New chat**, your threads and any
+  **Earlier questions**; for Dashboards, its dashboards; for Workflows, while one is
+  open, the workflows.
+- Jobs in progress, while there are any, then **Connectors** and **Feedback**.
+- Your account menu, the **Founder** button (<kbd>⌘</kbd> <kbd>J</kbd>, <kbd>Ctrl</kbd>
+  <kbd>J</kbd> on Windows and Linux) and **Settings**.
 
 A [restricted member](/foundry/workspace/access#restricted-members) sees only
-**Analyst**, **Ontologies** and **Explorer**, with no search or Settings.
+**Founder**, **Dashboards** and **Ontologies**, with the Explorer of the ontologies they
+can read. They get no search, Connectors or Settings, and their account menu holds only
+the theme and **Sign out**.
 
 Three sections have a second panel, beside the sidebar:
 
@@ -98,9 +107,11 @@ side.
 ## Search with the command palette
 
 Press <kbd>⌘</kbd> <kbd>K</kbd> (<kbd>Ctrl</kbd> <kbd>K</kbd> on Windows and Linux), or
-select the search icon, to search pages, connections, synced tables, documents and
-ontologies, switch workspace or theme, and reopen what you opened recently. Owners and
-admins also get **Add data**, **New API source** and **Create an ontology** there.
+select the search icon, to search pages, connections, synced tables, documents,
+ontologies, dashboards and workflows, open Founder, switch workspace or theme, and
+reopen what you opened recently. Owners and admins also get **Add data**, **New API
+source** and **Create an ontology** there. Restricted members, and a workspace still on
+**Get started**, have no search.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/start-here/command-palette.png" alt="The command palette searching for cus, listing synced tables and an ontology" />
@@ -123,9 +134,9 @@ browser.
 Rename or delete a workspace in the Helix dashboard; Foundry shares it with Helix Cloud.
 Settings also holds [AI models](/foundry/workspace/ai-models),
 [Members](/foundry/workspace/members-and-roles),
-[Access](/foundry/workspace/access),
-[Plan & billing](/foundry/workspace/plans-and-billing) and
-People enrichment.
+[Access](/foundry/workspace/access) (owners and admins),
+[Plan & billing](/foundry/workspace/plans-and-billing), People enrichment (Helix has
+paused its lookups for now) and Sharing, for public dashboard links.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/workspace/settings.png" alt="Settings, General tab, with the workspace's name, address, region, role and ID" />
@@ -137,10 +148,13 @@ Foundry emails you, from Helix, about your own work:
 
 | Email | When |
 | --- | --- |
-| **… is ready to ask** | Your workspace's [first ontology](/foundry/ontologies/create-an-ontology#create-your-first-ontology) was drafted and loaded. If the load stopped at the month's budget, it says some documents weren't read. |
+| **… is ready to ask** | Your workspace's [first ontology](/foundry/ontologies/create-an-ontology#create-your-first-ontology) was drafted and loaded. If the load left some documents unread, because of the month's budget or documents the model couldn't read, it says so and why. |
 | **… couldn't be drafted**, **… couldn't be loaded** | Your first ontology's draft or load failed. It says why, and links to the ontology to try again. |
 | **…'s first draft is ready** | Your first ontology was drafted but not loaded, so the draft waits for your review. |
 | **Try Foundry on your own data** | Once, a day after you ran the [sample company](/foundry/start-here/sample-company), if the workspace still has no data of its own. |
+| **… has questions for you** | Foundry's agent, drafting your first ontology, needs a few answers before it can finish. If no one answers within a week, it carries on with its own best guesses. |
+| **&lt;workflow&gt;: …** | A [workflow](/foundry/automate/workflows) you own reached a step that emails you what it did, and any actions waiting for you. |
+| **… paused after failing** | A workflow you own failed several runs in a row, so Foundry paused it. It says why, and links to the workflow to resume it. |
 
 Invitations to a workspace come from Helix; see
 [Members and roles](/foundry/workspace/members-and-roles#invite-people).
@@ -153,5 +167,8 @@ Invitations to a workspace come from Helix; see
   </Card>
   <Card title="Plans and billing" icon="credit-card" href="/foundry/workspace/plans-and-billing">
     Compare Free, Pro and Max.
+  </Card>
+  <Card title="Founder" icon="sparkles" href="/foundry/ask/founder">
+    Ask questions and get work done on Foundry's main page.
   </Card>
 </CardGroup>

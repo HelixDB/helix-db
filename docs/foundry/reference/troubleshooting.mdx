@@ -1,6 +1,6 @@
 ---
 title: "Troubleshooting Helix Foundry"
-description: "What Helix Foundry's sign-in, connection, sync, API source, document, generation, database, load, Analyst, AI model and Helix MCP messages mean, and what to do"
+description: "What Helix Foundry's sign-in, connection, sync, API source, document, generation, database, load, question, Founder, AI model and Helix MCP messages mean, and what to do"
 sidebarTitle: "Troubleshooting"
 pageType: "Troubleshooting"
 ---
@@ -13,12 +13,15 @@ Find the message Foundry shows, then its cause and fix.
 
 | Message | Cause and fix |
 | --- | --- |
-| Your company signs in with single sign-on. | Foundry doesn't offer single sign-on yet. Sign in to the [Helix dashboard](https://helix-db.com/login) instead. |
-| Your email isn't verified yet. | Verify the email with your provider, or continue with another provider. |
+| Your company signs in with single sign-on. | Foundry couldn't start your company's single sign-on. Try again in a moment, or ask whoever manages Helix at your company. |
+| Your email isn't verified yet. | The code Foundry emailed ran out or was tried too many times. Sign in again to get a new code. |
 | This account can't sign in here. | The environment doesn't accept this account. Sign in with your work account, or ask Helix for access. |
-| Sign-in couldn't start. | Choose a provider to try again. |
+| Sign-in couldn't start. | Choose a way to sign in to try again. |
 | Sign-in is unavailable right now. | Helix couldn't start sign-in. Try again in a moment. |
 | Sign-in didn't finish. | The sign-in link expired or was already used. Try again. |
+| That email and password don't match. | Check them and try again, or select **Forgot your password?** to reset it. |
+| An account already uses this email. | Sign in instead, or reset its password from **Forgot your password?**. |
+| Helix couldn't reach sign-in. | Try again in a moment. |
 | Couldn't load your workspaces. | Foundry couldn't reach Helix. Select **Retry**; **Sign out** is offered on the same page. |
 
 ## Connections and syncs
@@ -29,11 +32,11 @@ Find the message Foundry shows, then its cause and fix.
 | This key cannot read: … | The key can't read those objects, so they're skipped. Add **Read** for them and test again, or carry on without them. |
 | The database can't be reached | The database must accept connections from Helix's network. Allow the outbound addresses the form lists, and check the host and port. Private addresses are refused. |
 | A TLS error | Foundry verifies the server's certificate. Add the CA certificate under **Connection options**, or choose **No TLS** if the database doesn't offer it. |
-| this key can't read events, so on Pro and Max every sync reads every object in full | Stripe: give the key **Read** on Events, so syncs read only what changed. It syncs either way. |
+| this key can't read events, so on Pro and Max every sync reads every object in full | Stripe: give the key **Read** on Events. WorkOS: use a key that can read the Events API. Syncs then read only what changed; they work either way. |
 | table … has more than 2000000 rows; choose fewer tables | A table is over the [row limit](/foundry/reference/limits#connections). For a database, edit the connection and leave the table out; for PostHog, shorten the event history. |
 | Syncs fail after a table changed | A selected database table was dropped or renamed. Edit the connection and test it again. |
 | A sync of this connector is already queued or running | Wait for it to finish before syncing, editing or deleting. |
-| **Connect** is off for S3 | The chosen tables are over the [20 GB a connection syncs](/foundry/reference/limits#connections). Choose fewer tables, or a narrower folder. |
+| **Connect** is off for S3 | The chosen tables are over the [20 GiB a connection syncs](/foundry/reference/limits#connections). Choose fewer tables, or a narrower folder. |
 | The tree shows its usual order and can't be rearranged | A newer version of Foundry arranged it. Reload the page. |
 
 ## API sources
@@ -55,8 +58,8 @@ Find the message Foundry shows, then its cause and fix.
 | Message or state | Cause and fix |
 | --- | --- |
 | Already uploaded: it's in … | The workspace has this file already, in the set named. Foundry keeps one copy. |
-| Only Markdown, MDX, text, JSON, CSV, TSV, JSONL, Parquet, or PDF files can be uploaded. | Save the file in one of these formats, with its extension, uncompressed. |
-| The file is larger than 1.0 MiB, or 3.0 MiB | Text is up to 1 MiB, and PDFs and table files up to 3 MiB. Split it into smaller documents. |
+| Only Markdown, MDX, text, JSON, CSV, TSV, JSONL, Parquet, PDF, or WebVTT files can be uploaded. | Save the file in one of these formats, with its extension, uncompressed. |
+| … files hold at most 1.0 MiB, or 3.0 MiB | Text files (Markdown, MDX, plain text and WebVTT) hold up to 1 MiB, and PDFs and table files up to 3 MiB. Split it into smaller files. |
 | Reading its text, or Reading its rows | Foundry reads a PDF's text, or a table file's rows, once after the upload. Wait a moment; a generation started meanwhile leaves the file out. |
 | Scanned PDF: no text to read | The PDF has no text layer, so ontologies can't read it. Upload a PDF with its text, such as one exported from the original, or the text itself. |
 | Ontologies can't read it, for a PDF | The PDF is encrypted, damaged or longer than 150 pages. Upload an unlocked copy, or split it. |
@@ -75,10 +78,10 @@ Find the message Foundry shows, then its cause and fix.
 | --- | --- |
 | Retrying | An attempt failed for a passing reason and Foundry will try again; the page says why and when. Nothing to do. |
 | Failed | The generation failed for good. Open it from **Schema versions** and select **Try again** to reopen the form with the same goal, connectors and document sets; choosing fewer tables or a clearer goal helps. |
-| A generation reads at most 20 document sets | Untick a set to choose another. |
-| One generation covers at most 50 tables | Choose fewer connectors or sets: table files count as tables. |
-| A workspace may start 10 ontology generations an hour | Generations and version edits are capped per workspace. Try again later. |
-| Syncing… you can continue once it's synced. | The connection you added on New ontology is on its first sync. Wait for it, or choose a connection that has synced. |
+| A generation reads at most 20 document sets | Untick a set to choose another. An API source read by entity extraction counts as a set. |
+| One generation covers at most 50 tables | Choose fewer connectors, sets or API sources: table files, and API sources read as tables, count as tables. |
+| A workspace may start 10 ontology generations an hour | New generations are capped per workspace; version edits don't count. Try again later. |
+| Syncing… or Reading its files… you can continue once … | A connection you added is on its first sync, or an uploaded table file is still being read. Wait for it, or choose a source that's ready. |
 | … is used by …. Choose another. | A database holds one ontology. Choose another database, or create a new one. |
 | Making a version current is refused | Someone else made another version current at the same time. The page now shows it; make yours current again if you still want it. |
 | A new database needs a Helix plan | The workspace has no active Helix Cloud plan: its plan ended, or it signed up through the Helix website, so it doesn't get [Foundry's free plan](/foundry/workspace/plans-and-billing#the-helix-cloud-plan-for-databases). Select **Open Helix billing** to choose one, or, for an ontology after the first, **Use an existing one** for a database you already have. |
@@ -90,14 +93,14 @@ Find the message Foundry shows, then its cause and fix.
 | Message or state | Cause and fix |
 | --- | --- |
 | **Load data** isn't offered | Only a current agent draft the agent finished can be loaded. [Generate](/foundry/ontologies/generate-and-version) one and make it current. |
-| Partial, or Stopped at the cap | Reading documents reached the [spending cap](/foundry/ontologies/load-data#spending-and-limits). The documents it didn't reach are read into it once it's current and the month has budget. |
+| Partial, or Stopped early | The load stopped before reading every document. It reached the [spending cap](/foundry/ontologies/load-data#spending-and-limits), the workspace's own AI key was refused or ran out of quota, or the model left some unread. The load's page says which. What it read is in the database, and the documents it didn't reach are read later: after a cap, once it's current and the month has budget. |
 | The workspace has spent this month's $50.00 of loads | New loads are refused until next month. [Usage](/foundry/workspace/usage) shows the month's spend. |
 | The tables synced again during the load | A source changed under the load. Start a new load to write the new snapshot. |
-| A document needs review | The load couldn't settle something in it, such as an unknown or ambiguous name, a quote it couldn't verify, or a fact that conflicts with your tables. Open the document to see why, and [settle it](/foundry/explore/records-and-entities#settle-a-review). |
+| A document needs review | The load couldn't settle something in it, such as an unknown or ambiguous name, a quote it couldn't verify, or a fact that conflicts with your tables. Settle it on the ontology's [Review](/foundry/ontologies/review) page, or open the document to see why and [settle it there](/foundry/explore/records-and-entities#settle-a-review). |
 | The load reads no documents | Its version reads no document sets. Generate a version that picks some. |
 | Delete failed | Select **Retry delete** in the load's menu in **Data loads**. |
 
-## Explorer and Analyst
+## Explorer and questions
 
 | Message or state | Cause and fix |
 | --- | --- |
@@ -107,11 +110,25 @@ Find the message Foundry shows, then its cause and fix.
 | You don't have read access to this database | The Explorer, Records and entity pages read the database a load wrote. Ask an owner or admin for **Query read** on its Helix project; see [Members and roles](/foundry/workspace/members-and-roles#what-new-members-can-read). |
 | Queries are paused: this workspace has no active Helix plan | The Explorer, Records and entity pages can't read the database. Select **Choose a plan** for the Helix dashboard's billing. **Queries are paused for billing** means the plan's billing stopped them: **Open Helix billing**. |
 | … can't be asked about until it's written | The load is still writing. Wait for it to finish. |
-| You can't read this ontology's database | The Analyst reads the database a load wrote. Ask an owner or admin for **Query read** on its Helix project. |
+| You can't read this ontology's database | Questions read the database a load wrote. Ask an owner or admin for **Query read** on its Helix project. |
 | This ontology can't answer that | What the load holds doesn't say. Select **Draft a new version with this** to generate a version that can. |
 | Stopped at this question's limit | It used a question's $0.50, 20 steps or 4 minutes. Ask something narrower. |
-| Waiting for this month's questions budget | The workspace's questions budget is spent. The question runs once the month allows it, or cancel it. |
+| Waiting for this month's questions budget | Questions already running hold the rest of the workspace's [questions budget](/foundry/reference/limits#questions). It runs once they finish, if the month still has room for it, or cancel it. |
+| The workspace has spent this month's $15.00 of questions | Less of the workspace's [questions budget](/foundry/reference/limits#questions) is left than one question may spend ($0.50). New questions, and ones still queued, are refused until next month. |
 | The workspace has asked 30 questions in the last hour | Try again later. |
+| You have asked 10 questions in the last hour, or You have spent this month's $10.00 of questions | You're restricted to shared sources, so you also have limits of your own: 10 questions an hour and $10 a month. Try again later. |
+| Too many questions have been asked here in the last hour, or This workspace's questions are used up for the month | The workspace's limit is reached. Try again later. |
+
+## Founder and Workflows
+
+For how Founder works, see [Founder](/foundry/ask/founder).
+
+| Message or state | Cause and fix |
+| --- | --- |
+| You have sent 30 messages in the last hour | Founder takes 30 messages an hour from each person, apart from the limits on questions about the data. Try again later. |
+| The workspace has spent this month's $30.00 of Founder | Founder's monthly budget is spent. It's apart from questions' budget. Try again next month. |
+
+For what Workflows refuse, see [Workflows](/foundry/automate/workflows) and [Limits](/foundry/reference/limits#workflows).
 
 ## AI models
 
@@ -138,7 +155,8 @@ Find the message Foundry shows, then its cause and fix.
 | --- | --- |
 | A member sees only some ontologies, or part of one | They're restricted to the sources shared with them. Give them more under [Access](/foundry/workspace/access), or lift the restriction there. |
 | **Restricted** can't be turned off | They still hold sources, their own or a team's. Take those away first. |
-| An ontology shows **Load again to share** | Its current load was made before Foundry kept track of what each load reads. Load it again. |
+| Not shared with you | The sources shared with you don't cover all of this ontology's current load. Ask an owner or admin to share them under [Access](/foundry/workspace/access). |
+| An ontology shows **Load again to share** | Its current load holds something no source covers: it was made before Foundry kept track of what each load reads, or it applies a review decision whose documents weren't recorded. Load it again. |
 
 ## Next steps
 

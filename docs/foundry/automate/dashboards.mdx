@@ -1,0 +1,186 @@
+---
+title: "Dashboards"
+description: "Build Helix Foundry dashboards of charts and tables over your ontologies' loads, from Founder or from an answer, pin them for the workspace, and share them inside it or at a public snapshot link"
+sidebarTitle: "Dashboards"
+pageType: "Guide"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
+
+A dashboard is a page of tiles: tables and charts of your ontologies' data. Each tile is
+one saved query over an ontology's load, the same kind of query an
+[answer](/foundry/ask/ask-questions#read-an-answer) draws its results from. A dashboard
+holds queries, not data. Whoever opens it reads every tile live, as themselves, so it
+never shows anyone more than they may read.
+
+**Dashboards**, in the sidebar, lists them: **Pinned** first, in the order they were
+pinned, then the rest, most recently edited first. The page's **Show** filter picks **All**, **Pinned** or
+**Yours**.
+
+## What a tile shows
+
+A tile reads one of two loads:
+
+- **The current load** of its ontology, so it follows each new load. This is the
+  default.
+- **One load, kept as it was**: the load an answer read, if you chose to keep it.
+
+It draws its result by its shape, as answers do: a count or total as one figure, groups
+as bars or a line over dates, rows as a table. **Chart** and **Table** switch between
+the two, and records in a table link to their pages. A tile whose ontology has nothing
+loaded yet, or was deleted, or isn't shared with you, says so in its place.
+
+## Make a dashboard
+
+<Tabs>
+  <Tab title="With Founder">
+    Select **New dashboard** on the Dashboards page or in the sidebar. It opens
+    [Founder](/foundry/ask/founder) with "Build me a dashboard for: " in the composer:
+    say what you want to see. Founder makes a dashboard you asked for at once, and its
+    card offers **Undo**, which deletes it. Other changes, such as new tiles on an
+    existing dashboard, come as cards that run only when you click them.
+
+    On a dashboard's page, Founder (⌘J, or Ctrl J on Windows and Linux) knows which dashboard you're
+    looking at, so you can ask it to change this one.
+  </Tab>
+
+  <Tab title="From an answer">
+    Each chart or table in an answer has **Add to dashboard**. Choose the dashboard, or
+    **New dashboard…** and give it a name. The visual becomes a tile of its own, last on
+    the dashboard.
+
+    Leave **Keep showing the load this answer read** off for a tile that reads whichever
+    load is current. Turn it on to keep the answer's load.
+  </Tab>
+</Tabs>
+
+Agents make and change dashboards too, through the [Helix MCP](/foundry/agents/helix-mcp#changes-with-a-confirmation), after your confirmation:
+`create_dashboard`, `update_dashboard` and `delete_dashboard` for anyone who may, plus `pin_dashboard`, `publish_dashboard` and `unpublish_dashboard` for owners and admins.
+
+## Edit a dashboard
+
+Select **Edit** on a dashboard you may change. You can change its name and description,
+and for each tile:
+
+- **Title**, up to 80 characters.
+- **Show as**: **As its result suits**, **Table**, **Bar chart**, **Line chart** or
+  **One figure**.
+- **Arrange**: **Move left**, **Move right**, **Move up**, **Move down**, **Full width**
+  or **Remove tile**. A row holds 1 to 3 tiles.
+- **The read**: which ontology and load it reads, and its query.
+
+Select **Save changes** to save them all at once. If someone else saved the dashboard
+while you were editing, Foundry keeps your edits and says so: **Discard my edits** to
+see theirs, then edit again.
+
+New tiles come from Founder or from **Add to dashboard**, not from Edit.
+
+## Pin a dashboard
+
+Owners and admins pin a dashboard for everyone: **More actions**, then **Pin for
+everyone**. It shows under **Pinned** in every member's sidebar, and **Unpin for
+everyone** takes it off. A pinned dashboard is the owners' and admins' to change.
+
+## Who can do what
+
+| | Owners and admins | Members | [Restricted members](/foundry/workspace/access#restricted-members) |
+| --- | --- | --- | --- |
+| See dashboards | Every one | Every one | Pinned ones only |
+| Make one | Yes | Yes | No |
+| Edit | Any | Their own, while it isn't pinned | No |
+| Delete | Any | Their own, while it isn't pinned or published | No |
+| Pin for everyone | Yes | No | No |
+| Make or end a public link | Yes | No | No |
+
+Every viewer reads each tile as themselves, so two people may see different numbers on
+the same dashboard.
+
+Deleting a dashboard (**More actions**, then **Delete dashboard**) removes its tiles for
+everyone and stops its public link. The data the tiles read stays.
+
+## Share a dashboard
+
+The dashboard's **Share** menu has two ways to share it.
+
+### Inside the workspace
+
+**Copy link** copies the dashboard's address. Anyone in the workspace who can read its
+data can open it. Each person signs in and reads it live, as themselves. Anyone can copy
+it, from the menu or from a dashboard's card on the Dashboards page.
+
+### Public link
+
+A public link shows the dashboard to people outside the workspace, without signing in.
+Only owners and admins make one: **Share**, then **Make a public link…**. Before you
+publish, know that:
+
+- anyone with the link can view it, without signing in;
+- it's a snapshot of what you can see now, not of what each viewer may read;
+- it doesn't change until you publish it again.
+
+Choose when the link ends under **Link ends**: **Never**, **After 7 days**, **After 30
+days** or **After 90 days**. Then select **Publish**.
+
+The public page shows the dashboard's name and description, when the snapshot was
+taken, and the tiles. Records show as names, with nothing to open. The snapshot keeps
+each tile's result, not the values its query searched for.
+
+To manage a live link, open **Share**, then **Manage public link…**:
+
+- **Copy link** and **Open**.
+- **Refresh snapshot** publishes the dashboard as it is now, at the same link. The
+  dialog says when you've edited it since the last snapshot. Change **Link ends** to
+  set a new end at the same time.
+- **Unpublish** stops the link at once. Publishing again makes a new link.
+
+Once a link expires it shows nothing, and publishing again makes a new link. The
+dashboard's page and card say a link's state, such as **Public link · expires** and a
+date.
+
+A [workflow](/foundry/automate/workflows) can keep a published dashboard current with
+the step **Refresh a dashboard's public snapshot**.
+
+No MCP tool or Founder answer returns a public link: it shows only on the dashboard's
+page in Foundry.
+
+### Turn public links off for the workspace
+
+**Settings › Sharing** holds the workspace's switch, **Allow public dashboard links**.
+It's on by default. Only owners change it; admins and members see it.
+
+Turning it off stops every public link of the workspace at once, and no one can publish
+a new one. A dashboard's own link, inside the workspace, isn't affected. Turn it on again
+and the links nobody unpublished, and that haven't expired, show again. To end a link
+for good while the switch is off, unpublish it.
+
+## Limits
+
+| Limit | Value |
+| --- | --- |
+| Dashboards per workspace | 200 |
+| Pinned dashboards per workspace | 20 |
+| Tiles per dashboard | 20, 1 to 3 a row |
+| Name | 120 characters |
+| Description | 1,000 characters |
+| Tile title | 80 characters |
+| Public snapshot | 512 KiB a tile, 2 MiB in all |
+
+A snapshot past its size is refused: show fewer rows. All of Foundry's limits are on
+[Limits](/foundry/reference/limits).
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Founder" icon="sparkles" href="/foundry/ask/founder">
+    Ask Founder to build and change dashboards.
+  </Card>
+  <Card title="Read an answer" icon="message" href="/foundry/ask/ask-questions#read-an-answer">
+    The answers and visuals dashboards are built from.
+  </Card>
+  <Card title="Workflows" icon="bolt" href="/foundry/automate/workflows">
+    Refresh a public snapshot on a schedule.
+  </Card>
+  <Card title="Access" icon="key" href="/foundry/workspace/access">
+    What restricted members see.
+  </Card>
+</CardGroup>

@@ -18,7 +18,7 @@ key then reads only what those sources hold of each ontology.
 | A connection | Every table it syncs, now and later, and the document sets it writes |
 | A table | One table of a connection |
 | A document set | Its documents |
-| People enrichment | The profiles a load looked up |
+| People enrichment | The profiles a load looked up (Helix has paused lookups for now) |
 
 Sharing works on each ontology's current load: the entities, facts and documents that
 those sources filled. Someone who holds every source a load reads reads the whole
@@ -39,6 +39,11 @@ ontology. Someone who holds some of them reads only that part.
     **Part of it**, which names the sources they're missing. **Can't read yet** lists the
     other ontologies, each with the sources it reads.
 
+    Under **Permissions**, **Usage** is on by default. It lets them see the
+    [use cases](/foundry/agents/helix-mcp#use-cases) of what they read and record runs:
+    every run of an ontology they read all of, otherwise only the runs they started. A
+    team with **Usage** off turns it off for its members.
+
     <Frame>
       <img src="https://assets.helix-db.com/docs/foundry/workspace/access-sources.png" alt="The Sources dialog for a member: the General set ticked, and Customer contracts listed as part of it under Can read" />
     </Frame>
@@ -50,31 +55,41 @@ ontology. Someone who holds some of them reads only that part.
 </Steps>
 
 **Load again to share** beside an ontology means its current load can't be shared,
-because it was loaded before Foundry kept track of what each load reads. Load it again.
+because it holds something no source covers. Either it was loaded before Foundry kept
+track of what each load reads, or it applies a review decision whose documents weren't
+recorded. Load it again.
 
 ## Restricted members
 
 Giving a member sources restricts them. A restricted member:
 
-- sees only **Analyst**, **Ontologies** and **Explorer** in the sidebar: no
-  Connectors, Settings or search, and only the theme and **Sign out** in the account
-  menu;
+- sees only [Founder](/foundry/ask/founder), [Dashboards](/foundry/automate/dashboards)
+  (the pinned ones) and **Ontologies** in the sidebar, and opens the Explorer from an
+  ontology: no Connectors, Settings or search, and only the theme and **Sign out** in
+  the account menu;
 - sees only the ontologies their sources cover, and only what those sources hold of them;
-- asks the Analyst and reads records, entities and documents, but changes nothing;
+- asks Founder, which only reads and asks for them, and reads records, entities,
+  documents and pinned dashboards, but changes nothing beyond their own questions,
+  threads and use case runs;
 - has no graph: the Explorer opens **Records**, and an ontology's pages other than its
-  overview, such as its loads and versions, open the overview.
+  overview, its documents and, with **Usage** on, its use cases (its loads and versions,
+  say) open the overview.
 
 A restricted member who holds no sources yet sees **Nothing shared with you yet**.
 
 Where they hold only part of an ontology, its pages say so.
 
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/workspace/access-restricted.png" alt="A restricted member's view of an ontology they can read part of, with only Analyst, Ontologies and the Explorer in the sidebar" />
+  <img src="https://assets.helix-db.com/docs/foundry/workspace/access-restricted.png" alt="A restricted member's view of an ontology they can read part of, with only Founder, Dashboards and Ontologies in the sidebar" />
 </Frame>
 
 Taking sources away doesn't lift the restriction. Without them, the member reads less,
 or nothing. To lift it, take away every source they hold, their own and their teams',
 then turn off **Restricted** for them under **People**.
+
+Under **People**, **Restricted, holds nothing** lists restricted members with no sources
+left. **Lift** lifts each one in one click. You can also turn on **Restricted** for a
+member before you give them any sources.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/workspace/access-people.png" alt="The People tab: the owner, a member who can't be restricted because of raw access, and a restricted member who reads part of an ontology" />
@@ -82,11 +97,13 @@ then turn off **Restricted** for them under **People**.
 
 Some people can't be restricted:
 
-- **Owners and admins** always see everything.
+- **Owners and admins** always see everything. A restriction applies only while
+  someone's role is member.
 - **Members with raw access** can't be restricted. Raw access means the member writes to
   a project or queries its databases outside Foundry, which is set in the
   [Helix dashboard](https://helix-db.com/login). Take that access away there first. A
-  team that has such a member can't be given sources either. If a restricted member is
+  team that has such a member can't be given sources, and such a member can't join a
+  team that has them. If a restricted member is
   given raw access later, they're flagged **Raw access**, because Foundry can't limit
   what they do outside it.
 
@@ -102,7 +119,8 @@ hold otherwise.
 ## Agent keys
 
 An agent's key reads and asks only the ontologies its sources cover, through the
-[Helix MCP](/foundry/agents/helix-mcp). It changes nothing.
+[Helix MCP](/foundry/agents/helix-mcp). It changes nothing, apart from recording its own
+use case runs while **Usage** is on.
 
 <Steps>
   <Step title="Make a key">
@@ -143,7 +161,7 @@ lists who would stop reading what, and asks first.
 
 Someone reading through sources asks up to 10 questions an hour and spends up to $10 a
 month on questions. Their questions also count toward the workspace's own
-[limits](/foundry/reference/limits#analyst).
+[limits](/foundry/reference/limits#questions).
 
 Reading through sources also shows less than full access does:
 

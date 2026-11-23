@@ -8,8 +8,9 @@ pageType: "Guide"
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
 Foundry uses AI models to draft ontologies, read documents into loads, check the facts
-it finds, answer questions and assess workflow runs. **Settings** → **AI models** says
-where they run. Owners choose; everyone else in the workspace sees the choice.
+it finds, answer questions, assess use case runs and run [Founder](/foundry/ask/founder),
+including the Founder steps of [workflows](/foundry/automate/workflows). **Settings** →
+**AI models** says where they run. Owners choose; everyone else in the workspace sees the choice.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/workspace/ai-models.png" alt="Settings, AI models: Choose where AI runs, with Default chosen and Claude, with your own API key" />
@@ -28,8 +29,9 @@ Anthropic API key instead, under the terms of its Anthropic account.
 
 <Steps>
   <Step title="Choose Claude">
-    Select **Claude**, paste an Anthropic API key, and choose a model for each task, or
-    keep the recommended ones.
+    Select **Claude** and paste an Anthropic API key. Keep **Model** on **Recommended for
+    each task**, pick one model for every task, or select **Choose a model per task** to
+    set Drafting, Questions, Reading documents and Checking facts separately.
 
     <Frame>
       <img src="https://assets.helix-db.com/docs/foundry/workspace/ai-models-claude.png" alt="AI models with Claude chosen: the API key field and the model for each task" />
@@ -43,9 +45,14 @@ Anthropic API key instead, under the terms of its Anthropic account.
   </Step>
 </Steps>
 
-From then on, new drafts, document reads and questions run on your key. Documents are
-read again on their next load, at your key's cost. To go back, choose **Default** and
-select **Use the default**; it takes effect at once.
+[Founder](/foundry/ask/founder) runs on the Questions model. Once the test passes, Foundry checks that Founder can
+run on that model. If it can't, the page says why: drafts, loads and questions still run
+on your key, but Founder needs a Questions model that calls tools.
+
+From then on, new drafts, document reads and questions run on your key. If you choose a
+different model for reading documents or checking facts, documents are read again on
+their next load, at your key's cost; the confirmation says so. To go back, choose
+**Default**, select **Use the default**, then **Switch**; it takes effect at once.
 
 Foundry keeps the key encrypted and never shows it again. Spend on your own key counts
 toward the workspace's [monthly caps](/foundry/workspace/usage) all the same. On Free,
@@ -60,7 +67,8 @@ chooses **Default**. The page says so.
 
 ## Who can change it
 
-Only owners. Admins and members see where the workspace's AI runs.
+Only owners. Admins and members see where the workspace's AI runs, except members
+[limited to certain sources](/foundry/workspace/access).
 
 ## Next steps
 
@@ -70,5 +78,8 @@ Only owners. Admins and members see where the workspace's AI runs.
   </Card>
   <Card title="Plans and billing" icon="credit-card" href="/foundry/workspace/plans-and-billing">
     Upgrade to Pro or Max.
+  </Card>
+  <Card title="Founder" icon="comments" href="/foundry/ask/founder">
+    Ask, change and build with Founder.
   </Card>
 </CardGroup>

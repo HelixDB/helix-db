@@ -11,6 +11,8 @@ A connection is a source Foundry reads, such as a Stripe account or a PostgreSQL
 database. Each sync copies its tables into a snapshot that generations and loads read,
 and Foundry syncs every connection on a schedule. Owners and admins add, sync, edit and
 delete connections; members see them.
+[Restricted members](/foundry/workspace/access#restricted-members) have no Connectors
+section.
 
 <Frame caption="Connect Stripe, test the key, sync it and open a table.">
   <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/data/connect-data-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/data/connect-data.webm"></video>
@@ -18,7 +20,7 @@ delete connections; members see them.
 
 ## The Connectors section
 
-**Connectors**, in the sidebar, holds the workspace's connections,
+**Connectors**, at the foot of the sidebar, holds the workspace's connections,
 [API sources](/foundry/data/api-sources) and [documents](/foundry/data/documents). The
 Connectors explorer, a panel beside the sidebar, lists them as a tree; the page beside
 it shows what you open.
@@ -84,19 +86,31 @@ delete buttons, show on a row while you point at it or it has the focus.
   <Step title="Choose the source">
     Select **Add data** on the Connectors overview, or **+** in the explorer's head, then
     choose where the data is: an app, a database, files in Amazon S3, or an
-    [API source](/foundry/data/api-sources) your app or agent sends data to. A tick marks
-    a kind the workspace already connects; you can add another. Every plan offers every
+    [API source](/foundry/data/api-sources) your app or agent sends data to. A tick, or a
+    count when there are several, marks a kind the workspace already connects; you can
+    add another. Every plan offers every
     kind.
 
     <Frame>
-      <img src="https://assets.helix-db.com/docs/foundry/data/add-data.png" alt="The Where is your data? picker with Stripe, WorkOS, PostHog, GitHub, Linear, Cal.com, Granola, Slack, Notion and Google Workspace, then PostgreSQL and MySQL, Amazon S3, and API source" />
+      <img src="https://assets.helix-db.com/docs/foundry/data/add-data.png" alt="The Where is your data? picker with Stripe, WorkOS, PostHog, GitHub, Linear, Cal.com, Granola, Slack, Notion, Google Workspace and Databuddy, then PostgreSQL and MySQL, Amazon S3, and API source" />
     </Frame>
+
+    Don't see your source? **Request a connector**, under the kinds or in the
+    Connections section of the Connectors overview, tells Helix what you'd like to
+    connect. Members can ask too.
   </Step>
 
   <Step title="Create a read-only credential">
     Follow the numbered steps above the form. They link to the place in the source
     where you create the key or user, and say which read permissions to give it.
     [Connectors](/foundry/data/connectors) lists them for every source.
+
+    GitHub and Linear connect by signing in: select **Connect with GitHub** or
+    **Connect with Linear** and approve access there. **Use a personal access token
+    instead** (GitHub) or **Use a personal API key instead** (Linear) opens the key
+    form. GitHub may also ask you to install the Helix Foundry GitHub App and choose
+    its repositories. A signed-in connection reads with the access of whoever signed
+    in. [Connectors](/foundry/data/connectors#github) has the details.
 
     <Frame>
       <img src="https://assets.helix-db.com/docs/foundry/data/stripe-form.png" alt="The Stripe form with its three numbered steps above the Restricted API key field" />
@@ -119,13 +133,15 @@ delete buttons, show on a row while you point at it or it has the focus.
   </Step>
 
   <Step title="Connect and sync">
-    Select **Connect and sync**. Foundry stores the credential encrypted, opens the
-    connection's page and queues its first sync. The connection joins its kind's folder
-    in the explorer.
+    Select **Connect and sync** (for a database or S3, **Connect and sync every table**
+    or **Connect and sync N tables**). Foundry stores the credential encrypted and
+    queues the first sync. The dialog says it's connected and offers **Add another
+    source**, or **Open** followed by the connection's name to go to its page. The
+    connection joins its kind's folder in the explorer.
   </Step>
 </Steps>
 
-An agent connected through the [Helix MCP](/foundry/agents/helix-mcp) can't add a
+An agent connected through the [Helix MCP](/foundry/agents/helix-mcp#connectors-stay-on-the-website) can't add a
 connection itself: it gives you a link that opens this form for the kind you asked for,
 so credentials never pass through the agent.
 
@@ -136,6 +152,17 @@ A connection's page shows its status, its recent syncs and its tables. A sync is
 runs. An attempt that fails for a passing reason runs again a minute or two later, shown
 as **Retrying**, up to three attempts. When a sync fails, the page says why above its
 history.
+
+A failure that retrying can't fix stops the connection's scheduled syncs: a table you
+chose that the credential can no longer read, or a table over Foundry's size limit. Fix
+it with **Edit connection**: saving resumes the schedule. **Sync now** still runs, and a
+sync that succeeds resumes the schedule too.
+
+A signed-in connection whose access lapses shows **Needs signing in again** and stops
+syncing until an owner or admin selects **Sign in again** in its **⋯** menu, which
+signs it in with their access and syncs it. Until then, a banner at the top of every
+page says so. Owners and admins get **Sign in again** in it (**Open Data** when several
+connections need it); members are asked to have an owner or admin do it.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/data/connection.png" alt="A synced Stripe connection with its recent syncs, details and table cards" />
@@ -161,7 +188,8 @@ records updated since the last sync, or new files in S3. A daily full read catch
 those can't see, such as deleted records. PostgreSQL and MySQL tables, and any table
 without a primary key, are read in full each time and compared with the last snapshot.
 A Stripe key needs **Read** on Events for this; without it, every sync reads every table
-in full, and the test says so.
+in full, and the test says so. PostHog syncs at most once a day on every plan (see
+[PostHog](/foundry/data/connectors#posthog)).
 
 You can also sync at any time: select **Sync now** on a connection's page, or **Sync**
 on its row in the explorer. A connection also syncs after you change its settings. An
@@ -170,7 +198,9 @@ every plan; a large one waits longer between syncs (see
 [Read an API source](/foundry/data/api-sources#read-an-api-source)).
 
 When a sync changes tables an ontology's current load reads, the ontology
-[refreshes](/foundry/ontologies/load-data#automatic-refreshes) by itself.
+[refreshes](/foundry/ontologies/load-data#automatic-refreshes) by itself. A
+[workflow](/foundry/automate/workflows) can also sync a connection, or start when one
+finishes syncing.
 
 ## Read a synced table
 
@@ -188,10 +218,11 @@ Open the **⋯** menu on a connection's page:
 
 - **Edit connection** changes its settings or credential. Foundry tests the new
   settings before it saves them, and syncs again when they changed. Leave the
-  credential blank to keep the stored one. To change which database tables sync, enter
+  credential blank to keep the stored one, unless the new settings point at a different
+  server, such as a changed database host: then enter it again. To change which database tables sync, enter
   the password and test the connection again.
-- **Delete connection** stops syncing it and removes its tables from the workspace's
-  data. The source itself is not changed.
+- **Delete connection** stops syncing it and removes its tables, and any documents its
+  syncs wrote, from the workspace's data. The source itself is not changed.
 
 Foundry never shows a stored credential again. An API key is named by its prefix and
 last four characters, such as `rk_live…Qx7m`; a database shows that a password is set.

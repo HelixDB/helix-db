@@ -42,8 +42,11 @@ extraction. API sources are on every plan.
   </Step>
 </Steps>
 
-An agent can create one too, with the MCP's `create_event_source` action, after your
-confirmation.
+An agent can create one too, with the MCP's `create_event_source` operation, which can
+also set the text field, after your confirmation.
+
+Owners and admins rename, describe or delete a source from its page's menu: **Edit API
+source**, **Delete API source**.
 
 ## Send tokens
 
@@ -127,8 +130,8 @@ what each answer means.
 | Field | Rule |
 | --- | --- |
 | `id` | 1 to 128 printable ASCII characters, no spaces, unique within the send. A piece with an id the source holds replaces it. |
-| `occurred_at` | Optional: when it happened, as an RFC 3339 time. |
-| `data` | One JSON object, at most 256 KiB and 64 levels deep. Its top-level keys are the source's fields: at most 200 in a source, 1 to 64 bytes each. `id`, `received_at` and `occurred_at` can't be data keys. |
+| `occurred_at` | Optional: when it happened, as an RFC 3339 time in the years 1000 to 9999. |
+| `data` | One JSON object, at most 256 KiB and 64 levels deep. Its top-level keys are the source's fields: at most 200 in a source, 1 to 64 bytes each, with no control characters or backticks, and none twice. `id`, `received_at` and `occurred_at` can't be data keys. |
 
 A field keeps the JSON type it first had: string, number, boolean, object or array, and
 `null` is always allowed. A send that changes a field's type is refused and names both
@@ -140,9 +143,9 @@ pieces; Foundry stores nothing new and answers `replayed: true`.
 
 ### Answers
 
-A send that is stored answers 200, with the source's `capacity`, any `warning` and when
-its next sync is due (`next`). One bad piece refuses the whole send, and none of it is
-stored.
+A send that is stored answers 200 with `replayed`, the fields it added (`new_fields`),
+the source's `capacity`, any `warning`, and `next`, a note that pieces reach the table at
+its next sync. One bad piece refuses the whole send, and none of it is stored.
 
 | Status | Meaning |
 | --- | --- |
@@ -153,8 +156,11 @@ stored.
 | 409 | The source is full or paused, or has all the fields it may have, as `reason` says. |
 | 413 | The body is over 2 MiB. Send fewer pieces at a time. |
 | 415 | Send JSON in UTF-8, uncompressed, with `Content-Type: application/json`. |
-| 429 | Too many sends: wait as long as `Retry-After` says, then retry with the same `client_token`. |
+| 429 | Too many sends, or the workspace has reached its daily cap of pieces or bytes. Wait as long as `Retry-After` says (for the daily cap, until 00:00 UTC), then retry with the same `client_token`. |
 | 500 to 504 | Wait a second, or as `Retry-After` says, then retry with the same `client_token`. |
+
+A source whose sync fails for good is paused and refuses sends until an owner or admin
+selects **Resume** on its page.
 
 ## Read an API source
 
@@ -179,13 +185,15 @@ Foundry keeps every piece until you delete the source.
 A source with a text field can be read back through the Helix MCP:
 `helix_foundry_recall` returns its pieces as Markdown notes, newest first or those
 holding some words, from the moment they are sent. Any member of the workspace can
-recall, signed in; send tokens only send. See [Agent memory](/foundry/agents/agent-memory).
+recall while signed in, unless source grants restrict them. Send tokens can only send.
+See [Agent memory](/foundry/agents/agent-memory).
 
 ## How ontologies read it
 
 On [New ontology](/foundry/ontologies/create-an-ontology) and in
 [Generate](/foundry/ontologies/generate-and-version#generate-a-draft), **API sources**
-lists the sources that have synced pieces. Choose one, and how it is read:
+lists your API sources. Each can be chosen once its first pieces have synced. Choose one,
+and how it is read:
 
 - **Structured mappings** suit strictly structured JSON: ids, amounts, statuses, times.
   Its fields map to types and properties, as a synced table's columns do, and every
@@ -193,9 +201,18 @@ lists the sources that have synced pieces. Choose one, and how it is read:
 - **Entity extraction** suits pieces whose body is text, such as an agent's reply or a
   note: Foundry's agent reads the text and finds the entities and facts it describes.
   Choose the source's **text field**, the top-level field holding each piece's text,
-  which must stay a string in every piece. Its newest 500 pieces become Markdown
+  which must stay a string, or `null`, in every piece. Its newest 500 pieces become Markdown
   documents in a set of the source's own, which loads read like any
   [document](/foundry/data/documents).
+
+A generation reads at most 50 tables and 20 document sets. A source read through
+structured mappings counts as one of the tables, and one read by entity extraction as one
+of the sets.
+
+Owners and admins choose the text field, here or in **Documents** on the source's page.
+Saving asks you to confirm and queues one full sync, and the field can't be changed while
+a sync of the source is running. Clearing it removes the source's pieces as documents at
+its next sync.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/ontology/generate-api-sources.png" alt="Generate's API sources section with Order lines chosen and read through Structured mappings" />
@@ -208,7 +225,9 @@ the workspace's sources; past that, new pieces wait for next month. A load you s
 spends the [loads' budget](/foundry/workspace/usage) instead.
 
 When new pieces sync, ontologies that read the source
-[refresh by themselves](/foundry/ontologies/load-data#automatic-refreshes).
+[refresh by themselves](/foundry/ontologies/load-data#automatic-refreshes), at
+most once per the plan's interval. [Founder](/foundry/ask/founder) answers from
+the current load, so it sees new pieces once a refresh has written them.
 
 ## Limits
 

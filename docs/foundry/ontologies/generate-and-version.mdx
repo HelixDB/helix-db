@@ -16,8 +16,8 @@ until you make a version current.
 version, and until the ontology is set up its
 [overview](/foundry/ontologies/create-an-ontology#the-overview) carries on from there:
 generate, review, make current, load. A workspace's
-[first ontology](/foundry/ontologies/create-an-ontology#create-your-first-ontology) skips
-the review: its first draft is made current and loaded as soon as it is stored.
+[first ontology](/foundry/ontologies/create-an-ontology#create-your-first-ontology) of its
+own (the sample company's doesn't count) skips the review: its first draft is made current and loaded as soon as it is stored.
 **Generate** drafts the next versions.
 
 <Frame caption="Generate a draft, review it and make it current.">
@@ -25,6 +25,11 @@ the review: its first draft is made current and loaded as soon as it is stored.
 </Frame>
 
 ## Generate a draft
+
+The form starts from the current version: the goal of the generation that drafted it,
+the API sources it read and its document sets, with every synced connector chosen. A
+generation needs at least one source: a synced table, a table file Foundry has read, or
+a set holding text.
 
 <Steps>
   <Step title="Say what you want to understand">
@@ -44,7 +49,9 @@ the review: its first draft is made current and loaded as soon as it is stored.
     chosen connector has synced is included. Connectors are grouped by kind: a kind
     with one connector shows it on its own, and a kind with several nests them under one
     choice. Expand that choice to pick some of them; it then shows as partly chosen.
-    Expand a connector to see its tables. A generation reads at most 50 tables.
+    Expand a connector to see its tables. A generation reads at most 50 tables, counting
+    the table files in its document sets and each API source read through structured
+    mappings.
 
     **Add data** connects another source without leaving the form. Its first sync
     shows in its row, and it is chosen once it has synced.
@@ -59,8 +66,10 @@ the review: its first draft is made current and loaded as soon as it is stored.
     and how each is read: **Structured mappings** map its fields to types and
     properties, like a table's columns; **Entity extraction** reads the text of its
     newest 500 pieces for the entities and facts they describe, from the source's text
-    field, which owners and admins can choose here. A source can be chosen once its
-    first pieces have synced.
+    field, which owners and admins can choose here. A source can be chosen for structured
+    mappings once its first pieces have synced, and for entity extraction once it has a
+    text field and a sync has made its pieces into documents. Extraction costs about 1
+    cent a piece for each ontology that reads it, up to $5 a month for each source.
 
     <Frame>
       <img src="https://assets.helix-db.com/docs/foundry/ontology/generate-api-sources.png" alt="The API sources section of the Generate form, with Order lines chosen and read through Structured mappings" />
@@ -72,7 +81,7 @@ the review: its first draft is made current and loaded as soon as it is stored.
     version reads. You pick whole sets, the folders of the Connectors explorer's Documents.
     The choice starts as the current version's sets, or none for a first generation.
     Leave every set unticked for a version that reads no documents. A generation reads
-    at most 20 sets. **Upload documents**, or the upload button on a set's row, uploads
+    at most 20 sets, and each API source read by entity extraction counts as one of them. **Upload documents**, or the upload button on a set's row, uploads
     files from here and chooses the set they went into.
 
     The agent reads up to five of the newest documents in each set, with the set's
@@ -96,8 +105,8 @@ A generation is **Queued**, then **Running**, then **Succeeded** or **Failed**. 
 can take several minutes. An attempt that fails for a passing reason is retried, up to
 three attempts; while it waits, the page says it is retrying, why, and when it runs
 next. Other failures, such as a draft the agent refused, fail at once. An ontology runs
-one generation at a time, and a workspace starts at most 10 generations and version edits
-an hour.
+one generation or version edit at a time, and a workspace starts at most 10 generations
+an hour. Version edits don't count toward that.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/ontology/generation-done.png" alt="A succeeded generation that drafted version 4, with Review version 4" />
@@ -107,6 +116,20 @@ A generation's page shows its goal, its tables and its steps. Open it from its
 version's page, where the version is named for it, or from a failed generation's row in
 **Schema versions**. A failed generation offers **Try again**, which opens the form
 with the same goal, connectors and document sets.
+
+### When the agent asks you
+
+The agent may stop to ask what only you can answer. The generation then shows **Needs
+answers**, and the draft waits. Its questions show on the generation's page and on the
+ontology's overview, and in [Founder](/foundry/ask/founder)'s chat when Founder relays
+them, as it does for a draft it is building (there the button is **Send answers to the
+draft**). Owners and admins answer them one at a time: choose an option (the agent's
+suggestion is marked **Recommended**) or write their own words. **Skip** passes an
+optional question, and **Let the agent decide the rest** leaves the others to it. Then
+**Send answers**, and it drafts on from them. If no one answers by the date shown (7
+days after it asked), it takes its recommended answers. **Cancel generation**
+ends it without a draft, as **Cancelled**, and **Generate again** opens the form with
+the same choices. Members can read the questions.
 
 ## Schema versions
 
@@ -152,8 +175,8 @@ its **Edit** tab, which makes a new version from your edits:
    constraint**, write it as TOML, and select **Stage item**. Stage as many as you need.
 2. Select **Preview edits**. Foundry checks the edits and says what they would change,
    without storing a version.
-3. Select **Create version**, then **View new version**. Make it current and load it
-   to apply your edits.
+3. Select **Create version**. Once Foundry has checked the edits and saved the version,
+   select **Make current and load** to apply them, or **View version** to open it first.
 
 Edits cover document routes, the identifiers of a type, rules and constraints. A route
 that names a document set adds that set to the new version's reads, so an existing
@@ -178,8 +201,9 @@ is current now.
 
 ## Who can do what
 
-Owners and admins generate, edit versions and make them current. Members see every
-generation and version.
+Owners and admins generate, answer the agent's questions, edit versions and make them
+current. Members see every generation and version, except
+[restricted members](/foundry/workspace/access#restricted-members), who see neither.
 
 ## Next steps
 
@@ -189,5 +213,8 @@ generation and version.
   </Card>
   <Card title="Upload documents" icon="file-lines" href="/foundry/data/documents">
     Put documents into sets for a version to read.
+  </Card>
+  <Card title="Ask Founder" icon="sparkles" href="/foundry/ask/founder">
+    Ask about what the loaded version holds.
   </Card>
 </CardGroup>

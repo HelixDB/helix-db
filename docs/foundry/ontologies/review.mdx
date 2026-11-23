@@ -1,0 +1,134 @@
+---
+title: "Review what a load couldn't decide"
+description: "Work through the held claims, conflicting values and unlinked names of a Helix Foundry ontology's current load on its Review page, and manage the decisions you save"
+sidebarTitle: "Review"
+pageType: "Guide"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
+
+A [load](/foundry/ontologies/load-data) settles most of what your documents say by
+itself. What it can't settle, it holds for a person: a claim it wasn't sure of, a value
+documents state differently, or a name it couldn't link to one record. The ontology's
+**Review** page lists all of it for the current load in one queue, so you can decide
+each item once.
+
+## Open Review
+
+Open the ontology in the Ontologies panel, then **Review**. Once you've opened it, the Review
+link shows how many items are open in the current load.
+
+Review always reads the current load: only that load can be settled. While the ontology
+has no current load, the page says **Nothing to review yet**; [load it](/foundry/ontologies/load-data)
+first. Once every item is decided, it says **Nothing left to decide**.
+
+Reviews are read from the ontology's database, so a member who can't query that
+database sees **Its reviews aren't shared with you**. A
+[restricted member](/foundry/workspace/access) has no Review page.
+
+## The queue
+
+Each card shows its evidence first: the quote, its document and where it is, linked to
+the quote in the document. Then it says what a decision writes.
+
+| Card | What the load held | What you decide |
+| --- | --- | --- |
+| **A held claim** | A link a sentence states that the load wasn't sure of, with the verifier's score | **Approve** or **Reject** |
+| **A name in a document** | A name it matched to no record, to several, or only loosely | **Link this name to** a record, or **Not in data** |
+| **A value documents state differently** | Values of one property that documents disagree on | **Keep value**, or **Replace the table's value with** a document's |
+
+The cards that write the most facts per decision come first. A name's card lists the
+held claims that wait on it below it: settle the name, then approve each claim. The
+page shows 20 cards at a time; **Show … more** shows the next.
+
+The line above the queue counts the cards, and what it leaves out: reviews already
+decided, ones no decision here settles (such as a relationship the ontology doesn't
+have), claims no approval writes, and reviews to settle after the next load. On a load
+with more than 5,000 reviews, the queue reads the first 5,000; the rest show on their
+documents' pages.
+
+There is no **Approve all** on Review: a person reads every card.
+
+## Settle a card
+
+Owners and admins settle cards and give **Right** or **Wrong**; members see the queue
+only. A decision is saved for the
+ontology, and later loads read it too.
+
+| On a card | What it does | When it applies |
+| --- | --- | --- |
+| **Approve** a held claim | Writes the link the sentence states, on your word | This load at once. If a name in it still needs review, this load keeps it held until that name is settled, then writes it. |
+| **Reject** a held claim | Writes nothing, and takes it out of Review and Needs review | This load and later ones, until the decision is removed |
+| **Keep value**, then **Settle review** | Keeps one of the values documents disagree on | This load at once. A document dated after your decision still wins. |
+| **Replace the table's value with** a document's value, then **Settle review** | Overrides the value a table row gives | This load at once, and every later load, even after the table changes |
+| **Link this name to** a record, then **Settle review** | Links the name to that record, here and in other documents where nothing else links it | This load at once |
+| **Not in data**, then **Settle review** | Says no record is meant, for this document only | This load at once |
+| **Undo link**, on a name the load linked only loosely | Says the name isn't that record | The next load. The load keeps its link until then, as it does for a new choice on that name. |
+
+When a table and documents disagree, the table's value is kept and the card says so. To
+use a document's value instead, choose it under **Replace the table's value with**. That
+decision holds in every later load, even after the table changes, so remove it if the
+table becomes right.
+
+After a decision, the card says what became of it, such as **Approved, and written to
+this load.** A name the load read before names could be applied at once is linked by
+the next load instead.
+
+## Random checks
+
+About one card in ten is a **Random check**: a claim drawn at random from a score band,
+to measure how often claims scored that way are right. Approve it only if the quote says
+it; reject it if not. A drawn claim that is already decided, or a fact the graph holds,
+takes **Right** or **Wrong** instead, which changes nothing in the graph.
+
+**Re-checks** offers a few of other people's decisions and random checks for a second
+opinion. Your **Right** or **Wrong** changes nothing; it measures how often people agree.
+**Random checks** counts what people said of the claims drawn at random, by score.
+
+## Saved decisions
+
+Saved decisions show on the pages they concern: **Saved decisions** on a document's or a
+record's **Needs review** tab lists each one and what became of it in the current load.
+Owners and admins undo them there:
+
+- **Take back approval** takes an approval out of the current load at once. Its claim is
+  held for review again.
+- **Remove decision** on a chosen value takes the value back from the current load at
+  once.
+- **Remove decision** on a rejected claim lists the claim for review again.
+- **Remove decision** on a linked name leaves what it linked in this load; later loads
+  don't read it.
+
+See [Settle a review](/foundry/explore/records-and-entities#settle-a-review) for the
+same controls on a single document or record.
+
+## Stale reviews
+
+A review from a load made before Foundry kept what settling it needs says **Load again
+to settle this review**. [Start a new load](/foundry/ontologies/load-data); it writes
+the review again in a form you can settle. A card opened on a load that isn't current
+says **Open the current load to settle this review**.
+
+## From your agent
+
+Through the [Helix MCP](/foundry/agents/helix-mcp), your agent can list the current
+load's reviews (`helix_foundry_list_reviews`) and the decisions saved
+(`helix_foundry_list_review_decisions`). It settles one with the `settle_review` action,
+which needs your confirmation, and only for a signed-in person, never an agent key.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Load data" icon="database" href="/foundry/ontologies/load-data">
+    Start a new load to apply decisions and settle stale reviews.
+  </Card>
+  <Card title="Records and entities" icon="table" href="/foundry/explore/records-and-entities">
+    Settle reviews from a record's or document's page.
+  </Card>
+  <Card title="Ask questions" icon="comments" href="/foundry/ask/ask-questions">
+    Ask about the load once its facts are settled.
+  </Card>
+  <Card title="Limits" icon="gauge" href="/foundry/reference/limits">
+    What a load reads and spends.
+  </Card>
+</CardGroup>

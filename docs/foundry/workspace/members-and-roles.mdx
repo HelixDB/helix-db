@@ -43,28 +43,35 @@ change a role, remove someone or manage pending invitations, use the
 | Action | Owner | Admin | Member |
 | --- | :---: | :---: | :---: |
 | See connections, documents, ontologies, versions, loads, the plan and usage | ✓ | ✓ | ✓ |
-| Ask the Analyst, explore and read records | ✓ | ✓ | With **Query read** on the database's project, or what [their sources](/foundry/workspace/access) hold |
+| Ask [Founder](/foundry/ask/founder), explore and read records | ✓ | ✓ | With **Query read** on the database's project, or what [their sources](/foundry/workspace/access) hold |
 | Add, sync, edit and delete connections | ✓ | ✓ | |
 | Create API sources, and make and revoke their send tokens | ✓ | ✓ | |
 | Upload, move, rename and delete documents and sets | ✓ | ✓ | |
 | Arrange the Connectors explorer for the workspace | ✓ | ✓ | |
 | Create and delete ontologies | ✓ | ✓ | |
-| Generate, edit versions, make them current, load and settle reviews | ✓ | ✓ | |
+| Generate, edit versions, make them current, load and [settle reviews](/foundry/ontologies/review) | ✓ | ✓ | |
+| Create [dashboards](/foundry/automate/dashboards), and edit or delete your own while unpinned and unpublished | ✓ | ✓ | ✓ |
+| Edit, pin, publish and delete any dashboard | ✓ | ✓ | |
+| Turn public dashboard links on or off | ✓ | | |
+| Create [workflows](/foundry/automate/workflows), and edit, run and delete your own | ✓ | ✓ | ✓ |
+| Pause or delete anyone's workflow | ✓ | ✓ | |
+| Create and delete [use cases](/foundry/agents/helix-mcp#use-cases) on an ontology's Usage page | ✓ | ✓ | |
 | Invite people | ✓ | ✓ | |
 | Share sources with members, teams and agent keys | ✓ | ✓ | |
 | Upgrade, switch, cancel and manage billing | ✓ | ✓ | |
-| Choose where the workspace's AI runs, bring its own key, and allow People enrichment | ✓ | | |
+| Choose where the workspace's AI runs and bring its own key | ✓ | | |
 
-Creating or deleting an ontology and loading also need write access to the database's
-Helix project, which owners and admins have.
+Creating or deleting an ontology, loading, setting the current load and deleting a load
+also need **Query write** on the database's Helix project, which owners and admins have.
 
 ## What new members can read
 
 A new member sees the workspace's connections, documents, ontologies, versions and
 loads, but has no **Query read** on any Helix project. Until they get read access, pages
-that read what loads wrote (the Analyst, the Explorer, Records, entity pages and a
+that read what loads wrote (Founder's answers, the Explorer, Records, entity pages and a
 document's text in an ontology) say **You don't have read access to this database** or
-**You can't read this ontology's database**.
+**You can't read this ontology's database**. Dashboard tiles and an ontology's Usage page
+read the same way, so they need **Query read** too.
 
 An owner or admin grants read access in one of two ways:
 
@@ -76,8 +83,10 @@ An owner or admin grants read access in one of two ways:
 Owners and admins have **Query read** on every project.
 
 An agent you connect through the [Helix MCP](/foundry/agents/helix-mcp) acts with your
-role and rights: it can do only what the table allows you, and it never adds connections,
-deletes anything, invites people or changes billing.
+role and rights: it can do only what the table allows you. Each change takes a prepare
+call and then an execute call, except sending pieces to an API source. You enter a
+connection's credentials in Foundry, never through the agent. The agent can't invite
+people or change billing.
 
 ## Next steps
 

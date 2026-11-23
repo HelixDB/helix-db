@@ -46,14 +46,14 @@ const DATABASE_GROUP_PREFIXES = new Map([
   ["HelixDB/Start Here", "database/helix-db/start-here/"],
   ["HelixDB/Core Concepts", "database/helix-db/core-concepts/"],
   ["HelixDB/Query Guides", "database/helix-db/query-guides/"],
-  ["Helix Cloud/Start Here", "database/helix-cloud/start-here/"],
-  ["Helix Cloud/Connect and automate", "database/helix-cloud/connect/"],
-  ["Helix Cloud/Operate", "database/helix-cloud/operate/"],
+  ["HelixDB/Helix Cloud", "database/helix-cloud/"],
   ["Helix Foundry/Start Here", "foundry/start-here/"],
   ["Helix Foundry/Data", "foundry/data/"],
   ["Helix Foundry/Ontologies", "foundry/ontologies/"],
   ["Helix Foundry/Explore", "foundry/explore/"],
-  ["Helix Foundry/Ask", "foundry/ask/"],
+  ["Helix Foundry/Founder", "foundry/ask/"],
+  ["Helix Foundry/Dashboards and workflows", "foundry/automate/"],
+  ["Helix Foundry/Agents", "foundry/agents/"],
   ["Helix Foundry/Workspace", "foundry/workspace/"],
   ["Helix Foundry/Reference", "foundry/reference/"],
   ["Learn/Graph databases", "learn/graph-databases/"],
@@ -196,9 +196,8 @@ for (const tag of [
 }
 const tabNames = (config.navigation?.tabs ?? []).map((tab) => tab.tab);
 const expectedTabs = [
-  "HelixDB",
-  "Helix Cloud",
   "Helix Foundry",
+  "HelixDB",
   "CLI Reference",
   "Learn",
 ];
