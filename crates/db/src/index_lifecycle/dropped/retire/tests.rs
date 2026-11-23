@@ -41,13 +41,12 @@ fn the_timer_after_a_pass_follows_what_the_entries_wait_for() {
     let now = Instant::now();
     let look = Duration::from_secs(5);
     let idle = Duration::from_secs(300);
-    let overdue = now + Duration::from_secs(1_800);
     let compactions = CompactionActivity {
         events: 6,
         running: 0,
     };
     let after = |storage: &DroppedIndexStorage, reclaimed: bool| {
-        Timer::after_pass(storage, compactions, reclaimed, now, look, idle, overdue)
+        Timer::after_pass(storage, compactions, reclaimed, now, look, idle)
     };
     // Nothing stored, or only quarantined entries: nothing to wait for.
     for reclaimed in [false, true] {
@@ -80,13 +79,13 @@ fn the_timer_after_a_pass_follows_what_the_entries_wait_for() {
         }
     }
     // Every proof tracks tables: a reclaim is due once the store has been
-    // idle, measured from the compactions seen before the pass.
+    // idle, measured from the compactions seen before the pass, and at no
+    // other time however long the rows have waited.
     assert_eq!(
         after(&left(0, 0, 2), false),
         Timer::Reclaim {
             at: now + idle,
             compactions,
-            overdue,
         }
     );
     // One reclaim per idle period.
@@ -94,122 +93,100 @@ fn the_timer_after_a_pass_follows_what_the_entries_wait_for() {
 }
 
 #[test]
-fn a_reclaim_timer_fires_no_later_than_a_busy_store_is_due() {
-    let now = Instant::now();
-    let idle = Duration::from_secs(300);
-    let compactions = CompactionActivity::default();
-    for (overdue, at) in [
-        // Far off: idleness comes first.
-        (now + Duration::from_secs(1_800), now + idle),
-        (now + idle, now + idle),
-        // Sooner than idleness.
-        (now + Duration::from_secs(60), now + Duration::from_secs(60)),
-        // Already past: at once, not in the past.
-        (now, now),
-        (now - Duration::from_secs(60), now),
-    ] {
-        assert_eq!(
-            Timer::after_pass(
-                &left(0, 0, 1),
-                compactions,
-                false,
-                now,
-                Duration::from_secs(5),
-                idle,
-                overdue
-            ),
-            Timer::Reclaim {
-                at,
-                compactions,
-                overdue,
-            }
-        );
-    }
-}
-
-#[test]
-fn a_reclaim_timer_reclaims_an_idle_store_or_one_that_has_waited_long_enough() {
-    let now = Instant::now();
+fn a_store_is_idle_only_while_no_compaction_started_ended_or_runs() {
     let seen = CompactionActivity {
         events: 6,
         running: 0,
     };
-    let overdue = now + Duration::from_secs(1_800);
-    let idle = Due::Reclaim(Reclaimer::IdleStore(Worth::WRITER));
-    let busy = Due::Reclaim(Reclaimer::BusyStore(Worth::WRITER));
-    let started = CompactionActivity {
-        events: 7,
-        running: 1,
-    };
-    let ended = CompactionActivity {
-        events: 8,
-        running: 0,
-    };
-    for (at, activity, due) in [
-        // Nothing started or ended, and nothing runs: idle, however long
-        // the proofs have waited.
-        (now, seen, idle),
-        (overdue, seen, idle),
-        // A job runs, or one ran and ended: not idle.
-        (now, started, Due::Later),
-        (now, ended, Due::Later),
-        (overdue - Duration::from_secs(1), started, Due::Later),
-        // Not idle, and the proofs have waited long enough.
-        (overdue, started, busy),
-        (overdue, ended, busy),
-        (overdue + Duration::from_secs(1), ended, busy),
+    // Nothing started or ended, and nothing runs.
+    assert!(idle_since(seen, seen));
+    for (activity, why) in [
+        (
+            CompactionActivity {
+                events: 7,
+                running: 1,
+            },
+            "a job runs",
+        ),
+        (
+            CompactionActivity {
+                events: 8,
+                running: 0,
+            },
+            "a job ran and ended",
+        ),
+        (
+            CompactionActivity {
+                events: 5,
+                running: 0,
+            },
+            "the count moved",
+        ),
     ] {
-        assert_eq!(
-            Due::at(at, seen, activity, overdue, Worth::WRITER),
-            due,
-            "{activity:?}"
-        );
+        assert!(!idle_since(seen, activity), "{why}");
     }
     // A job that never ended keeps the store busy though no event followed.
     let running = CompactionActivity {
         events: 6,
         running: 1,
     };
-    assert_eq!(
-        Due::at(now, running, running, overdue, Worth::WRITER),
-        Due::Later
-    );
-    // The rule it reclaims by is the one it is given.
-    let rule = Worth {
-        small_run_bytes: 1,
-        rewritten_per_dropped_byte: 2,
-    };
-    assert_eq!(
-        Due::at(now, seen, seen, overdue, rule),
-        Due::Reclaim(Reclaimer::IdleStore(rule))
-    );
-    assert_eq!(
-        Due::at(overdue, seen, ended, overdue, rule),
-        Due::Reclaim(Reclaimer::BusyStore(rule))
-    );
+    assert!(!idle_since(running, running));
 }
 
 #[test]
-fn the_wait_of_a_busy_store_starts_with_tracking_and_again_with_each_reclaim() {
-    let overdue = Instant::now() + Duration::from_secs(100);
-    let restarted = overdue + Duration::from_secs(1_800);
-    // A pass while proofs already tracked tables leaves the wait running.
-    assert_eq!(Wake::Pass.overdue(true, overdue, restarted), overdue);
-    // A pass before which none did starts it.
-    assert_eq!(Wake::Pass.overdue(false, overdue, restarted), restarted);
-    // A reclaim starts it again, whoever ran it and whatever tracked.
-    for reclaimer in [
-        Reclaimer::Caller,
-        Reclaimer::IdleStore(Worth::WRITER),
-        Reclaimer::BusyStore(Worth::WRITER),
-    ] {
-        for tracked in [false, true] {
-            assert_eq!(
-                Wake::Reclaim(reclaimer).overdue(tracked, overdue, restarted),
-                restarted
-            );
-        }
+fn the_shape_of_a_store_moves_whenever_its_tables_do() {
+    fn shape(l0: &[u128], runs: &[&[u128]]) -> Shape {
+        Shape::of_tables(
+            l0.iter().copied().map(TableId),
+            runs.iter().map(|run| run.iter().copied().map(TableId)),
+        )
     }
+    let before = shape(&[3, 2, 1], &[&[20, 21], &[10, 11, 12]]);
+    // Read twice with nothing between, or with writes that reach no table.
+    assert_eq!(before, shape(&[3, 2, 1], &[&[20, 21], &[10, 11, 12]]));
+    for (what, after) in [
+        (
+            "a flush puts a table at the head of L0",
+            shape(&[4, 3, 2, 1], &[&[20, 21], &[10, 11, 12]]),
+        ),
+        (
+            "a compaction takes the oldest L0 tables into a new run",
+            shape(&[3], &[&[30], &[20, 21], &[10, 11, 12]]),
+        ),
+        (
+            "a compaction takes them and writes no row",
+            shape(&[3], &[&[20, 21], &[10, 11, 12]]),
+        ),
+        (
+            "that, and as many flushes as it took tables",
+            shape(&[5, 4, 3], &[&[20, 21], &[10, 11, 12]]),
+        ),
+        (
+            "a run is rewritten into as many tables",
+            shape(&[3, 2, 1], &[&[20, 21], &[40, 41, 42]]),
+        ),
+        (
+            "two runs are merged into the older",
+            shape(&[3, 2, 1], &[&[50, 51, 52, 53]]),
+        ),
+        (
+            "a run is rewritten and keeps no row",
+            shape(&[3, 2, 1], &[&[20, 21], &[]]),
+        ),
+        (
+            "a run is rewritten, keeps no row and is gone",
+            shape(&[3, 2, 1], &[&[20, 21]]),
+        ),
+        (
+            "every L0 table is compacted away",
+            shape(&[], &[&[60], &[20, 21], &[10, 11, 12]]),
+        ),
+    ] {
+        assert_ne!(before, after, "{what}");
+    }
+    // A store with no table at all has a shape too.
+    assert_eq!(shape(&[], &[]), shape(&[], &[]));
+    assert_ne!(shape(&[], &[]), shape(&[1], &[]));
 }
 
 #[test]
@@ -217,12 +194,11 @@ fn a_timer_fires_when_it_says_unless_it_is_off() {
     let at = Instant::now() + Duration::from_secs(7);
     assert_eq!(Timer::Off.at(), None);
     assert_eq!(Timer::Look { at }.at(), Some(at));
-    assert_eq!(Timer::Retry { at }.at(), Some(at));
+    assert_eq!(Timer::Pass { at }.at(), Some(at));
     assert_eq!(
         Timer::Reclaim {
             at,
             compactions: CompactionActivity::default(),
-            overdue: at + Duration::from_secs(1),
         }
         .at(),
         Some(at)
@@ -463,14 +439,12 @@ fn the_background_paces_are_ordered() {
     assert!(LOOK_GAP <= DRAIN_LOOK_MAX);
     assert!(DRAIN_LOOK_MAX < IDLE_RECLAIM_AFTER);
     assert!(RETRY <= MAX_BACKOFF);
-    assert!(IDLE_RECLAIM_AFTER < BUSY_RECLAIM_AFTER);
-    assert!(BUSY_RECLAIM_AFTER < RECLAIM_WAIT);
+    assert!(IDLE_RECLAIM_AFTER < RECLAIM_WAIT);
     assert_eq!(
         Pace::WRITER,
         Pace {
             look_gap: LOOK_GAP,
             idle_after: IDLE_RECLAIM_AFTER,
-            busy_after: BUSY_RECLAIM_AFTER,
         }
     );
 }

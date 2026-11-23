@@ -66,13 +66,12 @@ use crate::index_lifecycle::work::{
 #[cfg(any(test, feature = "index-lifecycle-testing"))]
 use crate::index_lifecycle::IndexStateV2;
 use crate::index_lifecycle::{
-    dropped, ActiveIndexHandle, BuildOperationOutcome, DroppedGenerationRows,
-    DroppedGenerationValue, IndexCursor, IndexElementKind, IndexEntityId, IndexGenerationId,
-    IndexId, IndexOperationBlocker, IndexOperationFamily, IndexOperationId, IndexOperationOutcome,
-    IndexOperationProgress, IndexOperationRecord, IndexRecordV2, NoCursorProgress,
-    OperationCounters, PrefixScanProgress, SecondaryBuildProgress, SecondaryBuildStage,
-    SecondaryCleanupProgress, SourceScanProgress, ValidatedDynamicIndexDefinition,
-    ValidatedSecondaryIndexDefinition,
+    dropped, ActiveIndexHandle, BuildOperationOutcome, DroppedGenerationRows, IndexCursor,
+    IndexElementKind, IndexEntityId, IndexGenerationId, IndexId, IndexOperationBlocker,
+    IndexOperationFamily, IndexOperationId, IndexOperationOutcome, IndexOperationProgress,
+    IndexOperationRecord, IndexRecordV2, NoCursorProgress, OperationCounters, PrefixScanProgress,
+    SecondaryBuildProgress, SecondaryBuildStage, SecondaryCleanupProgress, SourceScanProgress,
+    ValidatedDynamicIndexDefinition, ValidatedSecondaryIndexDefinition,
 };
 
 use super::{IndexScopeGates, StepGate};
@@ -3105,18 +3104,17 @@ async fn step_cleanup(
     limits: SearchIndexBatchLimits,
 ) -> Result<IndexOperationStepResult> {
     let next = match progress {
-        // Every secondary row is keyed by generation, so a drop or abort
-        // that will leave a dropped-generation entry at `Finalize` deletes
-        // nothing. One that already deleted rows one by one, on an older
-        // store, finishes one by one: the counters are zero only before the
-        // first delete.
-        SecondaryCleanupProgress::DeleteEntries(progress)
-            if progress.cursor.is_none()
-                && progress.counters == OperationCounters::default()
-                && dropped::admitted(transaction).await? =>
+        // Every secondary row is keyed by generation, so on a store that
+        // admits dropped-generation entries a drop or abort deletes nothing
+        // more: the entry `Finalize` leaves covers every row, whether this
+        // cleanup has yet to start or had deleted some of them one by one
+        // before the store was admitted.
+        SecondaryCleanupProgress::DeleteEntries(PrefixScanProgress { counters, .. })
+        | SecondaryCleanupProgress::DeleteDeltas(PrefixScanProgress { counters, .. })
+            if dropped::admitted(transaction).await? =>
         {
             SecondaryCleanupProgress::Finalize(NoCursorProgress {
-                counters: progress.counters,
+                counters: *counters,
             })
         }
         SecondaryCleanupProgress::DeleteEntries(progress) => {
@@ -3178,22 +3176,16 @@ async fn step_cleanup(
                 SecondaryCleanupProgress::Finalize(NoCursorProgress { counters })
             }
         }
+        // On an admitted store the rows are left to compactions, and the
+        // commit that moves the record to `Dropped` stores their entry. On
+        // any other the steps before this one deleted every row.
+        SecondaryCleanupProgress::Finalize(_) if dropped::admitted(transaction).await? => {
+            return Ok(IndexOperationStepResult::LeftToCompactions {
+                aborted: aborting,
+                rows: DroppedGenerationRows::Secondary,
+            });
+        }
         SecondaryCleanupProgress::Finalize(_) => {
-            // Staged here, the entry commits in the transaction that moves
-            // the record to `Dropped`.
-            if dropped::admitted(transaction).await? {
-                dropped::stage_entry(
-                    transaction,
-                    dropped::DroppedGeneration {
-                        index_id: operation.index_id(),
-                        generation: operation.generation(),
-                    },
-                    DroppedGenerationValue {
-                        scope,
-                        rows: DroppedGenerationRows::Secondary,
-                    },
-                )?;
-            }
             return Ok(IndexOperationStepResult::Completed(if aborting {
                 IndexOperationOutcome::Build(BuildOperationOutcome::Aborted)
             } else {
@@ -5450,9 +5442,10 @@ mod tests {
         ClaimPermission, CommittedOperationStep, OperationPointerObservation,
     };
     use crate::index_lifecycle::{
-        ClaimSequence, IndexDdlReceipt, IndexOperationExecutionState, IndexOperationId,
-        IndexOperationKind, IndexRevision, IndexStateTransition, PhysicalGeneration,
-        VectorGenerationDescriptor, VectorPhysicalIndexId, VectorPhysicalLayout, WriterEpoch,
+        ClaimSequence, DroppedGenerationValue, IndexDdlReceipt, IndexOperationExecutionState,
+        IndexOperationId, IndexOperationKind, IndexRevision, IndexStateTransition,
+        PhysicalGeneration, VectorGenerationDescriptor, VectorPhysicalIndexId,
+        VectorPhysicalLayout, WriterEpoch,
     };
     use crate::migrations::startup::bootstrap_writer;
 
@@ -14543,38 +14536,42 @@ mod tests {
 
             if half_way {
                 // A binary that knows no entries deleted one row and was
-                // replaced: the counted row keeps the cleanup row by row.
+                // replaced. The admitted store hands what is left to the
+                // entry: its next step deletes nothing more.
                 assert_eq!(
                     drive_one_with_limits(&db, &driver, drop_id, &mut claim_sequence, one_row)
                         .await,
                     CommittedOperationStep::Progressed
                 );
-                assert_eq!(
-                    owned_keys(&db, scope, index_id, generation).await.len(),
-                    keys.len() - 1
-                );
+                let left = owned_keys(&db, scope, index_id, generation).await;
+                assert_eq!(left.len(), keys.len() - 1);
                 dropped::admit_fixture(&db).await;
                 assert_eq!(
                     drive_one_with_limits(&db, &driver, drop_id, &mut claim_sequence, one_row)
                         .await,
                     CommittedOperationStep::Progressed
                 );
+                assert!(matches!(
+                    read_operation(&db, scope, drop_id)
+                        .await
+                        .expect("drop operation is readable")
+                        .expect("drop operation exists")
+                        .progress(),
+                    IndexOperationProgress::SecondaryCleanup(SecondaryCleanupProgress::Finalize(_))
+                ));
+                assert_eq!(owned_keys(&db, scope, index_id, generation).await, left);
+                assert_eq!(dropped::load_entries(&db).await.unwrap(), vec![]);
                 assert_eq!(
-                    owned_keys(&db, scope, index_id, generation).await.len(),
-                    keys.len() - 2,
-                    "the admitted store's first step deletes one row, as the step before it"
-                );
-                assert_eq!(
-                    drive_to_terminal(&db, &driver, drop_id, &mut claim_sequence).await,
+                    drive_one_with_limits(&db, &driver, drop_id, &mut claim_sequence, one_row)
+                        .await,
                     CommittedOperationStep::Completed
                 );
-                assert_eq!(
-                    owned_keys(&db, scope, index_id, generation).await,
-                    Vec::<Bytes>::new()
-                );
+                assert_eq!(owned_keys(&db, scope, index_id, generation).await, left);
             } else {
-                // A step that ended between the two entry lanes holds no
-                // cursor but counts its deletes: it keeps deleting.
+                // Wherever an older image left a row-by-row cleanup, with a
+                // row counted, a cursor held, or its entry lanes done, the
+                // next step on an admitted store deletes nothing and keeps
+                // the counters.
                 let ValidatedDynamicIndexDefinition::Secondary(secondary) = &definition else {
                     panic!("the test definition is secondary");
                 };
@@ -14582,34 +14579,57 @@ mod tests {
                     .await
                     .expect("drop operation is readable")
                     .expect("drop operation exists");
-                let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
-                let counted = SecondaryCleanupProgress::DeleteEntries(PrefixScanProgress {
-                    cursor: None,
-                    counters: OperationCounters {
-                        entities: 1,
-                        ..OperationCounters::default()
-                    },
-                });
-                assert!(matches!(
-                    step_cleanup(
+                let counted = OperationCounters {
+                    entities: 1,
+                    ..OperationCounters::default()
+                };
+                for begun in [
+                    SecondaryCleanupProgress::DeleteEntries(PrefixScanProgress {
+                        cursor: None,
+                        counters: counted,
+                    }),
+                    SecondaryCleanupProgress::DeleteEntries(PrefixScanProgress {
+                        cursor: Some(IndexCursor::try_new(keys[0].clone()).unwrap()),
+                        counters: OperationCounters::default(),
+                    }),
+                    SecondaryCleanupProgress::DeleteDeltas(PrefixScanProgress {
+                        cursor: None,
+                        counters: counted,
+                    }),
+                ] {
+                    let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+                    let expected = match &begun {
+                        SecondaryCleanupProgress::DeleteEntries(progress)
+                        | SecondaryCleanupProgress::DeleteDeltas(progress) => progress.counters,
+                        SecondaryCleanupProgress::Finalize(progress) => progress.counters,
+                    };
+                    let stepped = step_cleanup(
                         &transaction,
                         scope,
                         &operation,
                         secondary,
-                        &counted,
+                        &begun,
                         false,
-                        one_row
+                        one_row,
                     )
                     .await
-                    .unwrap(),
-                    IndexOperationStepResult::Progressed(IndexOperationProgress::SecondaryCleanup(
-                        SecondaryCleanupProgress::DeleteEntries(PrefixScanProgress {
-                            cursor: Some(_),
-                            ..
-                        })
-                    ))
-                ));
-                drop(transaction);
+                    .unwrap();
+                    assert!(
+                        matches!(
+                            &stepped,
+                            IndexOperationStepResult::Progressed(
+                                IndexOperationProgress::SecondaryCleanup(
+                                    SecondaryCleanupProgress::Finalize(NoCursorProgress {
+                                        counters
+                                    })
+                                )
+                            ) if *counters == expected
+                        ),
+                        "{begun:?} {stepped:?}"
+                    );
+                    drop(transaction);
+                    assert_eq!(owned_keys(&db, scope, index_id, generation).await, keys);
+                }
 
                 assert_eq!(
                     drive_one_with_limits(&db, &driver, drop_id, &mut claim_sequence, one_row)
@@ -14640,8 +14660,8 @@ mod tests {
                 read_index(&db, scope, &definition).await.state(),
                 IndexStateV2::Dropped { .. }
             ));
-            // Either way the entry commits with the `Dropped` record. After a
-            // row-by-row cleanup it names no row any more; a reclaim deletes it.
+            // Either way the entry commits with the `Dropped` record, and
+            // covers whatever rows the cleanup left.
             let entries = vec![(
                 dropped::DroppedGeneration {
                     index_id,
@@ -14654,13 +14674,33 @@ mod tests {
             )];
             assert_eq!(dropped::load_entries(&db).await.unwrap(), entries, "{name}");
 
-            let (build_id, _, next_generation) = create_build(&db, scope, &definition, 3).await;
+            // Written on the admitted store in both cases: the fixture that
+            // admits a store half way runs no label identity copy, so a
+            // build there reads only the sources whose label rows were
+            // written since.
+            for entity_id in 4..8_u64 {
+                put_source(
+                    &db,
+                    scope,
+                    IndexElementKind::Node,
+                    entity_id,
+                    &user_properties(&format!("user{entity_id}@example.com")),
+                )
+                .await;
+            }
+            let (build_id, next_index_id, next_generation) =
+                create_build(&db, scope, &definition, 7).await;
+            assert_ne!(
+                (next_index_id, next_generation),
+                (index_id, generation),
+                "{name}"
+            );
             assert_eq!(
                 drive_one(&db, &driver, build_id, &mut claim_sequence).await,
                 CommittedOperationStep::Progressed
             );
-            let built = owned_keys(&db, scope, index_id, next_generation).await;
-            assert!(!built.is_empty());
+            let built = owned_keys(&db, scope, next_index_id, next_generation).await;
+            assert!(!built.is_empty(), "{name}");
             assert_eq!(
                 drop_index_operation(&db, scope, &definition)
                     .await
@@ -14699,14 +14739,14 @@ mod tests {
                 IndexStateV2::Dropped { .. }
             ));
             assert_eq!(
-                owned_keys(&db, scope, index_id, next_generation).await,
+                owned_keys(&db, scope, next_index_id, next_generation).await,
                 built
             );
             let entries = entries
                 .into_iter()
                 .chain([(
                     dropped::DroppedGeneration {
-                        index_id,
+                        index_id: next_index_id,
                         generation: next_generation,
                     },
                     DroppedGenerationValue {
@@ -14721,10 +14761,11 @@ mod tests {
     }
 
     /// Proves an abort that deleted a row before the store admitted
-    /// dropped-generation entries finishes row by row, and still leaves its
-    /// entry in the step that writes `Dropped`.
+    /// dropped-generation entries deletes nothing more once it does: its
+    /// next step goes to the last one, which leaves the rows that remain to
+    /// compactions and its entry in the commit that writes `Dropped`.
     #[tokio::test]
-    async fn an_abort_admitted_half_way_finishes_row_by_row() {
+    async fn an_abort_admitted_half_way_is_handed_to_its_entry() {
         let db = test_db("secondary-abort-admitted-half-way").await;
         let scope = DataScope::LegacyUnscoped;
         let definition = validated(
@@ -14780,15 +14821,15 @@ mod tests {
         );
         assert_eq!(
             owned().await,
-            built - 2,
-            "the admitted store's first step deletes one row, as the step before it"
+            built - 1,
+            "the admitted store's first step deletes nothing"
         );
         assert_eq!(dropped::load_entries(&db).await.unwrap(), vec![]);
         assert_eq!(
-            drive_to_terminal(&db, &driver, build_id, &mut claim_sequence).await,
+            drive_one_with_limits(&db, &driver, build_id, &mut claim_sequence, one_row).await,
             CommittedOperationStep::Completed
         );
-        assert_eq!(owned().await, 0);
+        assert_eq!(owned().await, built - 1);
         assert!(matches!(
             read_index(&db, scope, &definition).await.state(),
             IndexStateV2::Dropped { .. }

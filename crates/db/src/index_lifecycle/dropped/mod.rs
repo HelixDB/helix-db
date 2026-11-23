@@ -12,12 +12,17 @@
 //!
 //! # Contract
 //!
-//! - **Creation.** [`stage_entry`] in the record's `Dropped` transaction is
-//!   the only way an entry is created. The entry commits at the sequence the
-//!   record does, so a view that still reads the generation's rows is older
-//!   than the entry.
-//! - **Arming.** A writer discards nothing for an entry until
-//!   [`Registry::refresh`] has read it through a snapshot, cross-checked it
+//! - **Creation.** A cleanup that leaves rows to compactions ends with
+//!   [`LeftToCompactions`](super::outbox::IndexOperationStepResult::LeftToCompactions),
+//!   and the one function that commits a step calls [`stage_entry`] in the
+//!   record's `Dropped` transaction: the only way an entry is created. The
+//!   entry commits at the sequence the record does, so a view that still
+//!   reads the generation's rows is older than the entry. The same function
+//!   tells the writer's [`Registry`] once the commit is durable, so an entry
+//!   is never stored without the retirer being woken to arm it.
+//! - **Arming.** A writer opens with an empty registry and discards nothing
+//!   for an entry until [`Registry::refresh`], which a background pass runs,
+//!   has read it through a snapshot, cross-checked it
 //!   against the catalog and the id watermarks, and flushed the memtable. The
 //!   snapshot's sequence is the entry's *gate*: it is at or after the entry's
 //!   commit. The flush makes the `Dropped` record durable in a sorted table
@@ -51,10 +56,11 @@
 //!   proof and starts it again from every table the store then has.
 //! - **Reclaim.** [`reclaim`] rewrites the sorted runs that hold the rows:
 //!   every one of them on request, and by itself those in which the rows
-//!   are a large enough part to be worth it, once the store has been idle or
-//!   the rows have waited long. It rewrites no run that holds none, deletes
-//!   no entry itself, and gives its slot back when the compaction of L0
-//!   tables needs it.
+//!   are a large enough part to be worth it, once the store has been idle.
+//!   It rewrites no run that holds none, deletes no entry itself, and never
+//!   takes the compactor's last free slot. A store that is never idle keeps
+//!   its dropped rows until its own compactions rewrite the runs they are
+//!   in.
 //!
 //! # What a drop still deletes itself
 //!
@@ -68,18 +74,21 @@
 //!   Text split blobs in object storage are not rows and are retained, as
 //!   they were before.
 //!
-//! Two kinds of cleanup still delete row by row: one that had deleted rows
-//! before the store was admitted; and a vector cleanup whose first physical
-//! id has more unfiltered rows than one step deletes, which the persisted
-//! progress cannot tell from the first. Both finish on an admitted store, so
-//! each still leaves an entry, which then names rows that are already gone
-//! and retires at the first pass that looks.
+//! A cleanup an older image had started row by row, before the store was
+//! admitted, is handed to an entry at its next step on an admitted store,
+//! whatever it had deleted: the entry covers what is left. Rows are deleted
+//! one by one in two cases only, and each family's cleanup says so where it
+//! does it:
 //!
-//! A generation adopted from legacy vector storage is never given an entry:
-//! its physical id was not allocated by this catalog and its rows may be
-//! shared with a legacy index. Its drop deletes every row one by one. The
-//! abort of its build deletes the directory and the generation-keyed rows
-//! the build added, one by one, and hands the legacy rows back untouched.
+//! - **A store that does not admit entries.** Images that do not know the
+//!   entries can still open it, so nothing but the drop would remove the
+//!   rows.
+//! - **A generation adopted from legacy vector storage.** It is never given
+//!   an entry: its physical id was not allocated by this catalog and its
+//!   rows may be shared with a legacy index. Its drop deletes every row one
+//!   by one. The abort of its build deletes the directory and the
+//!   generation-keyed rows the build added, one by one, and hands the
+//!   legacy rows back untouched.
 //!
 //! Whether a drop leaves an entry depends on the store alone, not on the
 //! writer that runs it. A writer that runs no compaction worker in its own
@@ -136,19 +145,63 @@ use super::{
     VectorPhysicalIndexId,
 };
 
+/// Who asks for a store at [`IndexStorageVersion::LABEL_IDENTITY`] to be
+/// moved to [`IndexStorageVersion::DROPPED_GENERATIONS`].
+///
+/// Which stores are moved, and by whom, is decided here and nowhere else:
+/// [`Self::moves_store`] says whether each caller of [`admit`] performs the
+/// move, and [`PRISTINE_MANAGED_STORE`] is the version a pristine managed
+/// store starts at. Changing who performs the move is an edit to those two.
+///
+/// The move is one way: images that support at most version 7 refuse a store
+/// at version 8, so every reader must run an image that knows version 8
+/// before any writer that performs the move opens the store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Admission {
+    /// A writer open that is authorized to migrate: an embedded open, or a
+    /// managed open with a controlled-migration intent. It asks once it has
+    /// started, or found finished, the label identity copy.
+    MigrationAuthorizedOpen,
+    /// The background migration worker of any writer, a managed failover
+    /// writer included, right after its label identity copy has published
+    /// version 7.
+    LabelCopyPublished,
+}
+
+impl Admission {
+    /// Every admission the code knows.
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 2] = [Self::MigrationAuthorizedOpen, Self::LabelCopyPublished];
+
+    /// Whether this caller moves the store. Each does today.
+    pub(crate) const fn moves_store(self) -> bool {
+        match self {
+            Self::MigrationAuthorizedOpen | Self::LabelCopyPublished => true,
+        }
+    }
+}
+
+/// The version a pristine managed store is bootstrapped at: it has no rows
+/// of any earlier layout, so it starts where [`admit`] would take it.
+pub(crate) const PRISTINE_MANAGED_STORE: IndexStorageVersion =
+    IndexStorageVersion::DROPPED_GENERATIONS;
+
 /// Moves a store at [`IndexStorageVersion::LABEL_IDENTITY`] to
 /// [`IndexStorageVersion::DROPPED_GENERATIONS`] in one commit that writes
-/// only the marker; the two versions share every other row. Binaries that
-/// support at most version 7 refuse the store from then on: they would
-/// neither decode a dropped-generation entry nor discard its rows.
+/// only the marker, if `by` [moves the store](Admission::moves_store); the
+/// two versions share every other row. Binaries that support at most
+/// version 7 refuse the store from then on: they would neither decode a
+/// dropped-generation entry nor discard its rows.
 ///
 /// A store below version 7 is left alone: one whose label identity copy is
 /// still running is admitted by the background worker in a second commit
 /// after the copy publishes, or by the next migration-authorized open when
 /// the process dies between the two. A store already admitted is left alone
 /// too.
-pub(crate) async fn admit(db: &Db) -> Result<()> {
-    if crate::migrations::startup::storage_version(db).await? != IndexStorageVersion::LABEL_IDENTITY
+pub(crate) async fn admit(db: &Db, by: Admission) -> Result<()> {
+    if !by.moves_store()
+        || crate::migrations::startup::storage_version(db).await?
+            != IndexStorageVersion::LABEL_IDENTITY
     {
         return Ok(());
     }
@@ -159,7 +212,7 @@ pub(crate) async fn admit(db: &Db) -> Result<()> {
         |_| Ok(()),
     )
     .await?;
-    tracing::info!("index storage admits dropped-generation entries");
+    tracing::info!(?by, "index storage admits dropped-generation entries");
     Ok(())
 }
 
@@ -174,18 +227,31 @@ pub(crate) fn compactor(
     object_store: Arc<dyn ObjectStore>,
     registry: Arc<Registry>,
 ) -> Option<slatedb::CompactorBuilder<String>> {
-    let mut options = settings.compactor_options.clone()?;
-    // SlateDB's default, pinned: a trivial move re-links tables into a run
-    // without creating a filter, so a requested reclaim made of one would
-    // rewrite nothing and give no byte back.
-    options.enable_trivial_move = false;
     Some(
         slatedb::CompactorBuilder::new(path.to_string(), object_store)
-            .with_options(options)
+            .with_options(compactor_options(settings)?)
             .with_compaction_filter_supplier(Arc::new(filter::DroppedRowsFilterSupplier::new(
                 registry,
             ))),
     )
+}
+
+/// The options of the embedded compactor of a writer opened with `settings`,
+/// with trivial moves off whatever `settings` say; `None` when they run no
+/// compactor.
+///
+/// A trivial move re-links tables into a run without creating a filter, so
+/// a reclaim made of one would rewrite nothing and give no byte back, and
+/// the tables of a manifest would change without its [`retire::Shape`]
+/// moving. SlateDB also runs one in its coordinator, outside the check that
+/// refuses a submitted compaction which shares a source with one in flight:
+/// with trivial moves on, that check would not see every compaction.
+pub(crate) fn compactor_options(
+    settings: &slatedb::Settings,
+) -> Option<slatedb::config::CompactorOptions> {
+    let mut options = settings.compactor_options.clone()?;
+    options.enable_trivial_move = false;
+    Some(options)
 }
 
 /// How many compactions a writer opened with `settings` runs at a time in
@@ -198,8 +264,8 @@ pub(crate) fn compactor(
 /// and a writer's embedded worker is the only one Helix starts; a writer
 /// configured without it leaves its compactions to workers it cannot see, so
 /// it retires nothing. The count is the smaller of what the coordinator
-/// schedules and what the worker claims: [`reclaim`] gives its slot back
-/// when they are all taken.
+/// schedules and what the worker claims: [`reclaim`] never takes the last
+/// free one of them.
 pub(crate) fn compaction_slots(settings: &slatedb::Settings) -> Option<usize> {
     let options = settings.compactor_options.as_ref()?;
     let worker = options.worker.as_ref()?;
@@ -254,7 +320,7 @@ pub(crate) async fn admit_fixture(db: &Db) {
     )
     .await
     .expect("fixture storage version is written");
-    admit(db)
+    admit(db, Admission::MigrationAuthorizedOpen)
         .await
         .expect("fixture store admits dropped-generation entries");
     assert!(admitted(db).await.expect("storage version reads"));
@@ -267,7 +333,7 @@ pub(crate) async fn admit_fixture(db: &Db) {
 /// that holds rows, so a pass that finds the rows retained is followed by
 /// the write of one node no index covers. The writer stops reading the
 /// discarded rows at its next manifest poll, which may be after this returns.
-#[cfg(test)]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) async fn reclaim_fixture(db: &crate::HelixDB) {
     use helix_ast::value::PropertyInput;
     use helix_ast::{batch::write_batch, query::QueryRequest, traversal::g};
@@ -891,6 +957,9 @@ pub(crate) struct Armed {
     pub(crate) proof: Proof,
     /// When this writer armed the entry.
     pub(crate) since: Instant,
+    /// When the proof last moved forward: the entry was armed, its proof
+    /// took a step, or a table it tracks was compacted away.
+    pub(crate) progressed: Instant,
 }
 
 /// An entry that failed its cross-check. It holds no owner, so no filter can
@@ -978,6 +1047,40 @@ pub struct QuarantinedDroppedGeneration {
     pub since: Instant,
 }
 
+/// How a writer's last background pass over its dropped-generation entries
+/// ended.
+///
+/// ```
+/// use std::time::Instant;
+///
+/// use db::DroppedStoragePass;
+///
+/// let now = Instant::now();
+/// let failed = DroppedStoragePass::Failed {
+///     at: now,
+///     since: now,
+///     error: "object store unavailable".to_string(),
+/// };
+/// assert_ne!(failed, DroppedStoragePass::Completed { at: now });
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DroppedStoragePass {
+    /// It read the store.
+    Completed {
+        /// When it ended.
+        at: Instant,
+    },
+    /// It failed. The writer tries again by itself, at growing intervals.
+    Failed {
+        /// When it ended.
+        at: Instant,
+        /// When the first of the passes that have failed in a row ended.
+        since: Instant,
+        /// What it failed with.
+        error: String,
+    },
+}
+
 /// What a writer knows of the dropped index generations whose entries are
 /// still stored, as of its last look. Every count is of generations unless
 /// it says otherwise.
@@ -1008,6 +1111,18 @@ pub struct DroppedIndexStorage {
     /// When this writer armed the armed generation it has waited on longest.
     /// A writer that opens arms every stored entry again.
     pub waiting_since: Option<Instant>,
+    /// When the proof last moved for the generation, among those not yet
+    /// `tracking`, whose proof has stood still longest. Such a proof waits
+    /// for a pass, for compactions in flight, or for a reader older than the
+    /// drop to close, each of which should end by itself.
+    pub stalled_since: Option<Instant>,
+    /// When the proof last moved for the `tracking` generation whose proof
+    /// has stood still longest: how long its rows have waited for a
+    /// compaction to reach them.
+    pub tracking_since: Option<Instant>,
+    /// How this writer's last background pass ended; `None` before its
+    /// first, which arms the entries the store holds.
+    pub last_pass: Option<DroppedStoragePass>,
     /// Entries the catalog contradicts. Their rows are kept.
     pub quarantined: Vec<QuarantinedDroppedGeneration>,
 }
@@ -1046,6 +1161,8 @@ pub(crate) enum Unquarantined {
 struct State {
     entries: HashMap<DroppedGeneration, Entry>,
     compactions: CompactionActivity,
+    /// How the last background pass ended.
+    last_pass: Option<DroppedStoragePass>,
 }
 
 /// The dropped generations one writer knows of, and what its compactions do
@@ -1107,6 +1224,7 @@ impl Registry {
                         kept: 0,
                         proof: Proof::Unproven,
                         since: now,
+                        progressed: now,
                     })
                 }
                 Err(contradiction) => Entry::Quarantined(Quarantined {
@@ -1163,26 +1281,34 @@ impl Registry {
     /// writer's manifest and a rule, which [`reclaim::storage`] has.
     pub(crate) fn storage(&self) -> DroppedIndexStorage {
         let state = self.state.lock();
-        let mut storage = DroppedIndexStorage::default();
+        let mut storage = DroppedIndexStorage {
+            last_pass: state.last_pass.clone(),
+            ..DroppedIndexStorage::default()
+        };
         let mut tracked = HashSet::new();
+        let oldest = |oldest: Option<Instant>, instant: Instant| {
+            Some(oldest.map_or(instant, |oldest| oldest.min(instant)))
+        };
         for (entry, state) in &state.entries {
             match state {
                 Entry::Armed(armed) => {
-                    storage.waiting_since = Some(
-                        storage
-                            .waiting_since
-                            .map_or(armed.since, |since| since.min(armed.since)),
-                    );
+                    storage.waiting_since = oldest(storage.waiting_since, armed.since);
                     match &armed.proof {
                         Proof::Unproven => {
                             storage.unproven += 1;
                             storage.retained += usize::from(armed.kept > 0);
+                            storage.stalled_since = oldest(storage.stalled_since, armed.progressed);
                         }
-                        Proof::Draining { .. } => storage.draining += 1,
+                        Proof::Draining { .. } => {
+                            storage.draining += 1;
+                            storage.stalled_since = oldest(storage.stalled_since, armed.progressed);
+                        }
                         Proof::Tracking { tables } => {
                             storage.tracking += 1;
                             storage.tracked_bytes += tables.tables().values().sum::<u64>();
                             tracked.extend(tables.tables().keys().copied());
+                            storage.tracking_since =
+                                oldest(storage.tracking_since, armed.progressed);
                         }
                     }
                 }
@@ -1333,9 +1459,29 @@ impl Registry {
     }
 
     /// Tells the retirer that a stored entry or the catalog it is checked
-    /// against may have changed: an index operation reached its end.
-    pub(crate) fn catalog_changed(&self) {
+    /// against may have changed: an index operation committed its last
+    /// step. [`outbox`](super::outbox) calls this from the one function
+    /// that commits a step, after the commit that may have stored an entry.
+    pub(crate) fn operation_committed(&self) {
         self.changed.notify_one();
+    }
+
+    /// Records how a background pass ended: with `failure`, or by reading
+    /// the store.
+    pub(crate) fn pass_ended(&self, failure: Option<String>) {
+        let at = Instant::now();
+        let mut state = self.state.lock();
+        state.last_pass = Some(match failure {
+            None => DroppedStoragePass::Completed { at },
+            Some(error) => DroppedStoragePass::Failed {
+                at,
+                since: match &state.last_pass {
+                    Some(DroppedStoragePass::Failed { since, .. }) => *since,
+                    Some(DroppedStoragePass::Completed { .. }) | None => at,
+                },
+                error,
+            },
+        });
     }
 
     /// Completes once something a retirement pass depends on has changed
@@ -1358,7 +1504,10 @@ impl Registry {
         if armed.kept != kept {
             return false;
         }
-        armed.proof = proof;
+        if armed.proof != proof {
+            armed.proof = proof;
+            armed.progressed = Instant::now();
+        }
         true
     }
 

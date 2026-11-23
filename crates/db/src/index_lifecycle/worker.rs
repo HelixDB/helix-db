@@ -101,6 +101,9 @@ pub(crate) struct IndexFamilyCapabilities {
     vector: IndexFamilyCapability,
     text: IndexFamilyCapability,
     text_compactor: Arc<dyn ActiveTextCompactionDriver>,
+    /// The writer's dropped-generation registry, which every committed step
+    /// of every family is reported to.
+    dropped: Arc<dropped::Registry>,
 }
 
 /// Runtime-only Active text compaction service installed by the text driver.
@@ -111,18 +114,21 @@ pub(crate) trait ActiveTextCompactionDriver: Send + Sync {
 }
 
 impl IndexFamilyCapabilities {
-    /// Builds a registry from the three installed family drivers.
+    /// Builds a registry from the three installed family drivers and the
+    /// writer's dropped-generation registry.
     pub(crate) const fn new(
         secondary: IndexFamilyCapability,
         vector: IndexFamilyCapability,
         text: IndexFamilyCapability,
         text_compactor: Arc<dyn ActiveTextCompactionDriver>,
+        dropped: Arc<dropped::Registry>,
     ) -> Self {
         Self {
             secondary,
             vector,
             text,
             text_compactor,
+            dropped,
         }
     }
 
@@ -285,6 +291,8 @@ enum InFlightTask {
         claim: Box<PendingClaim>,
         driver: Arc<dyn IndexOperationDriver>,
         limits: SearchIndexBatchLimits,
+        /// Told of each step the task commits.
+        dropped: Arc<dropped::Registry>,
         /// Ends the claim slice early once shutdown is requested.
         shutdown: watch::Receiver<bool>,
         _permits: InFlightPermits,
@@ -313,12 +321,12 @@ impl InFlightTask {
 
     async fn execute(self, db: Arc<slatedb::Db>) -> Result<InFlightCompletion> {
         let target = self.target();
-        let mut settled = false;
         let did_work = match self {
             Self::Operation {
                 claim,
                 driver,
                 limits,
+                dropped,
                 shutdown,
                 _permits,
                 #[cfg(feature = "index-lifecycle-testing")]
@@ -395,14 +403,13 @@ impl InFlightTask {
                         limits,
                         now_unix_millis(),
                         claim,
+                        &dropped,
                     )
                     .await?;
                     #[cfg(feature = "index-lifecycle-testing")]
                     lifecycle_metrics.observe_operation(executed.evidence);
                     applied |=
                         executed.evidence.outcome == outbox::CommittedOperationStep::Progressed;
-                    settled |=
-                        executed.evidence.outcome == outbox::CommittedOperationStep::Completed;
                     let Some(retained) = executed.retained else {
                         // See [`CLAIM_SLICE`]: the slice ends once its steps
                         // are durable. A blocked or completed step waited for
@@ -443,20 +450,13 @@ impl InFlightTask {
                 )
             }
         };
-        Ok(InFlightCompletion {
-            target,
-            did_work,
-            settled,
-        })
+        Ok(InFlightCompletion { target, did_work })
     }
 }
 
 struct InFlightCompletion {
     target: InFlightTarget,
     did_work: bool,
-    /// Whether an index operation reached its end: a build activated or
-    /// aborted, or a drop completed.
-    settled: bool,
 }
 
 /// A bounded scan keeps its position for fairness. Work or a wake invalidates
@@ -485,7 +485,6 @@ struct WorkerSupervisorContext {
     lifecycle_metrics: Arc<crate::index_lifecycle_testing::AutomaticLifecycleMetrics>,
     writer_epoch: WriterEpoch,
     wake: Arc<Notify>,
-    dropped: Arc<dropped::Registry>,
     shutdown: watch::Receiver<bool>,
 }
 
@@ -533,7 +532,6 @@ impl IndexWorkerSupervisor {
         concurrency: IndexLifecycleConcurrency,
         claim_sequences: Arc<ClaimSequenceAllocator>,
         wake: IndexWorkerWakeHandle,
-        dropped: Arc<dropped::Registry>,
         #[cfg(feature = "index-lifecycle-testing")] lifecycle_metrics: Arc<
             crate::index_lifecycle_testing::AutomaticLifecycleMetrics,
         >,
@@ -552,7 +550,6 @@ impl IndexWorkerSupervisor {
             lifecycle_metrics,
             writer_epoch,
             wake: Arc::clone(&wake),
-            dropped,
             shutdown: shutdown_rx,
         }));
         Self {
@@ -642,8 +639,16 @@ pub(crate) async fn process_secondary_once(
             else {
                 continue;
             };
-            outbox::execute_claimed_step(db, &claimed, driver.as_ref(), limits, now_unix_millis())
-                .await?;
+            outbox::execute_claimed_step_with_evidence(
+                db,
+                &claimed,
+                driver.as_ref(),
+                limits,
+                now_unix_millis(),
+                ClaimContinuation::Release,
+                &capabilities.dropped,
+            )
+            .await?;
             return Ok(true);
         }
         if page.prefix_exhausted {
@@ -669,7 +674,6 @@ async fn supervise_worker(context: WorkerSupervisorContext) {
                 writer_epoch: context.writer_epoch,
                 same_epoch_proof,
                 wake: &context.wake,
-                dropped: &context.dropped,
             },
             &context.claim_sequences,
             &mut shutdown,
@@ -719,9 +723,6 @@ struct WorkerCycleContext<'a> {
     writer_epoch: WriterEpoch,
     same_epoch_proof: Option<SameEpochRecoveryProof>,
     wake: &'a Notify,
-    /// Told when an index operation ends: its last commit may have stored a
-    /// dropped-generation entry, or moved the catalog one is checked against.
-    dropped: &'a dropped::Registry,
 }
 
 async fn run_worker_cycle(
@@ -763,7 +764,6 @@ async fn dispatch_worker_cycle(
         writer_epoch,
         same_epoch_proof,
         wake,
-        dropped,
     } = context;
     let page_size = OperationQueuePageSize::new(DEFAULT_OPERATION_PAGE_SIZE)?;
     let permits = WorkerPermits::new(concurrency);
@@ -777,7 +777,6 @@ async fn dispatch_worker_cycle(
             if finish_joined_task(
                 joined,
                 targets,
-                dropped,
                 #[cfg(feature = "index-lifecycle-testing")]
                 lifecycle_metrics,
             )? {
@@ -863,7 +862,6 @@ async fn dispatch_worker_cycle(
             tasks,
             targets,
             wake,
-            dropped,
             &mut earliest_deadline,
             publisher.is_some_and(|publisher| publisher.has_outstanding_work()),
             sweep_interval,
@@ -892,7 +890,6 @@ async fn wait_for_work(
     tasks: &mut JoinSet<JoinedInFlightTask>,
     targets: &mut HashSet<InFlightTarget>,
     wake: &Notify,
-    dropped: &dropped::Registry,
     earliest_deadline: &mut Option<tokio::time::Instant>,
     queued_work: bool,
     sweep_interval: Duration,
@@ -924,7 +921,6 @@ async fn wait_for_work(
                 if finish_joined_task(
                     joined,
                     targets,
-                    dropped,
                     #[cfg(feature = "index-lifecycle-testing")]
                     lifecycle_metrics,
                 )? {
@@ -1023,7 +1019,6 @@ struct JoinedInFlightTask {
 fn finish_joined_task(
     joined: std::result::Result<JoinedInFlightTask, JoinError>,
     targets: &mut HashSet<InFlightTarget>,
-    dropped: &dropped::Registry,
     #[cfg(feature = "index-lifecycle-testing")] lifecycle_metrics: &Arc<
         crate::index_lifecycle_testing::AutomaticLifecycleMetrics,
     >,
@@ -1041,9 +1036,6 @@ fn finish_joined_task(
     );
     let completion = joined.result?;
     assert_eq!(completion.target, joined.target);
-    if completion.settled {
-        dropped.catalog_changed();
-    }
     Ok(completion.did_work)
 }
 
@@ -1142,6 +1134,7 @@ async fn schedule_operation_task(
                     }),
                     driver,
                     limits,
+                    dropped: Arc::clone(&capabilities.dropped),
                     shutdown: shutdown.clone(),
                     _permits: task_permits,
                     #[cfg(feature = "index-lifecycle-testing")]
@@ -1303,6 +1296,7 @@ mod tests {
             }),
             driver: Arc::new(NeverSteps),
             limits: SearchIndexBackfillLimits::default().batch(),
+            dropped: Arc::default(),
             shutdown: watch::channel(false).1,
             _permits: permits
                 .try_operation(IndexOperationFamily::Secondary)
@@ -1504,7 +1498,6 @@ mod tests {
                     &mut tasks,
                     &mut targets,
                     &wake,
-                    &dropped::Registry::default(),
                     &mut delay,
                     false,
                     Duration::from_secs(1),
@@ -1538,6 +1531,7 @@ mod tests {
             capability.clone(),
             capability,
             Arc::new(NoCompaction),
+            Arc::default(),
         )
     }
 
@@ -1674,6 +1668,7 @@ mod tests {
             }),
             driver: Arc::new(driver),
             limits: SearchIndexBackfillLimits::default().batch(),
+            dropped: Arc::default(),
             shutdown,
             _permits: permits
                 .try_operation(IndexOperationFamily::Secondary)

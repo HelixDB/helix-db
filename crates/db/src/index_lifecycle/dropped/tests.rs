@@ -46,6 +46,7 @@ fn armed(index_id: u64, gate: u64) -> Armed {
         kept: 0,
         proof: Proof::Unproven,
         since: *SINCE,
+        progressed: *SINCE,
     }
 }
 
@@ -62,6 +63,7 @@ fn registry_of(entries: HashMap<DroppedGeneration, Entry>) -> Registry {
         state: parking_lot::Mutex::new(State {
             entries,
             compactions: CompactionActivity::default(),
+            last_pass: None,
         }),
         changed: tokio::sync::Notify::new(),
     }
@@ -91,7 +93,24 @@ fn job(retention_min_seq: Option<u64>) -> CompactionJobContext {
     }
 }
 
+/// The armed entry of `index_id`, with the time its proof last moved put
+/// back to the fixture's, which
+/// [`a_proof_that_moves_restarts_the_time_it_has_stood_still`] tests.
 fn state(registry: &Registry, index_id: u64) -> Armed {
+    Armed {
+        progressed: *SINCE,
+        ..progress(registry, index_id)
+    }
+}
+
+/// Lets the clock move on, so that two instants read either side of it
+/// differ.
+fn tick() {
+    std::thread::sleep(std::time::Duration::from_millis(2));
+}
+
+/// The armed entry of `index_id` as the registry holds it.
+fn progress(registry: &Registry, index_id: u64) -> Armed {
     registry
         .armed()
         .into_iter()
@@ -375,6 +394,7 @@ fn a_quarantined_entry_is_never_discarded_and_is_reported() {
         DroppedIndexStorage {
             unproven: 1,
             waiting_since: Some(*SINCE),
+            stalled_since: Some(*SINCE),
             quarantined: vec![
                 QuarantinedDroppedGeneration {
                     index_id: 2,
@@ -491,9 +511,9 @@ fn the_retirer_is_told_only_of_what_a_pass_depends_on() {
     registry.filter_dropped();
     assert!(!told(&registry));
 
-    // The end of an index operation may have stored an entry.
-    registry.catalog_changed();
-    registry.catalog_changed();
+    // The last commit of an index operation may have stored an entry.
+    registry.operation_committed();
+    registry.operation_committed();
     assert!(told(&registry));
     assert!(!told(&registry));
 
@@ -615,6 +635,7 @@ fn every_contradiction_and_row_layout_is_reported_in_words() {
 fn storage_counts_each_entry_by_what_its_proof_waits_for() {
     let registry = registry(&[(1, 10), (2, 10), (3, 10), (4, 10), (5, 10), (6, 30)]);
     assert_eq!(DroppedIndexStorage::default().entries(), 0);
+    tick();
     assert!(registry.advance(entry(2), 0, draining(&[8, 9])));
     assert!(registry.advance(entry(3), 0, tracking(&[7, 8])));
     assert!(registry.advance(entry(4), 0, tracking(&[8, 9])));
@@ -622,6 +643,9 @@ fn storage_counts_each_entry_by_what_its_proof_waits_for() {
     // Keeps the rows of the sixth alone.
     registry.discardable(&job(Some(20)));
     let storage = registry.storage();
+    // The proofs that track tables moved when they were advanced above.
+    let tracking_since = storage.tracking_since;
+    assert!(tracking_since.is_some_and(|moved| moved > *SINCE));
     assert_eq!(
         storage,
         DroppedIndexStorage {
@@ -635,6 +659,10 @@ fn storage_counts_each_entry_by_what_its_proof_waits_for() {
             tracked_bytes: 700 + 800 + 800 + 900 + 700,
             left_in_place: None,
             waiting_since: Some(*SINCE),
+            // The unproven entries have not moved since they were armed.
+            stalled_since: Some(*SINCE),
+            tracking_since,
+            last_pass: None,
             quarantined: Vec::new(),
         }
     );
@@ -813,4 +841,142 @@ fn only_a_writer_with_its_own_compaction_worker_compacts_in_process() {
             "{coordinator} {worker}"
         );
     }
+}
+
+#[test]
+fn a_proof_that_moves_restarts_the_time_it_has_stood_still() {
+    let registry = registry(&[(1, 10), (2, 10)]);
+    assert_eq!(progress(&registry, 1).progressed, *SINCE);
+    // A step forward moves it.
+    tick();
+    assert!(registry.advance(entry(1), 0, draining(&[8])));
+    let drained = progress(&registry, 1).progressed;
+    assert!(drained > *SINCE);
+    // The same proof again is no step: a pass that finds nothing new.
+    tick();
+    assert!(registry.advance(entry(1), 0, draining(&[8])));
+    assert_eq!(progress(&registry, 1).progressed, drained);
+    assert!(registry.advance(entry(1), 0, tracking(&[7, 8])));
+    let tracked = progress(&registry, 1).progressed;
+    assert!(tracked > drained);
+    // A tracked table compacted away is progress.
+    tick();
+    assert!(registry.advance(entry(1), 0, tracking(&[7])));
+    let shrunk = progress(&registry, 1).progressed;
+    assert!(shrunk > tracked);
+    // A step that does not apply moves nothing, and neither does a filter
+    // that keeps the rows: that is the opposite of progress.
+    tick();
+    assert!(!registry.advance(entry(1), 5, tracking(&[9])));
+    registry.discardable(&job(Some(9)));
+    assert_eq!(progress(&registry, 1).proof, Proof::Unproven);
+    assert_eq!(progress(&registry, 1).progressed, shrunk);
+
+    // The report gives the longest standstill among the proofs that have
+    // yet to track tables, and among those that do, apart.
+    let storage = registry.storage();
+    assert_eq!(storage.stalled_since, Some(*SINCE));
+    assert_eq!(storage.tracking_since, None);
+    assert!(registry.advance(entry(1), 1, tracking(&[7])));
+    tick();
+    assert!(registry.advance(entry(2), 1, tracking(&[7])));
+    let storage = registry.storage();
+    assert_eq!(storage.stalled_since, None);
+    assert_eq!(
+        storage.tracking_since,
+        Some(progress(&registry, 1).progressed)
+    );
+    assert!(progress(&registry, 1).progressed < progress(&registry, 2).progressed);
+}
+
+#[test]
+fn the_last_pass_is_reported_with_how_long_passes_have_failed() {
+    let registry = registry(&[]);
+    assert_eq!(registry.storage().last_pass, None);
+    registry.pass_ended(None);
+    let Some(crate::DroppedStoragePass::Completed { at: first }) = registry.storage().last_pass
+    else {
+        panic!("the pass completed");
+    };
+    registry.pass_ended(Some("object store unavailable".to_string()));
+    let Some(crate::DroppedStoragePass::Failed { at, since, error }) = registry.storage().last_pass
+    else {
+        panic!("the pass failed");
+    };
+    assert!(at >= first);
+    assert_eq!(since, at);
+    assert_eq!(error, "object store unavailable");
+    // A second failure in a row keeps the time of the first and the error
+    // of the last.
+    registry.pass_ended(Some("timed out".to_string()));
+    let Some(crate::DroppedStoragePass::Failed {
+        at: again,
+        since: still,
+        error,
+    }) = registry.storage().last_pass
+    else {
+        panic!("the pass failed again");
+    };
+    assert!(again >= at);
+    assert_eq!(still, since);
+    assert_eq!(error, "timed out");
+    // A pass that reads the store ends the run of failures; the next
+    // failure starts a new one.
+    tick();
+    registry.pass_ended(None);
+    assert!(matches!(
+        registry.storage().last_pass,
+        Some(crate::DroppedStoragePass::Completed { .. })
+    ));
+    registry.pass_ended(Some("timed out".to_string()));
+    let Some(crate::DroppedStoragePass::Failed { at, since, .. }) = registry.storage().last_pass
+    else {
+        panic!("the pass failed");
+    };
+    assert_eq!(since, at);
+    assert!(since > still);
+}
+
+#[test]
+fn every_admission_moves_a_store_and_a_pristine_managed_store_starts_there() {
+    // The decision the owner has still to take is in these two places.
+    for admission in Admission::ALL {
+        assert!(admission.moves_store(), "{admission:?}");
+    }
+    assert_eq!(
+        PRISTINE_MANAGED_STORE,
+        IndexStorageVersion::DROPPED_GENERATIONS
+    );
+}
+
+#[test]
+fn the_embedded_compactor_never_moves_tables_without_a_filter() {
+    use slatedb::config::CompactorOptions;
+
+    // Whatever the settings ask for: a trivial move creates no filter, so a
+    // reclaim made of one would give no byte back, and SlateDB runs one in
+    // its coordinator, outside the check that refuses a submitted compaction
+    // which overlaps one in flight.
+    for enable_trivial_move in [false, true] {
+        let settings = slatedb::Settings {
+            compactor_options: Some(CompactorOptions {
+                enable_trivial_move,
+                ..CompactorOptions::default()
+            }),
+            ..slatedb::Settings::default()
+        };
+        assert!(
+            !compactor_options(&settings)
+                .expect("the settings run a compactor")
+                .enable_trivial_move
+        );
+    }
+    assert_eq!(
+        compactor_options(&slatedb::Settings {
+            compactor_options: None,
+            ..slatedb::Settings::default()
+        })
+        .map(|options| options.enable_trivial_move),
+        None
+    );
 }

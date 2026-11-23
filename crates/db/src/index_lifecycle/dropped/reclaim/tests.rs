@@ -120,61 +120,44 @@ fn a_large_run_is_worth_rewriting_when_an_eighth_of_it_is_dropped() {
 fn a_caller_is_never_refused_and_the_idle_store_follows_the_rule() {
     for (run_bytes, dropped_bytes) in [(MIB, 0), (40 * GIB, 0), (40 * GIB, MIB), (8 * GIB, GIB)] {
         assert!(Reclaimer::Caller.rewrites(run_bytes, dropped_bytes));
-        for writer in [IDLE, BUSY] {
-            assert_eq!(
-                writer.rewrites(run_bytes, dropped_bytes),
-                worth_rewriting(run_bytes, dropped_bytes),
-                "{run_bytes} {dropped_bytes}"
-            );
-        }
+        assert_eq!(
+            IDLE.rewrites(run_bytes, dropped_bytes),
+            worth_rewriting(run_bytes, dropped_bytes),
+            "{run_bytes} {dropped_bytes}"
+        );
     }
 }
 
-const BUSY: Reclaimer = Reclaimer::BusyStore(Worth::WRITER);
-
 #[test]
-fn the_writer_starts_a_compaction_only_where_the_scheduler_keeps_room() {
-    for (others, slots, idle, busy) in [
-        // An idle store's reclaim starts beside nothing.
+fn a_reclaim_never_takes_the_last_free_slot() {
+    for (others, slots, caller, idle) in [
+        // A compactor with nothing to do and room to spare: either starts.
         (0, 4, true, true),
-        (1, 4, false, true),
-        // A busy store's leaves the scheduler one slot after its own.
-        (2, 4, false, true),
-        (3, 4, false, false),
-        (4, 4, false, false),
         (0, 2, true, true),
+        // Others run and a slot would stay free after its own: a caller's
+        // starts beside them, an idle store's waits to be idle.
+        (1, 4, true, false),
+        (2, 4, true, false),
+        (1, 3, true, false),
+        // Its compaction would take the last free slot.
+        (3, 4, false, false),
         (1, 2, false, false),
-        // With one slot it would take the only one.
-        (0, 1, true, false),
-    ] {
-        assert!(Reclaimer::Caller.starts_beside(others, slots));
-        assert_eq!(IDLE.starts_beside(others, slots), idle, "{others} {slots}");
-        assert_eq!(BUSY.starts_beside(others, slots), busy, "{others} {slots}");
-    }
-}
-
-#[test]
-fn a_reclaim_gives_way_only_when_it_keeps_l0_from_being_compacted() {
-    for (slots, taken, l0_in_flight, l0_tables, starves) in [
-        // A slot is free: the scheduler can start what it likes.
-        (4, 1, false, 8, false),
-        (4, 3, false, 8, false),
-        // Every slot is taken and L0 tables wait with no compaction of
-        // theirs in flight.
-        (4, 4, false, 1, true),
-        (4, 4, false, 8, true),
-        (4, 5, false, 1, true),
-        (1, 1, false, 1, true),
-        // One is in flight: the scheduler starts no second beside it.
-        (4, 4, true, 8, false),
-        // L0 is empty: nothing waits.
-        (4, 4, false, 0, false),
+        // No slot is free at all.
+        (4, 4, false, false),
+        (5, 4, false, false),
+        // With one slot it would take the only one, idle or not.
+        (0, 1, false, false),
+        (1, 1, false, false),
+        // No slot, no compaction.
+        (0, 0, false, false),
+        (usize::MAX, 4, false, false),
     ] {
         assert_eq!(
-            starves_l0(slots, taken, l0_in_flight, l0_tables),
-            starves,
-            "{slots} {taken} {l0_in_flight} {l0_tables}"
+            Reclaimer::Caller.starts_beside(others, slots),
+            caller,
+            "{others} {slots}"
         );
+        assert_eq!(IDLE.starts_beside(others, slots), idle, "{others} {slots}");
     }
 }
 
@@ -482,7 +465,6 @@ fn an_end_that_was_not_observed_is_settled_by_whether_its_sources_are_stored() {
     let obstacles = [
         ReclaimObstacle::Busy,
         ReclaimObstacle::Rejected,
-        ReclaimObstacle::GaveWay,
         ReclaimObstacle::TimedOut,
         ReclaimObstacle::Closed,
     ];

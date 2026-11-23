@@ -27,8 +27,8 @@ use crate::index_lifecycle::outbox::{
 };
 use crate::index_lifecycle::repository::peek_vector_physical_id;
 use crate::index_lifecycle::{
-    ActiveIndexHandle, ClaimSequence, IndexDdlReceipt, IndexOperationId, IndexScopeGates,
-    IndexStateV2, WriterEpoch,
+    ActiveIndexHandle, ClaimSequence, DroppedGenerationValue, IndexDdlReceipt, IndexOperationId,
+    IndexScopeGates, IndexStateV2, WriterEpoch,
 };
 use crate::migrations::startup::bootstrap_writer;
 use crate::search::vector::{
@@ -4130,13 +4130,13 @@ pub(super) async fn a_drop_that_must_not_be_filtered_deletes_every_row_and_leave
     }
 }
 
-/// Proves a drop whose first delete step could not hold the unfiltered rows
-/// finishes row by row and still leaves its entry.
+/// Proves a drop whose unfiltered rows do not fit one step deletes them over
+/// as many steps as they take, and nothing else: every row a compaction
+/// filter matches is still left to its entry.
 ///
-/// The counters are the only record that rows were deleted one by one, so a
-/// step that deleted any never hands the rest to compactions: a later step
-/// could not tell which lanes the earlier one had finished.
-pub(super) async fn a_drop_that_began_row_by_row_finishes_row_by_row() {
+/// The counters of the earlier steps do not turn the drop into a row-by-row
+/// one: the scan of the unfiltered rows resumes where the last step stopped.
+pub(super) async fn a_drop_whose_unfiltered_rows_need_several_steps_leaves_the_rest() {
     let db = test_db("vector-driver-dropped-entry-fallback").await;
     dropped::admit_fixture(&db).await;
     let scope = DataScope::LegacyUnscoped;
@@ -4160,20 +4160,24 @@ pub(super) async fn a_drop_that_began_row_by_row_finishes_row_by_row() {
     )
     .await
     .expect("fixture core row is written");
-    let rows = physical_keys(&db, scope, physical_index_id).await.len();
+    let core = core_keys(&db, scope, physical_index_id).await;
+    assert_eq!(core.len(), 2);
+    let filtered = physical_keys(&db, scope, physical_index_id)
+        .await
+        .into_iter()
+        .filter(|key| !core.contains(key))
+        .collect::<Vec<_>>();
+    assert!(filtered.len() > 8, "the namespace has rows to leave");
     let one_row = batch_limits(1024, 1024 * 1024, 1, 16 * 1024 * 1024);
 
-    // Retiring the cache, then one core row: more remain.
+    // Retiring the cache, then one core row: one remains.
     for _ in 0..2 {
         assert_eq!(
             drive_one(&db, &driver, drop_id, &mut claim_sequence, one_row).await,
             CommittedOperationStep::Progressed
         );
     }
-    assert_eq!(
-        physical_keys(&db, scope, physical_index_id).await.len(),
-        rows - 1
-    );
+    assert_eq!(core_keys(&db, scope, physical_index_id).await.len(), 1);
     assert!(deleting_physical(&db, drop_id).await);
 
     let mut steps = 0;
@@ -4181,16 +4185,10 @@ pub(super) async fn a_drop_that_began_row_by_row_finishes_row_by_row() {
         == CommittedOperationStep::Progressed
     {
         steps += 1;
-        assert!(steps < 256, "the drop exceeded bounded test checkpoints");
+        assert!(steps < 8, "the filtered rows took steps of their own");
         assert_eq!(dropped::load_entries(&db).await.unwrap(), vec![]);
     }
-    assert!(steps >= rows - 1, "every remaining row took its own step");
-    assert_eq!(
-        physical_keys(&db, scope, physical_index_id).await,
-        Vec::<Bytes>::new()
-    );
-    assert_eq!(generation_keys(&db, entry).await, Vec::<Bytes>::new());
-    // The entry names no row any more; a reclaim deletes it.
+    assert_eq!(physical_keys(&db, scope, physical_index_id).await, filtered);
     assert_eq!(
         dropped::load_entries(&db)
             .await
@@ -4260,13 +4258,13 @@ pub(super) async fn a_failed_final_step_leaves_neither_the_entry_nor_the_dropped
     db.close().await.expect("vector test database closes");
 }
 
-/// Proves a store admitted while a drop is half-way through its rows lets
-/// the drop finish row by row.
+/// Proves a store admitted while a drop is half-way through its rows hands
+/// what is left to the drop's entry.
 ///
 /// This is the store a binary that knows no entries leaves behind when it is
-/// replaced mid-drop: the rows it deleted are counted in the operation, so
-/// the new binary hands none of the rest to compactions.
-pub(super) async fn a_drop_admitted_half_way_finishes_row_by_row() {
+/// replaced mid-drop. The new binary deletes no row a compaction filter
+/// matches, however many the old one had deleted and counted.
+pub(super) async fn a_drop_admitted_half_way_is_handed_to_its_entry() {
     let db = test_db("vector-driver-dropped-entry-admitted-half-way").await;
     let scope = DataScope::LegacyUnscoped;
     let driver = driver();
@@ -4274,37 +4272,40 @@ pub(super) async fn a_drop_admitted_half_way_finishes_row_by_row() {
     let entry = dropping_generation(&db).await;
     let rows = physical_keys(&db, scope, physical_index_id).await.len();
     let one_row = batch_limits(1024, 1024 * 1024, 1, 16 * 1024 * 1024);
-    // Retiring the cache, then two rows.
+    // Retiring the cache, then two rows, one by one.
     for _ in 0..3 {
         assert_eq!(
             drive_one(&db, &driver, drop_id, &mut claim_sequence, one_row).await,
             CommittedOperationStep::Progressed
         );
     }
+    let left = physical_keys(&db, scope, physical_index_id).await;
+    assert_eq!(left.len(), rows - 2);
+    // The core rows went first: only rows a filter matches are left.
     assert_eq!(
-        physical_keys(&db, scope, physical_index_id).await.len(),
-        rows - 2
+        core_keys(&db, scope, physical_index_id).await,
+        Vec::<Bytes>::new()
     );
 
     dropped::admit_fixture(&db).await;
+    let mut steps = 0;
+    while drive_one(&db, &driver, drop_id, &mut claim_sequence, one_row).await
+        == CommittedOperationStep::Progressed
+    {
+        steps += 1;
+        assert!(steps < 8, "the rows left took steps of their own");
+        assert_eq!(dropped::load_entries(&db).await.unwrap(), vec![]);
+    }
+    assert_eq!(physical_keys(&db, scope, physical_index_id).await, left);
     assert_eq!(
-        drive_one(&db, &driver, drop_id, &mut claim_sequence, one_row).await,
-        CommittedOperationStep::Progressed
+        dropped::load_entries(&db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(entry, _)| entry)
+            .collect::<Vec<_>>(),
+        vec![entry]
     );
-    assert_eq!(
-        physical_keys(&db, scope, physical_index_id).await.len(),
-        rows - 3,
-        "the admitted store's first step deletes one row, as the steps before it"
-    );
-    assert_eq!(
-        drive_to_terminal(&db, &driver, drop_id, &mut claim_sequence).await,
-        CommittedOperationStep::Completed
-    );
-    assert_eq!(
-        physical_keys(&db, scope, physical_index_id).await,
-        Vec::<Bytes>::new()
-    );
-    assert_eq!(generation_keys(&db, entry).await, Vec::<Bytes>::new());
     db.close().await.expect("vector test database closes");
 }
 
@@ -4522,14 +4523,15 @@ pub(super) async fn an_admitted_partitioned_drop_keeps_its_mappings_and_leaves_i
     db.close().await.expect("vector test database closes");
 }
 
-/// Proves a partitioned drop that a store is admitted under half-way
-/// finishes row by row, wherever the admission finds it.
+/// Proves a partitioned drop that a store is admitted under half-way is
+/// handed to its entry, wherever the admission finds it.
 ///
-/// A row-by-row drop deletes each mapping once its namespace is empty, so no
-/// mapping lies before its cursor; that is what tells its steps from those
-/// of a drop that keeps its mappings. The entry its last step leaves names a
-/// generation without mappings or rows.
-pub(super) async fn a_partitioned_drop_admitted_half_way_finishes_row_by_row() {
+/// A row-by-row drop deletes each mapping with every row of its partition
+/// before it moves on, so the mappings left at admission name exactly the
+/// partitions that still have rows. From there the drop deletes only the
+/// rows no filter matches and keeps those mappings, and its entry gives up
+/// the generation and the partitions they name.
+pub(super) async fn a_partitioned_drop_admitted_half_way_is_handed_to_its_entry() {
     for (name, mappings_left_at_admission) in [
         ("vector-driver-dropped-partitioned-half-way-first", 2),
         ("vector-driver-dropped-partitioned-half-way-second", 1),
@@ -4552,52 +4554,51 @@ pub(super) async fn a_partitioned_drop_admitted_half_way_finishes_row_by_row() {
             steps += 1;
             assert!(steps < 64, "{name}: the drop exceeded its bounded steps");
         }
-        let mut left = Vec::new();
-        for physical_index_id in partitions {
-            left.push(physical_keys(&db, scope, physical_index_id).await.len());
-        }
-        assert!(left[1] > 3, "{name}: the second namespace has rows left");
-        assert_eq!(left[0] == 0, mappings_left_at_admission == 1, "{name}");
-
-        dropped::admit_fixture(&db).await;
+        let mapped = mapped_physical_ids(&db, entry).await;
         assert_eq!(
-            drive_one(&db, &driver, drop_id, &mut claim_sequence, three_rows).await,
-            CommittedOperationStep::Progressed,
+            mapped,
+            partitions[2 - mappings_left_at_admission..],
             "{name}"
         );
-        let mut left_after = 0;
+        // What a filter matches in each partition at admission.
+        let mut filtered = Vec::new();
         for physical_index_id in partitions {
-            left_after += physical_keys(&db, scope, physical_index_id).await.len();
+            let core = core_keys(&db, scope, physical_index_id).await;
+            filtered.push(
+                physical_keys(&db, scope, physical_index_id)
+                    .await
+                    .into_iter()
+                    .filter(|key| !core.contains(key))
+                    .collect::<Vec<_>>(),
+            );
         }
-        assert_eq!(
-            left_after,
-            left[0] + left[1] - 3,
-            "{name}: the admitted store's first step deletes three rows, as the steps before it"
+        assert!(
+            filtered[1].len() > 3,
+            "{name}: the second namespace has rows left"
         );
+        assert_eq!(
+            filtered[0].is_empty(),
+            mappings_left_at_admission == 1,
+            "{name}"
+        );
+
+        dropped::admit_fixture(&db).await;
+        let mut after = 0;
         while drive_one(&db, &driver, drop_id, &mut claim_sequence, three_rows).await
             == CommittedOperationStep::Progressed
         {
-            steps += 1;
-            assert!(steps < 64, "{name}: the drop exceeded its bounded steps");
+            after += 1;
+            assert!(after < 8, "{name}: the rows left took steps of their own");
             assert_eq!(dropped::load_entries(&db).await.unwrap(), vec![], "{name}");
         }
-        for physical_index_id in partitions {
+        for (physical_index_id, filtered) in partitions.into_iter().zip(&filtered) {
             assert_eq!(
-                physical_keys(&db, scope, physical_index_id).await,
-                Vec::<Bytes>::new(),
+                &physical_keys(&db, scope, physical_index_id).await,
+                filtered,
                 "{name}"
             );
         }
-        assert_eq!(
-            mapped_physical_ids(&db, entry).await,
-            Vec::<u64>::new(),
-            "{name}"
-        );
-        assert_eq!(
-            generation_keys(&db, entry).await,
-            Vec::<Bytes>::new(),
-            "{name}"
-        );
+        assert_eq!(mapped_physical_ids(&db, entry).await, mapped, "{name}");
         assert_eq!(
             dropped::load_entries(&db).await.unwrap(),
             vec![(
@@ -4613,22 +4614,18 @@ pub(super) async fn a_partitioned_drop_admitted_half_way_finishes_row_by_row() {
         registry.refresh(&db).await.expect("the entry arms");
         assert_eq!(
             registry.armed()[0].1.owners.len(),
-            1,
-            "{name}: only the generation is left to name"
+            1 + mappings_left_at_admission,
+            "{name}: the generation and the partitions still mapped"
         );
         db.close().await.expect("vector test database closes");
     }
 }
 
 /// Proves what a partitioned drop does when the unfiltered rows of one
-/// partition do not fit one step.
-///
-/// In the first partition the counters are then the only record that rows
-/// were deleted, so the drop finishes row by row and deletes its mappings,
-/// as an unpartitioned drop does. In a later partition the mappings before
-/// the cursor record that the drop keeps them: the cursor stays on the
-/// partition until a scan from its start finds no unfiltered row, and the
-/// drop still leaves every other row and every mapping to its entry.
+/// partition do not fit one step, the first partition or a later one: the
+/// cursor stays on the partition until a scan from its start finds no
+/// unfiltered row, and the drop still leaves every other row and every
+/// mapping to its entry.
 pub(super) async fn a_partition_whose_unfiltered_rows_need_several_steps() {
     for (name, slow_partition) in [
         ("vector-driver-dropped-partitioned-slow-first", 0),
@@ -4677,36 +4674,20 @@ pub(super) async fn a_partition_whose_unfiltered_rows_need_several_steps() {
             assert!(steps < 512, "{name}: the drop exceeded its bounded steps");
             assert_eq!(dropped::load_entries(&db).await.unwrap(), vec![], "{name}");
         }
-        let row_by_row = slow_partition == 0;
         for partition in 0..2 {
             assert_eq!(
                 physical_keys(&db, scope, partitions[partition]).await,
-                if row_by_row {
-                    Vec::new()
-                } else {
-                    filtered[partition].clone()
-                },
+                filtered[partition],
                 "{name}"
             );
         }
         assert_eq!(
             mapped_physical_ids(&db, entry).await,
-            if row_by_row {
-                Vec::new()
-            } else {
-                partitions.to_vec()
-            },
+            partitions.to_vec(),
             "{name}"
         );
-        if row_by_row {
-            assert!(
-                steps > filtered[0].len() + filtered[1].len(),
-                "{name}: every row took its own step"
-            );
-        } else {
-            // The cache, one row, two rows over three steps, the last step.
-            assert_eq!(steps, 5, "{name}");
-        }
+        // The cache, one row, two rows over three steps, the last step.
+        assert_eq!(steps, 5, "{name}");
         assert_eq!(
             dropped::load_entries(&db).await.unwrap(),
             vec![(
@@ -5781,11 +5762,9 @@ pub(super) async fn an_admitted_abort_deletes_only_unfiltered_rows_and_leaves_it
     }
 }
 
-/// Proves a store admitted while an abort is half-way through its rows lets
-/// the abort finish row by row, as a drop does.
-///
-/// The entry its last step leaves names a generation without rows.
-pub(super) async fn an_abort_admitted_half_way_finishes_row_by_row() {
+/// Proves a store admitted while an abort is half-way through its rows hands
+/// what is left to the abort's entry, as it does a drop's.
+pub(super) async fn an_abort_admitted_half_way_is_handed_to_its_entry() {
     let db = test_db("vector-driver-aborted-entry-admitted-half-way").await;
     let scope = DataScope::LegacyUnscoped;
     let driver = driver();
@@ -5804,31 +5783,27 @@ pub(super) async fn an_abort_admitted_half_way_finishes_row_by_row() {
             CommittedOperationStep::Progressed
         );
     }
+    let left = physical_keys(&db, scope, physical_index_id).await;
+    assert_eq!(left.len(), rows - 2);
     assert_eq!(
-        physical_keys(&db, scope, physical_index_id).await.len(),
-        rows - 2
-    );
-
-    dropped::admit_fixture(&db).await;
-    assert_eq!(
-        drive_one(&db, &driver, build_id, &mut claim_sequence, one_row).await,
-        CommittedOperationStep::Progressed
-    );
-    assert_eq!(
-        physical_keys(&db, scope, physical_index_id).await.len(),
-        rows - 3,
-        "the admitted store's first step deletes one row, as the steps before it"
-    );
-    assert_eq!(dropped::load_entries(&db).await.unwrap(), vec![]);
-    assert_eq!(
-        drive_to_terminal(&db, &driver, build_id, &mut claim_sequence).await,
-        CommittedOperationStep::Completed
-    );
-    assert_eq!(
-        physical_keys(&db, scope, physical_index_id).await,
+        core_keys(&db, scope, physical_index_id).await,
         Vec::<Bytes>::new()
     );
-    assert_eq!(generation_keys(&db, entry).await, Vec::<Bytes>::new());
+    let deltas = generation_keys(&db, entry).await;
+    assert!(!deltas.is_empty());
+
+    dropped::admit_fixture(&db).await;
+    let mut steps = 0;
+    while drive_one(&db, &driver, build_id, &mut claim_sequence, one_row).await
+        == CommittedOperationStep::Progressed
+    {
+        steps += 1;
+        assert!(steps < 8, "the rows left took steps of their own");
+        assert_eq!(dropped::load_entries(&db).await.unwrap(), vec![]);
+    }
+    // Neither a physical row nor a generation-keyed one was deleted since.
+    assert_eq!(physical_keys(&db, scope, physical_index_id).await, left);
+    assert_eq!(generation_keys(&db, entry).await, deltas);
     assert_eq!(
         dropped::load_entries(&db)
             .await

@@ -51,17 +51,36 @@
 //!
 //! A compaction of sorted runs takes one of the compactor's slots and those
 //! runs. While it runs the scheduler cannot merge them with others; a merge
-//! it has to wait for rewrites one of the same runs. Every other compaction goes on,
-//! those of L0 tables included, as long as a slot is free.
+//! it has to wait for rewrites one of the same runs. Every other compaction
+//! goes on in the slots that are left.
 //!
 //! Writes depend on one compaction only: the one that empties L0, since a
-//! writer stalls when L0 is full. A reclaim *gives way* to it: while its
-//! compaction is in flight it watches `.compactions`, and when every slot is
-//! taken, no compaction of L0 tables is in flight and L0 holds a table, it
-//! cancels its own. The worker stops it within one heartbeat and the
-//! coordinator frees the slot at its next poll; see
-//! [`ReclaimObstacle::GaveWay`]. What the cancelled compaction had written
-//! is lost, and the run is planned again by a later reclaim.
+//! writer stalls when L0 is full. So a reclaim never takes the compactor's
+//! last free slot: it submits a compaction only while that leaves the
+//! scheduler one, and otherwise ends [`ReclaimObstacle::Busy`] and waits to
+//! be started again. It holds one slot of at least two for as long as its
+//! compaction runs, and never more; a compactor with a single slot is never
+//! reclaimed. Nothing cancels a reclaim's compaction once it is submitted.
+//!
+//! Looking for a free slot and submitting are two steps. The scheduler can
+//! fill the slots that were free in between, and the compactor then has one
+//! compaction more than it runs at a time, until one of the scheduler's own
+//! ends: the wait that costs a compaction of L0 tables is for one of the
+//! scheduler's compactions, never for the reclaim's.
+//!
+//! A reclaim plans from one read of `.compactions` and the manifest
+//! together, so a merge it sees finished is in the runs it weighs, and one
+//! it sees in flight makes it leave those runs alone. A merge that starts
+//! and ends between that read and the coordinator's next poll can still
+//! grow a run after it was weighed: by what one poll interval merges.
+//!
+//! A compaction a reclaim submitted goes on if the process dies, and the
+//! compactor of the next process resumes it like any other. Nobody needs to
+//! watch it: it holds the one slot it was given until it ends. If its
+//! filters are created before that process has armed the entry, which the
+//! first background pass does, it keeps the rows it was submitted to
+//! discard; the proof waits for it, finds the rows again, and the run is
+//! rewritten once more when the store is next idle.
 //!
 //! A reclaim deletes no entry itself. Each of its compactions is followed by
 //! a retirement pass, which deletes the entries left without rows.
@@ -77,16 +96,16 @@
 //! The unit is a sorted run. A small index whose rows sit in a very large
 //! run is left in place by the writer, and costs a caller who insists the
 //! whole run. A rewritten run needs up to its own size again in object
-//! storage until the old tables are collected. A reclaim is lost when the
-//! process restarts while its record is still unclaimed, and resumed by the
-//! compactor of the next process otherwise. A database whose manifest has
-//! segments is not reclaimed: its entries still retire, and every reclaim
-//! fails until this learns to compact segments.
+//! storage until the old tables are collected. A store that is never idle
+//! is never reclaimed by its writer: its dropped rows stay until the
+//! scheduler's own compactions rewrite the runs that hold them. A database
+//! whose manifest has segments is not reclaimed: its entries still retire,
+//! and every reclaim fails until this learns to compact segments.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use slatedb::compactor::{Compaction, CompactionSpec, CompactionStatus, SourceId};
+use slatedb::compactor::{CompactionSpec, CompactionStatus, CompactorStateView, SourceId};
 use slatedb::config::{FlushOptions, FlushType};
 use slatedb::VersionedManifest;
 use tokio::time::Instant;
@@ -139,33 +158,20 @@ impl Worth {
     }
 }
 
-/// Whether a compaction that holds a slot keeps the compaction of L0 tables
-/// from starting: the compactor has `slots`, `taken` of them are in use,
-/// `l0_in_flight` says whether a compaction of L0 tables is among them, and
-/// L0 holds `l0_tables`.
-///
-/// The scheduler starts no L0 compaction beside another, nor before L0 has
-/// its minimum of tables; the second is not looked at here, so a reclaim
-/// gives way a few flushes early on a compactor that is full.
-pub(crate) fn starves_l0(slots: usize, taken: usize, l0_in_flight: bool, l0_tables: usize) -> bool {
-    taken >= slots && !l0_in_flight && l0_tables > 0
-}
-
 /// Why a requested reclaim did not see a compaction of its plan complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReclaimObstacle {
     /// A compaction of the same tables was already in flight; or the proof
     /// of an entry waits for compactions in flight before it can say which
-    /// tables hold its rows; or a reclaim the writer started found the
+    /// tables hold its rows; or the compaction would have taken the
+    /// compactor's last free slot; or a reclaim the writer started found the
     /// compactor no longer idle. Nothing more was submitted.
     Busy,
     /// SlateDB refused the compaction, or one the scheduler started first
     /// replaced its sources.
     Rejected,
-    /// The reclaim cancelled its compaction because it held the last free
-    /// slot while L0 tables waited to be compacted.
-    GaveWay,
-    /// The caller's wait ran out. A compaction that was submitted goes on.
+    /// The caller's wait ran out, before the reclaim began or while a
+    /// compaction it submitted was running. That compaction goes on.
     TimedOut,
     /// The database closed.
     Closed,
@@ -280,18 +286,13 @@ impl DroppedStorageReclaim {
 pub(crate) enum Reclaimer {
     /// A caller who asked for the bytes now, whatever they cost: every run
     /// that holds a tracked table is rewritten, beside whatever else the
-    /// compactor is doing.
+    /// compactor is doing, while that leaves the scheduler a free slot.
     Caller,
     /// The background task, because the compactor has been idle. It
     /// rewrites a run only when that is worth it by this rule, and starts a
     /// compaction only while no other is in flight: once the scheduler is
     /// compacting again the reclaim ends [`ReclaimObstacle::Busy`].
     IdleStore(Worth),
-    /// The background task, because proofs have tracked tables for long on
-    /// a store that is never idle. It rewrites a run only when that is worth
-    /// it by this rule, and starts a compaction only while that leaves the
-    /// scheduler a free slot.
-    BusyStore(Worth),
 }
 
 impl Reclaimer {
@@ -300,19 +301,18 @@ impl Reclaimer {
     fn rewrites(self, run_bytes: u64, dropped_bytes: u64) -> bool {
         match self {
             Self::Caller => true,
-            Self::IdleStore(worth) | Self::BusyStore(worth) => {
-                worth.rewriting(run_bytes, dropped_bytes)
-            }
+            Self::IdleStore(worth) => worth.rewriting(run_bytes, dropped_bytes),
         }
     }
 
     /// Whether this reclaimer starts a compaction beside `others` in flight
-    /// on a compactor with `slots`.
+    /// on a compactor with `slots`: never when that would take the last
+    /// free slot, and by itself only on a compactor with nothing to do.
     fn starts_beside(self, others: usize, slots: usize) -> bool {
+        let leaves_a_slot = others.saturating_add(1) < slots;
         match self {
-            Self::Caller => true,
-            Self::IdleStore(_) => others == 0,
-            Self::BusyStore(_) => others + 1 < slots,
+            Self::Caller => leaves_a_slot,
+            Self::IdleStore(_) => leaves_a_slot && others == 0,
         }
     }
 }
@@ -591,13 +591,20 @@ impl Ended {
 impl Retirer {
     /// Compacts the store so that the rows of every discardable dropped
     /// generation are gone from the tables its [`Plan`] names, waiting no
-    /// later than `deadline`. Logs what it did.
+    /// later than `deadline` for anything: a pass or another reclaim under
+    /// way, or a compaction of its own. Logs what it did.
     pub(crate) async fn reclaim(
         &self,
         deadline: Instant,
         reclaimer: Reclaimer,
     ) -> Result<DroppedStorageReclaim> {
-        let mut logged = self.pass.lock().await;
+        let Ok(mut logged) = tokio::time::timeout_at(deadline, self.pass.lock()).await else {
+            // What the registry holds as it stands: nothing was looked at.
+            return Ok(DroppedStorageReclaim::Incomplete {
+                entries: self.writer().dropped().armed().len(),
+                obstacle: ReclaimObstacle::TimedOut,
+            });
+        };
         let outcome = self.compact(deadline, reclaimer, &mut logged).await?;
         // A store that takes a few writes is reclaimed again each time it
         // falls idle, and a reclaim that declines the same runs each time
@@ -626,21 +633,15 @@ impl Retirer {
         if armed.is_empty() {
             return Ok(DroppedStorageReclaim::Idle);
         }
-        let mut manifest = self.manifest().await?;
-        if armed
-            .iter()
-            .any(|(_, armed)| armed.gate > manifest.recent_snapshot_min_seq())
-        {
+        let mut retention = self.view().await?.manifest().recent_snapshot_min_seq();
+        if armed.iter().any(|(_, armed)| armed.gate > retention) {
             db.flush_with_options(FlushOptions {
                 flush_type: FlushType::MemTable,
             })
             .await?;
-            manifest = self.manifest().await?;
+            retention = self.view().await?.manifest().recent_snapshot_min_seq();
         }
-        if armed
-            .iter()
-            .all(|(_, armed)| armed.gate > manifest.recent_snapshot_min_seq())
-        {
+        if armed.iter().all(|(_, armed)| armed.gate > retention) {
             return Ok(DroppedStorageReclaim::Retained {
                 entries: armed.len(),
             });
@@ -659,9 +660,19 @@ impl Retirer {
         // Imperative: each turn plans from what is stored now and awaits one
         // compaction.
         let left = loop {
-            let manifest = self.manifest().await?;
+            // One read of `.compactions` and then the manifest: a merge it
+            // shows finished is in the runs the plan weighs, and one it
+            // shows in flight keeps those runs out of this reclaim below.
+            let view = self.view().await?;
+            let manifest = view.manifest();
+            let active = view
+                .compactions()
+                .into_iter()
+                .flat_map(|compactions| compactions.recent_compactions())
+                .filter(|compaction| compaction.active())
+                .collect::<Vec<_>>();
             let tracked = registry.discardable_tracked(manifest.recent_snapshot_min_seq());
-            let layout = Layout::of(&manifest);
+            let layout = Layout::of(manifest);
             let plan = Plan::of(&layout, &tracked, reclaimer);
             let Some(rewrite) = plan.rewrites.into_iter().find(|rewrite| {
                 !rewrite
@@ -671,7 +682,6 @@ impl Retirer {
             }) else {
                 break plan.left;
             };
-            let active = self.active().await?;
             if !reclaimer.starts_beside(active.len(), self.slots) {
                 return Ok(incomplete(ReclaimObstacle::Busy));
             }
@@ -716,7 +726,7 @@ impl Retirer {
             // Only an end that was not observed is settled by the manifest.
             let sources_stored = match ended {
                 Ended::Unobserved => {
-                    Layout::of(&self.manifest().await?).holds_any(&layout.tables_of(&rewrite))
+                    Layout::of(self.view().await?.manifest()).holds_any(&layout.tables_of(&rewrite))
                 }
                 Ended::Completed | Ended::Short(_) => false,
             };
@@ -740,97 +750,49 @@ impl Retirer {
         ))
     }
 
-    async fn manifest(&self) -> Result<VersionedManifest> {
-        let manifest = self.admin.read_manifest(None).await?.ok_or_else(|| {
-            HelixDbError::InvariantViolation("an open database has no manifest".to_string())
-        })?;
-        if !manifest.segments().is_empty() {
+    /// `.compactions` and the manifest of the store, read in that order.
+    async fn view(&self) -> Result<CompactorStateView> {
+        let view = self.admin.read_compactor_state_view().await?;
+        if !view.manifest().segments().is_empty() {
             return Err(HelixDbError::InvariantViolation(
                 "dropped-generation reclaim does not support segmented manifests".to_string(),
             ));
         }
-        Ok(manifest)
+        Ok(view)
     }
 
-    /// Every compaction `.compactions` shows in flight.
-    async fn active(&self) -> Result<Vec<Compaction>> {
-        Ok(self
-            .admin
-            .read_compactions(None)
-            .await?
-            .iter()
-            .flat_map(|compactions| compactions.recent_compactions())
-            .filter(|compaction| compaction.active())
-            .cloned()
-            .collect())
-    }
-
-    /// Submits `spec` and waits for it to finish, no later than `deadline`,
-    /// cancelling it if it comes to [starve](starves_l0) the compaction of
-    /// L0 tables.
+    /// Submits `spec` and waits for it to finish, no later than `deadline`.
+    /// Nothing cancels it: one that outlives the wait, or this process, goes
+    /// on.
     ///
     /// SlateDB refuses a compaction by marking its record failed, so a
     /// refusal is read here like any other end.
     async fn compacted(&self, spec: CompactionSpec, deadline: Instant) -> Result<Ended> {
         let mut closed = self.closed.subscribe();
         let id = self.admin.submit_compaction(spec).await?.id();
-        let mut gave_way = false;
         // Imperative: each turn awaits a status read, then the poll interval.
         loop {
             if *closed.borrow() {
                 return Ok(Ended::Short(ReclaimObstacle::Closed));
             }
-            let compactions = self.admin.read_compactions(None).await?;
-            let recent = || {
-                compactions
-                    .iter()
-                    .flat_map(|compactions| compactions.recent_compactions())
-            };
-            match recent()
-                .find(|compaction| compaction.id() == id)
-                .map(Compaction::status)
+            match self
+                .admin
+                .read_compaction(id, None)
+                .await?
+                .map(|compaction| compaction.status())
             {
                 Some(CompactionStatus::Completed) => return Ok(Ended::Completed),
                 Some(CompactionStatus::Failed) => {
-                    return Ok(Ended::Short(match gave_way {
-                        true => ReclaimObstacle::GaveWay,
-                        false => ReclaimObstacle::Rejected,
-                    }));
+                    return Ok(Ended::Short(ReclaimObstacle::Rejected));
                 }
                 None => return Ok(Ended::Unobserved),
-                // Its output is complete: the coordinator commits it.
-                Some(CompactionStatus::Compacted) => {}
                 Some(
                     CompactionStatus::Submitted
                     | CompactionStatus::Scheduled
-                    | CompactionStatus::Running,
-                ) => {
-                    let taken = recent()
-                        .filter(|compaction| match compaction.status() {
-                            CompactionStatus::Submitted
-                            | CompactionStatus::Scheduled
-                            | CompactionStatus::Running => true,
-                            CompactionStatus::Compacted
-                            | CompactionStatus::Completed
-                            | CompactionStatus::Failed => false,
-                        })
-                        .count();
-                    let l0_in_flight = recent().any(|compaction| {
-                        compaction.active() && compaction.spec().has_l0_sources()
-                    });
-                    let l0_tables = self.writer().db().manifest().l0().len();
-                    if starves_l0(self.slots, taken, l0_in_flight, l0_tables) {
-                        tracing::info!(
-                            taken,
-                            l0_tables,
-                            "reclaiming dropped generations: giving way to the compaction of L0 \
-                             tables"
-                        );
-                        // Whether or not this call is the one that cancels
-                        // it, the next read tells how it ended.
-                        gave_way = self.admin.cancel_compaction(id).await? || gave_way;
-                    }
-                }
+                    | CompactionStatus::Running
+                    // Its output is complete: the coordinator commits it.
+                    | CompactionStatus::Compacted,
+                ) => {}
             }
             if Instant::now() >= deadline {
                 return Ok(Ended::Short(ReclaimObstacle::TimedOut));

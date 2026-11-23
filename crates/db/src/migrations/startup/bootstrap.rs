@@ -150,8 +150,11 @@ pub(crate) async fn bootstrap_managed_writer(db: &Db) -> Result<()> {
             requirement: WriterMigrationRequirement::IncompleteStorageSchema,
         });
     }
-    // A pristine store has no label rows to move, so it starts current.
-    stage_writer_bootstrap_initialization(&transaction, IndexStorageVersion::CURRENT)?;
+    // A pristine store has no rows of any earlier layout to move.
+    stage_writer_bootstrap_initialization(
+        &transaction,
+        crate::index_lifecycle::dropped::PRISTINE_MANAGED_STORE,
+    )?;
     super::super::stage_current_storage_schema_ready(&transaction)?;
     transaction.commit().await?;
     Ok(())

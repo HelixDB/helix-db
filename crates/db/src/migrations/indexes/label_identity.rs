@@ -1561,7 +1561,12 @@ impl LabelStage {
         let version = match self {
             Self::BeforeCopy => IndexStorageVersion::OPERATION_QUEUES,
             Self::Copying => {
-                let writer = crate::HelixWriter::new(std::sync::Arc::new(db.clone()), 4, 2);
+                let writer = crate::HelixWriter::new(
+                    std::sync::Arc::new(db.clone()),
+                    4,
+                    2,
+                    std::sync::Arc::default(),
+                );
                 start_label_identity_copy(db)
                     .await
                     .expect("the copy starts");
@@ -1589,7 +1594,12 @@ impl LabelStage {
     /// to [`Self::Published`]: starts the copy unless it runs, copies what
     /// is left, publishes, and deletes every hash row.
     pub(crate) async fn publish(db: &Db) {
-        let writer = crate::HelixWriter::new(std::sync::Arc::new(db.clone()), 4, 2);
+        let writer = crate::HelixWriter::new(
+            std::sync::Arc::new(db.clone()),
+            4,
+            2,
+            std::sync::Arc::default(),
+        );
         start_label_identity_copy(db)
             .await
             .expect("the copy starts");

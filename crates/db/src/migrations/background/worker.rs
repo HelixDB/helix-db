@@ -197,7 +197,11 @@ pub(crate) async fn process_background_step(
                     // admits dropped-generation entries; a crash before this
                     // commit leaves it to the next open.
                     label_identity::LabelCopyStep::Published => {
-                        crate::index_lifecycle::dropped::admit(writer.db()).await?;
+                        crate::index_lifecycle::dropped::admit(
+                            writer.db(),
+                            crate::index_lifecycle::dropped::Admission::LabelCopyPublished,
+                        )
+                        .await?;
                     }
                     label_identity::LabelCopyStep::NotStarted
                     | label_identity::LabelCopyStep::Copied

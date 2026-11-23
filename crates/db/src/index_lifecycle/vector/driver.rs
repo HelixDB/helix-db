@@ -77,16 +77,16 @@ use crate::index_lifecycle::work::{
     AppliedEntityStateValue, AppliedFamilyState, CoalescedBuildDeltaValue, VectorTenantPartition,
 };
 use crate::index_lifecycle::{
-    dropped, ActiveIndexHandle, BuildOperationOutcome, DroppedGenerationRows,
-    DroppedGenerationValue, IndexCursor, IndexElementKind, IndexEntityId, IndexGenerationId,
-    IndexGenerationPublicationPermit, IndexId, IndexOperationBlocker, IndexOperationFamily,
-    IndexOperationId, IndexOperationOutcome, IndexOperationProgress, IndexOperationRecord,
-    IndexRecordV2, IndexV2MetadataValue, LegacyVectorDirectoryValidationProgress,
-    LegacyVectorPhysicalReservation, LegacyVectorValidationLane, LegacyVectorValidationProgress,
-    NoCursorProgress, OperationCounters, PhysicalGeneration, PrefixScanProgress,
-    SourceScanProgress, StepGate, TextPartition, ValidatedDynamicIndexDefinition,
-    ValidatedVectorIndexDefinition, VectorBuildProgress, VectorBuildStage, VectorCleanupProgress,
-    VectorPhysicalIdWatermark, VectorPhysicalIndexId, VectorPhysicalLayout, VectorRoutingLayoutV2,
+    dropped, ActiveIndexHandle, BuildOperationOutcome, DroppedGenerationRows, IndexCursor,
+    IndexElementKind, IndexEntityId, IndexGenerationId, IndexGenerationPublicationPermit, IndexId,
+    IndexOperationBlocker, IndexOperationFamily, IndexOperationId, IndexOperationOutcome,
+    IndexOperationProgress, IndexOperationRecord, IndexRecordV2, IndexV2MetadataValue,
+    LegacyVectorDirectoryValidationProgress, LegacyVectorPhysicalReservation,
+    LegacyVectorValidationLane, LegacyVectorValidationProgress, NoCursorProgress,
+    OperationCounters, PhysicalGeneration, PrefixScanProgress, SourceScanProgress, StepGate,
+    TextPartition, ValidatedDynamicIndexDefinition, ValidatedVectorIndexDefinition,
+    VectorBuildProgress, VectorBuildStage, VectorCleanupProgress, VectorPhysicalIdWatermark,
+    VectorPhysicalIndexId, VectorPhysicalLayout, VectorRoutingLayoutV2,
 };
 use crate::transaction::Mutation;
 
@@ -1243,10 +1243,13 @@ impl IndexOperationDriver for VectorIndexDriver {
         // applied state. A scan of that prefix steps over every row
         // validation deleted, one per indexed entity, so it runs here,
         // before the permit stops planning and every writer for that long.
-        // Only this build's own steps write the prefix (publication stages
-        // none, see `AppliedStateTransition`), and they hold the generation's
-        // ownership one at a time, so a prefix empty now is still empty when
-        // the step commits.
+        // Only this build's own steps write the prefix. `stage_applied` is
+        // its one writer, called where a build step applies an entity it
+        // planned, whether the step read its sources through the label's
+        // bitmap or a delta; catch-up and validation delete from it; and
+        // publication stages none (see `AppliedStateTransition`). Those
+        // steps hold the generation's ownership one at a time, so a prefix
+        // empty now is still empty when the step commits.
         if matches!(
             operation.progress(),
             IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
@@ -1746,14 +1749,11 @@ async fn step_cleanup<D: Distance>(
                 }
                 // A drop or abort that will leave a dropped-generation entry
                 // at `Finalize` deletes only the rows no compaction filter
-                // may match. One that already deleted rows one by one, on an
-                // older store or because that first batch did not fit a
-                // step, finishes one by one: the counters are zero only
-                // before the first delete.
-                let delete = if reservation.is_none()
-                    && progress.counters == OperationCounters::default()
-                    && dropped::admitted(transaction).await?
-                {
+                // may match, however many steps that takes and whatever an
+                // older image had deleted one by one before the store was
+                // admitted: both scans walk the namespace in one order, so
+                // either resumes the other.
+                let delete = if reservation.is_none() && dropped::admitted(transaction).await? {
                     PhysicalRows::NeverFiltered
                 } else {
                     PhysicalRows::All
@@ -1838,24 +1838,13 @@ async fn step_cleanup<D: Distance>(
                     operation.generation(),
                 );
                 // As for the unpartitioned layout, with one difference: a
-                // cleanup that leaves an entry keeps its mappings, which list
-                // the physical ids the entry gives up, and its cursor names
-                // the next partition. A row-by-row cleanup deletes each
-                // mapping before it moves on, so a mapping before the cursor
-                // tells the two apart once the counters are no longer zero.
-                let delete = if dropped::admitted(transaction).await?
-                    && match cursor_suffix(&mappings, progress.cursor.as_ref())? {
-                        None => progress.counters == OperationCounters::default(),
-                        Some(cursor) => transaction
-                            .scan_prefix(
-                                &mappings,
-                                (Bound::<Bytes>::Unbounded, Bound::Excluded(cursor)),
-                            )
-                            .await?
-                            .next()
-                            .await?
-                            .is_some(),
-                    } {
+                // cleanup that leaves an entry keeps the mappings from its
+                // cursor on, which list the physical ids the entry gives up.
+                // One an older image ran row by row deleted each mapping
+                // with every row of its partition before it moved on, so the
+                // mappings that are left name exactly the partitions that
+                // still have rows, and it is handed to the entry here too.
+                let delete = if dropped::admitted(transaction).await? {
                     PhysicalRows::NeverFiltered
                 } else {
                     PhysicalRows::All
@@ -1962,6 +1951,30 @@ async fn step_cleanup<D: Distance>(
                 }
             }
         },
+        // Build deltas and applied state are keyed by generation: where the
+        // cleanup leaves an entry, compactions discard them too, though an
+        // older image had begun to delete them one by one.
+        VectorCleanupProgress::DeleteDeltas(progress)
+            if dropped::admitted(transaction).await?
+                && match authority.layout() {
+                    VectorPhysicalLayout::Unpartitioned { physical_index_id } => {
+                        super::super::repository::load_legacy_vector_physical_reservation(
+                            transaction,
+                            physical_index_id,
+                        )
+                        .await?
+                        .is_none()
+                    }
+                    VectorPhysicalLayout::Partitioned => true,
+                } =>
+        {
+            (
+                VectorCleanupProgress::Finalize(NoCursorProgress {
+                    counters: progress.counters,
+                }),
+                None,
+            )
+        }
         VectorCleanupProgress::DeleteDeltas(progress) => {
             if progress.cursor.is_some() {
                 return Err(corruption(
@@ -2051,26 +2064,22 @@ async fn step_cleanup<D: Distance>(
                 // physical ids; a cleanup that deleted them left no rows.
                 VectorPhysicalLayout::Partitioned => Some(DroppedGenerationRows::PartitionedVector),
             };
-            // Staged here, the entry commits in the transaction that moves
-            // the record to `Dropped`.
-            match rows {
-                Some(rows) if dropped::admitted(transaction).await? => dropped::stage_entry(
-                    transaction,
-                    dropped::DroppedGeneration {
-                        index_id: operation.index_id(),
-                        generation: operation.generation(),
-                    },
-                    DroppedGenerationValue { scope, rows },
-                )?,
-                Some(_) | None => {}
-            }
-            return Ok(VectorStepResult::ordinary(
-                IndexOperationStepResult::Completed(if aborting {
+            // On an admitted store the rows are left to compactions, and
+            // the commit that moves the record to `Dropped` stores their
+            // entry. Otherwise the steps before this one deleted every row.
+            return Ok(VectorStepResult::ordinary(match rows {
+                Some(rows) if dropped::admitted(transaction).await? => {
+                    IndexOperationStepResult::LeftToCompactions {
+                        aborted: aborting,
+                        rows,
+                    }
+                }
+                Some(_) | None => IndexOperationStepResult::Completed(if aborting {
                     IndexOperationOutcome::Build(BuildOperationOutcome::Aborted)
                 } else {
                     IndexOperationOutcome::DropSucceeded
                 }),
-            ));
+            }));
         }
     };
     let mut step = VectorStepResult::ordinary(progressed_cleanup(aborting, next));
@@ -2852,7 +2861,8 @@ where
             }
             IndexOperationStepResult::Progressed(_)
             | IndexOperationStepResult::TransientFailure
-            | IndexOperationStepResult::Completed(_) => step,
+            | IndexOperationStepResult::Completed(_)
+            | IndexOperationStepResult::LeftToCompactions { .. } => step,
         },
         (Err(error), bulk::StoredScan::Serial(_)) => return Err(error),
         (Err(error), bulk::StoredScan::Bulk(_)) => {
@@ -5492,8 +5502,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_drop_that_began_row_by_row_finishes_row_by_row() {
-        super::driver_contracts::a_drop_that_began_row_by_row_finishes_row_by_row().await;
+    async fn a_drop_whose_unfiltered_rows_need_several_steps_leaves_the_rest() {
+        super::driver_contracts::a_drop_whose_unfiltered_rows_need_several_steps_leaves_the_rest()
+            .await;
     }
 
     /// Failpoints are process-global, so the contracts that arm one run in
@@ -5527,8 +5538,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_abort_admitted_half_way_finishes_row_by_row() {
-        super::driver_contracts::an_abort_admitted_half_way_finishes_row_by_row().await;
+    async fn an_abort_admitted_half_way_is_handed_to_its_entry() {
+        super::driver_contracts::an_abort_admitted_half_way_is_handed_to_its_entry().await;
     }
 
     #[test]
@@ -5539,8 +5550,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_drop_admitted_half_way_finishes_row_by_row() {
-        super::driver_contracts::a_drop_admitted_half_way_finishes_row_by_row().await;
+    async fn a_drop_admitted_half_way_is_handed_to_its_entry() {
+        super::driver_contracts::a_drop_admitted_half_way_is_handed_to_its_entry().await;
     }
 
     #[tokio::test]
@@ -5550,8 +5561,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_partitioned_drop_admitted_half_way_finishes_row_by_row() {
-        super::driver_contracts::a_partitioned_drop_admitted_half_way_finishes_row_by_row().await;
+    async fn a_partitioned_drop_admitted_half_way_is_handed_to_its_entry() {
+        super::driver_contracts::a_partitioned_drop_admitted_half_way_is_handed_to_its_entry()
+            .await;
     }
 
     #[tokio::test]

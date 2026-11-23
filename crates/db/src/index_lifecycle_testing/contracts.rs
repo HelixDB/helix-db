@@ -628,12 +628,40 @@ async fn advance_once_with_reopen(
     );
 }
 
+/// How long a row a compaction discarded may stay readable: the writer
+/// applies the result of its compactor's job at its next manifest poll.
+const DISCARD_SETTLES: Duration = Duration::from_secs(30);
+
+/// Whether `writer` reads a row under `prefix`, once what a reclaim
+/// discarded has had [`DISCARD_SETTLES`] to leave its view.
+async fn row_remains(writer: &slatedb::Db, prefix: &[u8]) -> bool {
+    let deadline = std::time::Instant::now() + DISCARD_SETTLES;
+    loop {
+        let found = writer
+            .scan_prefix(prefix, ..)
+            .await
+            .expect("a cleanup lane remains readable")
+            .next()
+            .await
+            .expect("a cleanup lane scan succeeds")
+            .is_some();
+        if !found || std::time::Instant::now() >= deadline {
+            return found;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Asserts no generation-keyed row of the dropped generation is left once
+/// its storage has been reclaimed: a drop leaves the rows to compactions,
+/// unreadable from its last commit on, and a reclaim discards them.
 async fn assert_generation_rows_absent(
     db: &HelixDB,
     scope: DataScope,
     index_id: crate::index_lifecycle::IndexId,
     generation: crate::index_lifecycle::IndexGenerationId,
 ) {
+    crate::index_lifecycle::dropped::reclaim_fixture(db).await;
     let writer = db
         .lifecycle_test_writer_db()
         .expect("generation cleanup assertion has writer storage");
@@ -655,25 +683,21 @@ async fn assert_generation_rows_absent(
             scope,
             ScopedKey::generation_prefix(kind, index_id, generation),
         );
-        let mut rows = writer
-            .scan_prefix(&prefix, ..)
-            .await
-            .expect("generation cleanup lane remains readable");
         assert!(
-            rows.next()
-                .await
-                .expect("generation cleanup lane scan succeeds")
-                .is_none(),
-            "cleanup retained a {kind:?} row"
+            !row_remains(writer, &prefix).await,
+            "a reclaim retained a {kind:?} row"
         );
     }
 }
 
+/// Asserts no physical row of a dropped vector namespace is left once its
+/// storage has been reclaimed; see [`assert_generation_rows_absent`].
 async fn assert_vector_namespace_absent(
     db: &HelixDB,
     scope: DataScope,
     physical_index_id: crate::index_lifecycle::VectorPhysicalIndexId,
 ) {
+    crate::index_lifecycle::dropped::reclaim_fixture(db).await;
     let writer = db
         .lifecycle_test_writer_db()
         .expect("vector cleanup assertion has writer storage");
@@ -683,16 +707,9 @@ async fn assert_vector_namespace_absent(
             kind: DataKeyKind::Vector(lane.prefix_key(physical_index_id.get())),
         }
         .to_bytes();
-        let mut rows = writer
-            .scan_prefix(&prefix, ..)
-            .await
-            .expect("vector physical lane remains readable");
         assert!(
-            rows.next()
-                .await
-                .expect("vector physical lane scan succeeds")
-                .is_none(),
-            "cleanup retained a {lane:?} physical vector row"
+            !row_remains(writer, &prefix).await,
+            "a reclaim retained a {lane:?} physical vector row"
         );
     }
 }
@@ -4077,22 +4094,52 @@ async fn run_active_drop_snapshot_survival() {
         .collect::<Vec<_>>(),
         vec![entity_id]
     );
-    let current = db
-        .lifecycle_test_writer_db()
-        .expect("snapshot fixture has writer storage")
-        .snapshot()
+    // The drop left the generation's rows to compactions, which keep them
+    // for as long as a reader older than the drop is open: a reclaim that is
+    // asked for discards nothing the old snapshot reads.
+    db.reclaim_dropped_index_storage(Duration::from_secs(30))
         .await
-        .expect("post-DROP snapshot opens");
-    assert!(
+        .expect("a reclaim under an older snapshot runs");
+    assert_eq!(
         crate::index_lifecycle::secondary::lookup_active_equality_generation(
+            snapshot.as_ref(),
+            &active_handle,
+            &PropertyValue::String("snapshot-visible".to_string()),
+        )
+        .await
+        .expect("old snapshot keeps its physical generation through a reclaim")
+        .into_iter()
+        .collect::<Vec<_>>(),
+        vec![entity_id]
+    );
+    // With that reader gone a reclaim discards them: a fresh snapshot finds
+    // none under the dropped generation.
+    drop(snapshot);
+    crate::index_lifecycle::dropped::reclaim_fixture(&db).await;
+    let deadline = std::time::Instant::now() + DISCARD_SETTLES;
+    loop {
+        let current = db
+            .lifecycle_test_writer_db()
+            .expect("snapshot fixture has writer storage")
+            .snapshot()
+            .await
+            .expect("post-DROP snapshot opens");
+        let left = crate::index_lifecycle::secondary::lookup_active_equality_generation(
             current.as_ref(),
             &active_handle,
             &PropertyValue::String("snapshot-visible".to_string()),
         )
         .await
-        .expect("fresh snapshot observes cleanup")
-        .is_empty()
-    );
+        .expect("fresh snapshot reads the dropped generation's lane");
+        if left.is_empty() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a reclaim left rows of the dropped generation"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     db.close()
         .await
         .expect("active DROP snapshot-survival writer closes");
@@ -4203,17 +4250,39 @@ async fn run_active_vector_drop_snapshot_survival() {
         .await
         .expect("old vector snapshot keeps its physical generation after cleanup")
         .is_some());
-    let current = db
-        .lifecycle_test_writer_db()
-        .expect("snapshot vector fixture has writer storage")
-        .snapshot()
+    // As for a secondary generation: a reclaim keeps what the old snapshot
+    // reads, and discards it once that snapshot is gone.
+    db.reclaim_dropped_index_storage(Duration::from_secs(30))
         .await
-        .expect("post-DROP vector snapshot opens");
+        .expect("a reclaim under an older vector snapshot runs");
     assert!(vector_index
-        .get_item(current.as_ref(), entity_id)
+        .get_item(snapshot.as_ref(), entity_id)
         .await
-        .expect("fresh vector snapshot observes cleanup")
-        .is_none());
+        .expect("old vector snapshot keeps its physical generation through a reclaim")
+        .is_some());
+    drop(snapshot);
+    crate::index_lifecycle::dropped::reclaim_fixture(&db).await;
+    let deadline = std::time::Instant::now() + DISCARD_SETTLES;
+    loop {
+        let current = db
+            .lifecycle_test_writer_db()
+            .expect("snapshot vector fixture has writer storage")
+            .snapshot()
+            .await
+            .expect("post-DROP vector snapshot opens");
+        let left = vector_index
+            .get_item(current.as_ref(), entity_id)
+            .await
+            .expect("fresh vector snapshot reads the dropped namespace");
+        if left.is_none() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a reclaim left rows of the dropped vector generation"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     db.close()
         .await
         .expect("active vector DROP snapshot-survival writer closes");

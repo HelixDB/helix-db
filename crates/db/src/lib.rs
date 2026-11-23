@@ -101,7 +101,8 @@ pub use config::{DbConfig, HelixConfig};
 pub use index_lifecycle::dropped::reclaim::{DroppedStorageReclaim, LeftInPlace, ReclaimObstacle};
 pub use index_lifecycle::dropped::retire::QuarantinedEntryRemoval;
 pub use index_lifecycle::dropped::{
-    DroppedEntryContradiction, DroppedEntryRows, DroppedIndexStorage, QuarantinedDroppedGeneration,
+    DroppedEntryContradiction, DroppedEntryRows, DroppedIndexStorage, DroppedStoragePass,
+    QuarantinedDroppedGeneration,
 };
 pub use index_lifecycle::queue::lag::PublicationLagHistogram;
 pub use index_lifecycle::queue::{BlockedIndexEntity, IndexOperationQueueStats};
@@ -1558,9 +1559,8 @@ impl HelixDB {
         db.close_on_open_error(finish_result).await?;
         db.start_background_migration_worker(migrations::background::BackgroundMigrations::All)
             .await;
-        if let Some(slots) = compaction_slots {
-            db.start_dropped_generation_retirement(slots).await;
-        }
+        db.start_dropped_generation_retirement(compaction_slots)
+            .await;
         Ok(db)
     }
 
@@ -1733,7 +1733,11 @@ impl HelixDB {
                 // while the writer serves, and every graph write files label
                 // rows under both keys meanwhile.
                 migrations::start_label_identity_copy(&db).await?;
-                index_lifecycle::dropped::admit(&db).await?;
+                index_lifecycle::dropped::admit(
+                    &db,
+                    index_lifecycle::dropped::Admission::MigrationAuthorizedOpen,
+                )
+                .await?;
                 index_lifecycle::outbox::reconcile_legacy_reader_coordination_operations(
                     &db,
                     DataScope::LegacyUnscoped,
@@ -1756,13 +1760,11 @@ impl HelixDB {
             let stage_started = Instant::now();
             index_lifecycle::outbox::reconcile_operation_queue(&db).await?;
             log_stage("operation_queue_reconciliation", stage_started);
-            let stage_started = Instant::now();
-            // No entry reaches a filter before this cross-check: an entry
-            // that names rows a live generation owns is quarantined here. A
-            // compaction that starts earlier finds the registry empty and
-            // discards nothing.
-            writer.dropped().refresh(&db).await?;
-            log_stage("dropped_generation_cross_check", stage_started);
+            // The dropped-generation registry stays empty here: no entry is
+            // read or cross-checked on the way to serving. An empty registry
+            // discards nothing, and the retirement task's first pass, which
+            // runs in the background once the writer is open, arms the
+            // entries the store holds.
             let stage_started = Instant::now();
             let loaded_catalog = index_lifecycle::repository::load_scope_catalog(
                 db.as_ref(),
@@ -1820,9 +1822,8 @@ impl HelixDB {
             migrations::background::BackgroundMigrations::LabelIdentity
         })
         .await;
-        if let Some(slots) = compaction_slots {
-            db.start_dropped_generation_retirement(slots).await;
-        }
+        db.start_dropped_generation_retirement(compaction_slots)
+            .await;
         tracing::info!(
             open_intent,
             writer_epoch,
@@ -2161,6 +2162,11 @@ impl HelixDB {
             vector_capability,
             text_capability,
             text_compactor,
+            // A reader commits no step, so its registry is told of nothing.
+            match storage.handle() {
+                HelixStorage::Writer(writer) => Arc::clone(&writer.dropped),
+                HelixStorage::Reader(_) => Arc::default(),
+            },
         );
         #[cfg(feature = "index-lifecycle-testing")]
         let lifecycle_metrics = Arc::new(index_lifecycle_testing::AutomaticLifecycleMetrics::new());
@@ -2242,7 +2248,6 @@ impl HelixDB {
                     config.db().index_lifecycle_throughput().concurrency(),
                     Arc::clone(&index_claim_sequences),
                     index_worker_wake.clone(),
-                    Arc::clone(&writer.dropped),
                     #[cfg(feature = "index-lifecycle-testing")]
                     Arc::clone(&lifecycle_metrics),
                 ))
@@ -2339,8 +2344,15 @@ impl HelixDB {
 
     /// Starts the background retirement of dropped index generations on a
     /// writer whose storage runs every compaction in this process, `slots`
-    /// at a time.
-    async fn start_dropped_generation_retirement(&self, slots: usize) {
+    /// at a time; nothing on a reader, or on a writer that runs no compaction
+    /// worker, which has no `slots`.
+    ///
+    /// The writer opened with an empty registry, so until the task's first
+    /// pass, which is due at once, its compactions discard nothing.
+    async fn start_dropped_generation_retirement(&self, slots: Option<usize>) {
+        let Some(slots) = slots else {
+            return;
+        };
         let HelixStorage::Writer(writer) = self.inner.storage.handle() else {
             return;
         };
@@ -2394,10 +2406,16 @@ impl HelixDB {
     /// returns once that has finished or `wait` has passed. It reads and
     /// writes every byte of those runs, however few of them belong to
     /// dropped indexes, and no byte of any other run. Reads and writes
-    /// proceed meanwhile; if the compactor runs out of slots while L0 tables
-    /// wait to be compacted, the reclaim cancels its compaction and returns
-    /// [`ReclaimObstacle::GaveWay`]. A compaction that outlives `wait` goes
-    /// on; its result shows in [`Self::dropped_index_storage`].
+    /// proceed meanwhile. The reclaim never takes the compactor's last free
+    /// slot: when a compaction of its own would, it returns
+    /// [`ReclaimObstacle::Busy`] instead, as it always does on a compactor
+    /// with a single slot. `wait` bounds the whole call, the wait for a
+    /// background pass or another reclaim under way included. A compaction
+    /// that outlives `wait` goes on, and nothing cancels it; its result
+    /// shows in [`Self::dropped_index_storage`].
+    ///
+    /// This is a library call for a process that embeds the database as its
+    /// writer. The server has no route for it.
     ///
     /// Rows are retained, and [`DroppedStorageReclaim::Retained`] returned,
     /// while a snapshot or transaction older than the drop is open.
@@ -2821,11 +2839,6 @@ impl HelixDB {
                 &inner.index_claim_sequences,
             )
             .await?;
-            // The step may have ended an operation; see
-            // `index_lifecycle::dropped::Registry::catalog_changed`.
-            if stepped {
-                writer.dropped().catalog_changed();
-            }
             Ok(stepped)
         };
         self.inner.commit_completions.run(run_step)?.await
