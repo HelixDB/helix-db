@@ -1752,15 +1752,76 @@ async fn row_contracts() {
         .unwrap();
 
     let mut cleanup_scan = VectorRows::new(&measured, &keyspace)
-        .cleanup_scan()
+        .cleanup_scan(None)
         .await
         .unwrap();
-    let mut cleanup_row_count = 0;
+    let mut cleanup_rows = Vec::new();
     while let Some(row) = cleanup_scan.next().await.unwrap() {
         assert!(row.input_bytes() >= row.output_bytes());
-        cleanup_row_count += 1;
+        cleanup_rows.push(row);
     }
-    assert_eq!(cleanup_row_count, 13);
+    assert_eq!(cleanup_rows.len(), 13);
+    // The exhaustive scan visits the lanes in order, each in key order.
+    let lanes = cleanup_rows
+        .iter()
+        .map(|row| {
+            VectorKey::parse_from_slice(keyspace.strip_physical_key(&row.physical_key).unwrap())
+                .unwrap()
+                .storage_lane()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        VectorStorageLane::ALL.map(|lane| lanes.iter().filter(|seen| **seen == lane).count()),
+        [1, 4, 8]
+    );
+    assert!(lanes.windows(2).all(|pair| {
+        let position = |lane| VectorStorageLane::ALL.iter().position(|all| *all == lane);
+        position(pair[0]) <= position(pair[1])
+    }));
+    // A scan resumed after any row yields exactly the rows behind it: the
+    // rest of that row's lane, then every later lane from its start.
+    for (position, after) in cleanup_rows.iter().enumerate() {
+        let mut resumed = VectorRows::new(&measured, &keyspace)
+            .cleanup_scan(Some(after))
+            .await
+            .unwrap();
+        let mut keys = Vec::new();
+        while let Some(row) = resumed.next().await.unwrap() {
+            keys.push(row.physical_key);
+        }
+        assert_eq!(
+            keys,
+            cleanup_rows[position + 1..]
+                .iter()
+                .map(|row| row.physical_key.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+    // A token is a position only in the keyspace that issued it.
+    assert!(cleanup_rows[0].belongs_to(&keyspace));
+    assert!(!cleanup_rows[0].belongs_to(&foreign));
+    assert!(matches!(
+        VectorRows::new(&measured, &foreign)
+            .cleanup_scan(Some(&cleanup_rows[0]))
+            .await,
+        Err(HelixDbError::InvariantViolation(_))
+    ));
+    // A token whose key lies outside its lane's prefix for this index is
+    // rejected instead of being read as a position.
+    let escaped = VectorCleanupRow {
+        keyspace: keyspace.clone(),
+        physical_key: keyspace.key(VectorKey::SimHash(VectorSimHashKey::new(
+            keyspace.index_id() + 1,
+            1,
+        ))),
+        input_bytes: 0,
+    };
+    assert!(matches!(
+        VectorRows::new(&measured, &keyspace)
+            .cleanup_scan(Some(&escaped))
+            .await,
+        Err(HelixDbError::InvariantViolation(_))
+    ));
 
     let mut malformed_candidate = keyspace
         .key(VectorKey::EntryCandidatePrefix(

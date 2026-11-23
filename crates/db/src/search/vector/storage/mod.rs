@@ -297,8 +297,10 @@ pub(crate) struct VectorRows<'a, R: ?Sized> {
 ///
 /// The physical key never leaves this module. Input/output measurements are
 /// exposed so the lifecycle driver can admit a complete batch before passing
-/// the token back to [`VectorWriteRows::delete_cleanup_row`].
-#[derive(Debug)]
+/// the token back to [`VectorWriteRows::delete_cleanup_row`]. The token of a
+/// deleted row is also a position: [`VectorRows::cleanup_scan`] resumes just
+/// past it.
+#[derive(Debug, Clone)]
 pub(crate) struct VectorCleanupRow {
     keyspace: VectorRowKeyspace,
     physical_key: Bytes,
@@ -345,6 +347,11 @@ impl VectorCleanupRow {
     /// Returns the exact staged-delete key byte count.
     pub(crate) fn output_bytes(&self) -> u64 {
         self.physical_key.len() as u64
+    }
+
+    /// Returns whether `keyspace` issued this token.
+    pub(crate) fn belongs_to(&self, keyspace: &VectorRowKeyspace) -> bool {
+        &self.keyspace == keyspace
     }
 }
 
@@ -1772,16 +1779,57 @@ where
         })
     }
 
-    /// Opens one exhaustive cleanup scan from each current physical lane.
+    /// Opens a cleanup scan over the current physical lanes, in
+    /// [`VectorStorageLane::ALL`] order.
     ///
-    /// Callers intentionally restart at the lane prefixes after each committed
-    /// batch. Previously deleted rows are absent, so no separate physical-row
-    /// cursor or side record is required.
-    pub(crate) async fn cleanup_scan(&self) -> Result<VectorCleanupScan, HelixDbError> {
+    /// Without `after` the scan is exhaustive: it starts at the first lane's
+    /// prefix. With `after`, the token of a row this keyspace issued, it
+    /// starts just past that row in the row's lane and continues through the
+    /// later lanes. A resumed scan seeks past the deleted rows before `after`
+    /// instead of reading their tombstones, but it does not visit earlier
+    /// keys, so only a scan without `after` proves the namespace empty.
+    pub(crate) async fn cleanup_scan(
+        &self,
+        after: Option<&VectorCleanupRow>,
+    ) -> Result<VectorCleanupScan, HelixDbError> {
+        let resume = match after {
+            None => None,
+            Some(row) => {
+                if !row.belongs_to(self.keyspace) {
+                    return Err(HelixDbError::InvariantViolation(
+                        "vector cleanup row belongs to another physical keyspace".to_string(),
+                    ));
+                }
+                let logical = self.keyspace.strip_physical_key(&row.physical_key)?;
+                Some((
+                    VectorKey::parse_from_slice(logical)?.storage_lane(),
+                    &row.physical_key,
+                ))
+            }
+        };
         let mut lanes = VecDeque::with_capacity(VectorStorageLane::ALL.len());
-        for lane in VectorStorageLane::ALL {
+        for lane in VectorStorageLane::ALL
+            .into_iter()
+            .skip_while(|lane| resume.is_some_and(|(resumed, _)| resumed != *lane))
+        {
             let prefix = self.keyspace.key(lane.prefix_key(self.keyspace.index_id()));
-            lanes.push_back((lane, self.read.scan_prefix(prefix, ..).await?));
+            let start = match resume {
+                Some((resumed, key)) if resumed == lane => {
+                    let Some(suffix) = key.strip_prefix(prefix.as_ref()) else {
+                        return Err(HelixDbError::InvariantViolation(
+                            "vector cleanup row escaped its physical lane".to_string(),
+                        ));
+                    };
+                    Bound::Excluded(Bytes::copy_from_slice(suffix))
+                }
+                Some(_) | None => Bound::Unbounded,
+            };
+            lanes.push_back((
+                lane,
+                self.read
+                    .scan_prefix(prefix, (start, Bound::Unbounded))
+                    .await?,
+            ));
         }
         Ok(VectorCleanupScan {
             keyspace: self.keyspace.clone(),
@@ -2329,7 +2377,7 @@ impl<'a, 'txn> VectorWriteRows<'a, 'txn> {
 
     /// Stages deletion of one token issued by this exact physical keyspace.
     pub(crate) fn delete_cleanup_row(&self, row: &VectorCleanupRow) -> Result<(), HelixDbError> {
-        if &row.keyspace != self.keyspace {
+        if !row.belongs_to(self.keyspace) {
             return Err(HelixDbError::InvariantViolation(
                 "vector cleanup row belongs to another physical keyspace".to_string(),
             ));
@@ -3403,7 +3451,7 @@ mod tests {
 
         let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
         let row = VectorRows::new(&transaction, &concurrent)
-            .cleanup_scan()
+            .cleanup_scan(None)
             .await
             .unwrap()
             .next()
@@ -3421,7 +3469,7 @@ mod tests {
         transaction.commit().await.unwrap();
 
         assert!(VectorRows::new(&db, &single)
-            .cleanup_scan()
+            .cleanup_scan(None)
             .await
             .unwrap()
             .next()

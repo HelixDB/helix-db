@@ -1789,7 +1789,7 @@ async fn delete_physical_namespace<D: Distance>(
         ));
     }
     let index = VectorIndex::<D>::from_generation(handle);
-    let mut scan = index.cleanup_scan(transaction).await?;
+    let mut scan = index.cleanup_scan(transaction, None).await?;
     let mut rows = Vec::<VectorCleanupRow>::new();
     let mut input_bytes = mapping_input_bytes;
     let mut predicted_output_bytes = 0_u64;
@@ -5073,7 +5073,7 @@ mod tests {
         ));
         assert!(index.get_metadata(&db).await.unwrap().is_none());
         assert!(index
-            .cleanup_scan(&db)
+            .cleanup_scan(&db, None)
             .await
             .unwrap()
             .next()

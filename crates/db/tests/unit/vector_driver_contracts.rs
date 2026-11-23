@@ -387,7 +387,7 @@ pub(super) async fn partitioned_drop_resumes_each_mapping_and_removes_every_name
         .is_empty());
     for index in indexes {
         assert!(index
-            .cleanup_scan(&db)
+            .cleanup_scan(&db, None)
             .await
             .unwrap()
             .next()

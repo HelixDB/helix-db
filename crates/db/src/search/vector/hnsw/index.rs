@@ -226,12 +226,21 @@ impl<D: Distance> VectorIndex<D> {
         self
     }
 
-    /// Opens an exhaustive typed scan for bounded lifecycle cleanup.
+    /// Opens a typed scan for bounded lifecycle cleanup: exhaustive without
+    /// `after`, otherwise resumed just past that row of this namespace.
     pub(crate) async fn cleanup_scan(
         &self,
         reader: &(impl DbReadOps + Send + Sync),
+        after: Option<&VectorCleanupRow>,
     ) -> Result<VectorCleanupScan, HelixDbError> {
-        VectorRows::new(reader, &self.rows).cleanup_scan().await
+        VectorRows::new(reader, &self.rows)
+            .cleanup_scan(after)
+            .await
+    }
+
+    /// Returns whether `row` is a cleanup token of this physical namespace.
+    pub(crate) fn owns_cleanup_row(&self, row: &VectorCleanupRow) -> bool {
+        row.belongs_to(&self.rows)
     }
 
     /// Opens cleanup over only this generation's typed SimHash-directory prefix.
