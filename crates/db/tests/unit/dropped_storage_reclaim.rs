@@ -1645,6 +1645,139 @@ async fn a_reclaim_gives_the_pass_lock_back_while_its_compaction_runs() {
     db.close().await.expect("the writer closes");
 }
 
+/// Proves SlateDB refuses the rewrite of a sorted run that a compaction in
+/// flight writes, which a reclaim can come to submit: it reads the store
+/// and plans to rewrite a run into itself, the scheduler then schedules a
+/// merge into that run, and the reclaim submits what it planned.
+///
+/// Were both to run, the one that commits second would win. If that is the
+/// rewrite, it replaces the merged run with the rows it read before the
+/// merge: every row the merge brought in is lost. The reclaim's own look at
+/// the compactions in flight cannot close this, since the merge is
+/// scheduled after it.
+///
+/// The refusal is in the SlateDB revision this crate pins from here on:
+/// before it this contract fails, with the rewrite scheduled beside the
+/// merge.
+#[tokio::test]
+async fn a_rewrite_planned_before_a_merge_into_its_run_was_scheduled_is_refused() {
+    let token = ProcessLocalDatabaseToken::new("dropped-reclaim-overlap-refused").unwrap();
+    // One sorted run that holds the rows of a dropped index.
+    let first = open_quiet(token.clone()).await;
+    first.wait_for_background_migrations().await;
+    for seed in 0..48 {
+        add(&first, "Gone", seed).await;
+    }
+    create_index(&first, "Gone").await;
+    compact_every_table(&first).await;
+    drop_index(&first, "Gone").await;
+    first.close().await.expect("the first writer closes");
+
+    // A scheduler that proposes nothing and a worker that claims nothing:
+    // what is submitted is validated, and then stays in flight.
+    let db = HelixDB::open_with_object_store_and_config(
+        token.database().to_string(),
+        token.object_store(),
+        crate::DbConfig::new().with_slate_settings(slatedb::Settings {
+            compactor_options: Some(slatedb::config::CompactorOptions {
+                poll_interval: Duration::from_millis(50),
+                scheduler_options: HashMap::from(
+                    ["min_compaction_sources", "max_compaction_sources"]
+                        .map(|option| (option.to_string(), "1000000".to_string())),
+                ),
+                worker: Some(slatedb::config::CompactionWorkerOptions {
+                    compactions_poll_interval: Duration::from_secs(3_600),
+                    ..slatedb::config::CompactionWorkerOptions::default()
+                }),
+                ..slatedb::config::CompactorOptions::default()
+            }),
+            ..slatedb::Settings::default()
+        }),
+    )
+    .await
+    .expect("the second writer opens");
+    db.wait_for_background_migrations().await;
+    assert_eq!(pass(&db).await.tracking, 1);
+    // Newer rows, in L0 tables the scheduler will merge into the run.
+    add(&db, "Other", 1_000).await;
+    flush(&db).await;
+
+    // The reclaim reads the store, and plans from what it read.
+    let admin = admin(&db);
+    let view = admin
+        .read_compactor_state_view()
+        .await
+        .expect("the store reads");
+    let planned = dropped::reclaim::Plan::of(
+        &dropped::reclaim::Layout::of(view.manifest()),
+        &writer(&db).dropped().discardable_tracked(u64::MAX),
+        Reclaimer::Caller,
+    );
+    let [dropped::reclaim::Rewrite::Runs { ids, into, .. }] = &planned.rewrites[..] else {
+        panic!("the plan rewrites the one run into itself: {planned:?}");
+    };
+    assert_eq!(ids[..], [*into]);
+
+    // The scheduler schedules a merge of the L0 tables into that run.
+    // What a submitted compaction is once the coordinator has looked at it.
+    let validated = |compaction: &Compaction| {
+        let (admin, id) = (&admin, compaction.id());
+        async move {
+            tokio::time::timeout(WAIT, async {
+                loop {
+                    let status = admin
+                        .read_compaction(id, None)
+                        .await
+                        .expect("the compaction status reads")
+                        .map(|compaction| compaction.status());
+                    match status {
+                        Some(CompactionStatus::Submitted) => tokio::time::sleep(POLL).await,
+                        Some(
+                            CompactionStatus::Scheduled
+                            | CompactionStatus::Running
+                            | CompactionStatus::Compacted
+                            | CompactionStatus::Completed
+                            | CompactionStatus::Failed,
+                        )
+                        | None => break status,
+                    }
+                }
+            })
+            .await
+            .expect("the coordinator validates what is submitted")
+        }
+    };
+    let merge = admin
+        .submit_compaction(CompactionSpec::new(
+            view.manifest()
+                .l0()
+                .iter()
+                .map(|table| SourceId::SstView(table.id))
+                .chain([SourceId::SortedRun(*into)])
+                .collect(),
+            *into,
+        ))
+        .await
+        .expect("the merge is submitted");
+    assert_eq!(validated(&merge).await, Some(CompactionStatus::Scheduled));
+
+    // The reclaim submits the rewrite it planned before the merge existed.
+    let rewrite = admin
+        .submit_compaction(CompactionSpec::new(
+            ids.iter().copied().map(SourceId::SortedRun).collect(),
+            *into,
+        ))
+        .await
+        .expect("the rewrite is submitted");
+    assert_eq!(
+        validated(&rewrite).await,
+        Some(CompactionStatus::Failed),
+        "a rewrite of a run that a merge in flight writes must be refused"
+    );
+    assert_eq!(validated(&merge).await, Some(CompactionStatus::Scheduled));
+    db.close().await.expect("the second writer closes");
+}
+
 fn generation_entry(index_id: u64) -> DroppedGeneration {
     DroppedGeneration {
         index_id: IndexId::new(index_id).unwrap(),
@@ -4626,10 +4759,9 @@ async fn supersede(
 /// the new writer would see the tables it tracked replaced and retire the
 /// entries, and the rows would stay stored for good.
 ///
-/// SlateDB fences the worker, in the fork commit that follows the revision
-/// this crate pins: without it this contract fails with rows left behind.
+/// SlateDB fences the worker, in the revision this crate pins from here on:
+/// before it this contract fails with rows left behind.
 #[tokio::test]
-#[ignore = "needs the SlateDB fork's compaction worker fence; run it when the pin moves"]
 async fn a_superseded_writers_compaction_worker_leaves_no_rows_behind() {
     let token = ProcessLocalDatabaseToken::new("dropped-superseded-worker").unwrap();
     assert_eq!(

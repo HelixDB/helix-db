@@ -76,6 +76,17 @@
 //! ends: the wait that costs a compaction of L0 tables is for one of the
 //! scheduler's compactions, never for the reclaim's.
 //!
+//! The scheduler can also schedule, in between, a merge into the very run
+//! the reclaim is about to rewrite into itself. Both must not run: the one
+//! that commits second replaces the run, and a rewrite that commits after
+//! the merge would put back the rows it read before it, less every row the
+//! merge brought in. SlateDB refuses a submitted compaction that reads a
+//! source, or writes the run, of one in flight, and the reclaim ends
+//! [`ReclaimObstacle::Rejected`]. This crate depends on that refusal, and
+//! on the fence that keeps a superseded writer's worker from running this
+//! writer's compactions with its own filters: both are in the SlateDB
+//! revision pinned, and contracts fail without either.
+//!
 //! A reclaim plans from one read of `.compactions` and the manifest
 //! together, so a merge it sees finished is in the runs it weighs, and one
 //! it sees in flight makes it leave those runs alone. A merge that starts
