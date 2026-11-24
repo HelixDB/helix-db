@@ -410,11 +410,23 @@
 //!   given up after about a thousand unlinks and built serially.
 //! - Pass 1 holds the rows of one run, up to [`READ_RUN_BYTES`] and the
 //!   rows one more read takes, beside the vectors of the runs before it.
-//! - Deleting a partial graph costs a delete per stored row, and then one
-//!   scan over every tombstone to prove the namespace empty, in a single
-//!   step's transaction: about 2,600 entities a second measured on S3, three
-//!   times as long as the rows took to write. A process restarted while it
-//!   deletes pays that scan once more, over the tombstones written so far.
+//! - Deleting a partial graph costs a delete per stored row, in bounded
+//!   steps, and then one step that scans every tombstone from the start to
+//!   prove the namespace empty, in that step's transaction: together about
+//!   three times as long as the rows took to write. Measured on S3 for an
+//!   attempt abandoned at 950,000 of a million 128-dimension nodes (34.4
+//!   million rows), while other writers ingested about 35,000 rows a second:
+//!   217 s of deletes, then 89 s for the proving step, 2.6 microseconds a
+//!   deleted row. That step holds the vector lane for its length and, like
+//!   any open transaction, makes SlateDB keep the write set of every commit
+//!   made meanwhile: 50 MiB for the 3.3 million rows written during it, of
+//!   the 256 MiB past which writes fail. Under that ingest a proving step of
+//!   seven or eight minutes, for an attempt of some five million such nodes,
+//!   would reach it. The step is not split: what it proves is one scan from
+//!   the start that found nothing with no write to the generation between
+//!   its reads, and a scan that finds no row has no position to hand on. A
+//!   process restarted while it deletes pays that scan once more, over the
+//!   tombstones written so far.
 //!   Aborting a partly written build deletes through the cleanup every build
 //!   shares, which was slower still: 46 to 60 minutes for a fifth of a
 //!   million-vector graph.
