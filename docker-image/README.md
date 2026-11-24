@@ -14,6 +14,7 @@ to images built from your checkout.
 - `/bin/helix-server` is PID 1 and runs as the distroless `nonroot` user (`65532:65532`).
 - HTTP listens on `0.0.0.0:8080`; internal gRPC listens on `127.0.0.1:8081` and is not exposed.
 - `GET /healthz`, `GET /readyz`, and `POST /v2/query` are the supported container probes and query endpoint. `GET /v2/diagnostics` reports read-only setup checks, which `helix doctor` renders.
+- A writer another container fenced, by opening the same storage as writer, turns `/readyz` 503 (`"storage": "fenced"`) within about a second, with or without traffic, answers every query with `writer_fenced_commit_outcome_unknown`, and stops its background work. `/healthz` stays 200 and the process keeps running: restarted, it would fence the new writer in turn. Stop it, or restart it once the other writer is gone. `/healthz` turns 503 only when storage failed, when a restart helps.
 - Storage is in memory unless local-disk or S3-compatible configuration is supplied.
 - `/var/lib/helix` (data) and `/var/cache/helix` (disk cache, always used with S3 storage) are owned by the runtime user, so new named volumes mounted there are writable.
 - Docker sends `SIGTERM`; the server drains both listeners and closes storage before exiting.

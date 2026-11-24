@@ -244,7 +244,7 @@
       "get": {
         "operationId": "getHealth",
         "summary": "Get process health",
-        "description": "Reports process liveness and the current database and index-runtime state. Liveness returns 200 even when ready is false.",
+        "description": "Reports process liveness and the current database, storage and index-runtime state. Liveness returns 200 even when ready is false, including for a writer a newer writer fenced: restarting it would fence that writer in turn. It returns 503 only once storage failed or closed, when a restart may help.",
         "tags": [
           "Health"
         ],
@@ -252,6 +252,16 @@
         "responses": {
           "200": {
             "description": "The server process is alive.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Storage failed (`storage` is `failed`) or closed while shutting down (`closed`). Restart the process.",
             "content": {
               "application/json": {
                 "schema": {
@@ -267,7 +277,7 @@
       "get": {
         "operationId": "getReadiness",
         "summary": "Get database readiness",
-        "description": "Returns 200 when the configured database handle and index runtime are ready to serve queries. The index runtime has no not-ready state, so a server that answers returns 200.",
+        "description": "Returns 200 when the database's storage is open and its index runtime is ready to serve queries, and 503 from when storage stops serving: once a newer writer opened the same store and fenced this writer, for good, or once storage failed. A fenced writer notices within about a second, with or without traffic.",
         "tags": [
           "Health"
         ],
@@ -284,7 +294,7 @@
             }
           },
           "503": {
-            "description": "Reserved for a process whose database is not ready; current servers do not return it.",
+            "description": "Storage no longer serves (`storage` is not `open`). A fenced writer stays 503 until it is restarted, which should wait until the writer that fenced it is gone.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1874,12 +1884,14 @@
         "required": [
           "ready",
           "mode",
+          "storage",
           "index_runtime",
           "blocked_index_entity_count"
         ],
         "properties": {
           "ready": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Whether the server serves queries: storage is open and the index runtime is ready."
           },
           "mode": {
             "type": "string",
@@ -1888,6 +1900,16 @@
               "writer"
             ],
             "description": "Configured database mode."
+          },
+          "storage": {
+            "type": "string",
+            "enum": [
+              "open",
+              "fenced",
+              "failed",
+              "closed"
+            ],
+            "description": "Whether storage still serves. `fenced`: a newer writer opened the same store, so this writer fails every request with `writer_fenced_commit_outcome_unknown` until it is restarted. `failed`: a storage task failed. `closed`: the server is shutting down. Every state but `open` is final for the process."
           },
           "index_runtime": {
             "type": "string",
@@ -1906,6 +1928,7 @@
         "example": {
           "ready": true,
           "mode": "writer",
+          "storage": "open",
           "index_runtime": "ready",
           "blocked_index_entity_count": 0
         }

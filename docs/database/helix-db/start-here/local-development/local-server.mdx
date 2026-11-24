@@ -139,6 +139,24 @@ curl -fsS http://127.0.0.1:6969/healthz
 curl -fsS http://127.0.0.1:6969/readyz
 ```
 
+Both return the same body, whose `storage` field says whether storage still serves.
+Point a load balancer's health check at `/readyz` and a liveness probe at `/healthz`:
+
+| `storage` | Meaning | `/readyz` | `/healthz` |
+| --- | --- | --- | --- |
+| `open` | Serving | 200 | 200 |
+| `fenced` | Another server opened the same storage as writer and took over | 503 | 200 |
+| `failed` | A storage background task failed | 503 | 503 |
+| `closed` | The server is shutting down | 503 | 503 |
+
+Only one writer serves a database: a server that opens storage as writer fences the
+writer already running on it, usually within a second, with or without traffic. The
+fenced server keeps running but answers every query with
+`writer_fenced_commit_outcome_unknown` (503) and stops its background work, so traffic
+moves to the new writer. It stays live on purpose: restarted, it would open the
+storage as writer again and fence the server that replaced it, and the two would take
+turns. Stop it, or restart it once the other writer is gone. A reader is not affected.
+
 <Warning>
 Do not set `S3_BUCKET=IN_MEMORY`. Every defined `S3_BUCKET` value selects
 S3-compatible storage and is interpreted as a real bucket name. Setting more

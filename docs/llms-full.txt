@@ -3962,6 +3962,24 @@ curl -fsS http://127.0.0.1:6969/healthz
 curl -fsS http://127.0.0.1:6969/readyz
 ```
 
+Both return the same body, whose `storage` field says whether storage still serves.
+Point a load balancer's health check at `/readyz` and a liveness probe at `/healthz`:
+
+| `storage` | Meaning | `/readyz` | `/healthz` |
+| --- | --- | --- | --- |
+| `open` | Serving | 200 | 200 |
+| `fenced` | Another server opened the same storage as writer and took over | 503 | 200 |
+| `failed` | A storage background task failed | 503 | 503 |
+| `closed` | The server is shutting down | 503 | 503 |
+
+Only one writer serves a database: a server that opens storage as writer fences the
+writer already running on it, usually within a second, with or without traffic. The
+fenced server keeps running but answers every query with
+`writer_fenced_commit_outcome_unknown` (503) and stops its background work, so traffic
+moves to the new writer. It stays live on purpose: restarted, it would open the
+storage as writer again and fence the server that replaced it, and the two would take
+turns. Stop it, or restart it once the other writer is gone. A reader is not affected.
+
 Do not set `S3_BUCKET=IN_MEMORY`. Every defined `S3_BUCKET` value selects
 S3-compatible storage and is interpreted as a real bucket name. Setting more
 than one of `HELIX_DATA_DIR`, `S3_BUCKET`, `GCS_BUCKET` and `AZURE_CONTAINER_NAME`
@@ -4525,8 +4543,10 @@ reader = Client.embedded_reader(Disk("/data/helix", "app"))
 ## Writers and readers
 
 - Open one writer per database at a time, across all processes. A second writer on the
-  same source fences the first, whose writes then fail, for example with
-  `writer_fenced_commit_outcome_unknown`: that commit may or may not have landed.
+  same source fences the first, whose requests then fail with
+  `writer_fenced_commit_outcome_unknown`: a write it was committing may or may not have
+  landed. The fenced handle notices within about a second even when idle, stops its
+  background work, and reports `StorageState::Fenced` from `storage_state()`; close it.
 - Read-only handles can open the same database alongside the writer, in any process.
   A reader sees a write only once it is durable and the reader has refreshed, so it
   can lag behind the writer.
@@ -13289,7 +13309,7 @@ embedded configurations may override it.
 | `writer_mode_required` | The operation requires a writer handle, including a request with `X-Helix-Require-Writer` on a reader. | 503 | On a writer | Operational |
 | `reader_mode_required` | The operation requires a standalone reader handle. | 503 | On a reader | Operational |
 | `query_cancelled_by_reader_retirement` | Reader retirement cancelled the query before the reader closed. | 503 | After routing to another reader | Operational |
-| `writer_fenced_commit_outcome_unknown` | Writer fencing made the final commit outcome unknowable. | 503 | Only with idempotency protection | No |
+| `writer_fenced_commit_outcome_unknown` | A newer writer opened the same storage and fenced this one: a write it was committing may or may not have landed, and it serves no request, read or write, again. | 503 | Only with idempotency protection, on the newer writer | No |
 
 ### Internal failures
 
