@@ -2684,7 +2684,7 @@ async fn a_build_waits_its_turn_without_moving_the_scan() {
         _permit: Arc::clone(&driver.bulk.preparing)
             .try_acquire_owned()
             .expect("no build is preparing"),
-        parking: Arc::clone(&driver.bulk.parking),
+        _woken: WakeAllOnDrop(Arc::clone(&driver.bulk.parking)),
     };
     let before = Instant::now();
     assert_eq!(
@@ -2743,6 +2743,33 @@ async fn a_build_waits_its_turn_without_moving_the_scan() {
     db.close().await.expect("vector test database closes");
 }
 
+/// A turn is free by the time the builds that wait for it are woken: its
+/// permit goes back first. Woken while the permit was still held, a build
+/// stepped on another thread would find the turn taken, park again and hear
+/// no more of it until its park limit.
+#[test]
+fn a_released_turn_is_free_when_its_waiters_are_woken() {
+    let parking = Arc::new(Parking::new(IndexWorkerWakeHandle::default()));
+    let preparing = Arc::new(tokio::sync::Semaphore::new(1));
+    let turn = Turn {
+        _permit: Arc::clone(&preparing)
+            .try_acquire_owned()
+            .expect("no build is preparing"),
+        _woken: WakeAllOnDrop(Arc::clone(&parking)),
+    };
+    let waiting = IndexOperationId::from_bytes([0x78; 16]).unwrap();
+    parking.park(waiting);
+    // What a woken build finds of the turn at the moment it is woken.
+    let free_at_wake = Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+    *parking.woken.lock() = Some(Box::new({
+        let (preparing, free_at_wake) = (Arc::clone(&preparing), Arc::clone(&free_at_wake));
+        move || free_at_wake.store(preparing.available_permits(), Ordering::Relaxed)
+    }));
+    drop(turn);
+    assert_eq!(free_at_wake.load(Ordering::Relaxed), 1);
+    assert_eq!(parking.until(waiting), None);
+}
+
 /// Forgetting a build in passes 1 and 2 raises its cancellation flag and
 /// frees its turn and its memory once the task is dropped, which wakes
 /// whatever waited for either.
@@ -2758,7 +2785,7 @@ async fn forgetting_a_preparing_build_frees_its_turn_and_memory() {
         _permit: Arc::clone(&builds.preparing)
             .try_acquire_owned()
             .expect("no build is preparing"),
-        parking: Arc::clone(&builds.parking),
+        _woken: WakeAllOnDrop(Arc::clone(&builds.parking)),
     };
     let Admission::Reserved(reservation) = MemoryReservation::admit(&builds.memory, 1 << 20) else {
         panic!("the budget holds the reservation");

@@ -760,6 +760,9 @@ impl VectorBuildReports {
 pub(super) struct Parking {
     parked: parking_lot::Mutex<HashMap<IndexOperationId, Instant>>,
     worker: IndexWorkerWakeHandle,
+    /// What a test runs at the moment every parked operation is woken.
+    #[cfg(test)]
+    woken: parking_lot::Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
 impl Parking {
@@ -767,6 +770,8 @@ impl Parking {
         Self {
             parked: parking_lot::Mutex::new(HashMap::new()),
             worker,
+            #[cfg(test)]
+            woken: parking_lot::Mutex::new(None),
         }
     }
 
@@ -804,6 +809,11 @@ impl Parking {
         }
         parked.clear();
         drop(parked);
+        #[cfg(test)]
+        match &*self.woken.lock() {
+            None => {}
+            Some(woken) => woken(),
+        }
         self.worker.wake();
     }
 }
@@ -823,14 +833,23 @@ impl Drop for WakeOnDrop {
 
 /// The turn for passes 1 and 2, which one build holds at a time. Dropping it
 /// wakes the builds that wait for it.
+///
+/// The fields drop in this order: the permit goes back before the waiting
+/// builds are woken. Woken first, a build stepped on another thread could
+/// find the turn still taken and park again, with no wake to come when the
+/// permit went back a moment later: it would wait out [`PARK_LIMIT`] beside
+/// a free turn.
 struct Turn {
     _permit: tokio::sync::OwnedSemaphorePermit,
-    parking: Arc<Parking>,
+    _woken: WakeAllOnDrop,
 }
 
-impl Drop for Turn {
+/// Wakes every parked operation when dropped.
+struct WakeAllOnDrop(Arc<Parking>);
+
+impl Drop for WakeAllOnDrop {
     fn drop(&mut self) {
-        self.parking.wake_all();
+        self.0.wake_all();
     }
 }
 
@@ -2660,7 +2679,7 @@ impl BulkBuilds {
                 };
                 Turn {
                     _permit: permit,
-                    parking: Arc::clone(&self.parking),
+                    _woken: WakeAllOnDrop(Arc::clone(&self.parking)),
                 }
             }
         };
