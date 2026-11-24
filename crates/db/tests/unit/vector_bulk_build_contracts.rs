@@ -599,20 +599,25 @@ async fn drive_steps(
 }
 
 /// Runs the step the outbox requeued after a commit conflict, once its delay
-/// has passed and its build is no longer parked.
+/// has passed, and returns the first step from there that the build did not
+/// wait in, as [`step`] does.
 ///
 /// The step whose commit was lost may have started the build's passes and
-/// parked the operation for them. The worker offers the retry only once they
-/// have woken it, and so does this: offered while they still run, the step
-/// would park again and commit nothing of what the caller expects of it.
+/// parked the operation for them. The worker offers the retry once the
+/// operation is woken, and so does this. A wake is not always the end of
+/// what the build waits for: its own read pass wakes every parked operation
+/// when it trims the build's reservation, while the link pass still runs.
+/// The retried step then parks again and commits nothing of what the caller
+/// expects of it, so the steps after it are driven until one does not.
 async fn retry_conflicted_step(
     db: &Db,
-    driver: &dyn IndexOperationDriver,
+    driver: &VectorIndexDriver,
     operation_id: IndexOperationId,
     claim_sequence: &mut u64,
     limits: SearchIndexBatchLimits,
 ) -> CommittedOperationStep {
     unparked(db, driver, operation_id).await;
+    let parked = driver.bulk.parked_steps.load(Ordering::Relaxed);
     let writer_epoch = WriterEpoch::from_bytes([0x6B; 16]).expect("writer epoch is non-nil");
     let OperationPointerObservation::Delayed { delay_millis } =
         observe_operation_pointer(db, operation_id, writer_epoch, NOW_MILLIS)
@@ -641,9 +646,15 @@ async fn retry_conflicted_step(
     .expect("vector retry claim succeeds")
     .expect("vector revision is claimable");
     *claim_sequence += 1;
-    execute_claimed_step(db, &claimed, driver, limits, retry_at)
+    let outcome = execute_claimed_step(db, &claimed, driver, limits, retry_at)
         .await
-        .expect("the repeated step commits")
+        .expect("the repeated step commits");
+    if driver.bulk.parked_steps.load(Ordering::Relaxed) == parked {
+        return outcome;
+    }
+    assert_eq!(outcome, CommittedOperationStep::Progressed);
+    unparked(db, driver, operation_id).await;
+    step(db, driver, operation_id, claim_sequence, limits).await
 }
 
 /// A step of `driver` whose commit a concurrent write to the index record
