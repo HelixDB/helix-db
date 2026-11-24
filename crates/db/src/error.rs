@@ -472,8 +472,9 @@ pub enum HelixDbError {
         record_revision: u64,
     },
 
-    /// A newer writer fenced the request before proof absence became authoritative.
-    #[error("writer fencing prevented the Active text commit outcome from being proven")]
+    /// A newer writer fenced this writer while the request's commit was in
+    /// flight, so whether it committed is unknown.
+    #[error("a newer writer fenced this writer, so the outcome of the commit is unknown")]
     WriterFencedCommitOutcomeUnknown,
 
     /// Invalid vector index configuration.
@@ -679,6 +680,13 @@ impl HelixDbError {
             }
             Self::Storage(error) if error.kind() == ErrorKind::Transaction => {
                 error_code::QueryErrorCode::TransactionConflict
+            }
+            // Fenced storage fails every later request, read or write, and a
+            // write it was committing may have landed: one code for all.
+            Self::Storage(error)
+                if error.kind() == ErrorKind::Closed(slatedb::CloseReason::Fenced) =>
+            {
+                error_code::QueryErrorCode::WriterFencedCommitOutcomeUnknown
             }
             Self::Storage(_) | Self::ObjectStore(_) => error_code::QueryErrorCode::StorageError,
             // Only a label a caller chose is too long: a stored label frame

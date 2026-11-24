@@ -681,6 +681,15 @@ async fn supervise_worker(context: WorkerSupervisorContext) {
         .await
         {
             Ok(WorkerCycleExit::Shutdown) => return,
+            // Closed or fenced storage fails every later cycle too.
+            Err(error) if outbox::DriverFailure::of(&error) == outbox::DriverFailure::Stops => {
+                tracing::info!(
+                    %error,
+                    writer_epoch = %context.writer_epoch.as_uuid(),
+                    "index outbox worker stopped: storage no longer serves this writer"
+                );
+                return;
+            }
             Err(error) => {
                 #[cfg(feature = "index-lifecycle-testing")]
                 {
