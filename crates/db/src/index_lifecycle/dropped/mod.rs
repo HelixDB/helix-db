@@ -1362,7 +1362,7 @@ impl Registry {
     /// [`DroppedIndexStorage::left_in_place`] is not filled in: it takes the
     /// writer's manifest and a rule, which [`reclaim::storage`] has.
     pub(crate) fn storage(&self) -> DroppedIndexStorage {
-        let state = self.state.lock();
+        let mut state = self.state.lock();
         let mut storage = DroppedIndexStorage {
             compactor: state.compactor,
             last_pass: state.last_pass.clone(),
@@ -1411,10 +1411,23 @@ impl Registry {
         storage
             .quarantined
             .sort_unstable_by_key(|entry| (entry.index_id, entry.generation));
-        assert_eq!(
+        // The count is derived from the entries just walked. A drift is a
+        // defect of this module: a debug build stops at it, and a release
+        // build reports it and takes the walked count, because this runs on
+        // the diagnostics route and in the retirement task, which a panic
+        // would end for a number that is one line to put right.
+        debug_assert_eq!(
             state.tracking, storage.tracking,
             "the count of tracking proofs follows every change of a proof"
         );
+        if state.tracking != storage.tracking {
+            tracing::error!(
+                counted = state.tracking,
+                tracking = storage.tracking,
+                "the count of tracking proofs drifted from the entries and is corrected"
+            );
+            state.tracking = storage.tracking;
+        }
         storage
     }
 

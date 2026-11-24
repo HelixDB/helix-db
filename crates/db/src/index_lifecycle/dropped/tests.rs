@@ -382,6 +382,26 @@ fn the_count_of_tracking_proofs_follows_every_change_of_a_proof() {
     tracks(0);
 }
 
+/// A count that drifted from the entries is a defect: a debug build stops at
+/// it, and a release build corrects it from the entries when it next reports
+/// them, so neither diagnostics nor the retirement task ends over it.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    should_panic(expected = "the count of tracking proofs follows every change of a proof")
+)]
+fn a_drifted_count_of_tracking_proofs_is_corrected_where_it_is_reported() {
+    let registry = registry(&[(1, 10), (2, 10)]);
+    assert!(registry.advance(entry(1), 0, tracking(&[7])));
+    registry.state.lock().tracking = 0;
+    assert!(!registry.tracks_tables());
+    assert_eq!(registry.storage().tracking, 1);
+    assert!(registry.tracks_tables());
+    registry.state.lock().tracking = 5;
+    assert_eq!(registry.storage().tracking, 1);
+    assert_eq!(registry.state.lock().tracking, 1);
+}
+
 #[test]
 fn a_step_for_an_entry_that_is_not_armed_does_nothing() {
     let registry = registry(&[(1, 10)]);
