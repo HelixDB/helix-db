@@ -2409,10 +2409,14 @@ impl HelixDB {
     /// proceed meanwhile. The reclaim never takes the compactor's last free
     /// slot: when a compaction of its own would, it returns
     /// [`ReclaimObstacle::Busy`] instead, as it always does on a compactor
-    /// with a single slot. `wait` bounds the whole call, the wait for a
-    /// background pass or another reclaim under way included, and once it
-    /// has passed the call submits no further compaction. A compaction that
-    /// outlives `wait` goes on, and nothing cancels it; its result shows in
+    /// with a single slot. `wait` bounds what the call waits for: a
+    /// background pass or another reclaim under way, and each compaction of
+    /// its own. Once it has passed the call submits no further compaction.
+    /// What the call does itself between those waits is not cut short: it
+    /// reads the store as a background pass does and flushes the memtable
+    /// at most once, so it can return that much later than `wait`, which
+    /// slow storage makes longer. A compaction that outlives `wait` goes
+    /// on, and nothing cancels it; its result shows in
     /// [`Self::dropped_index_storage`]. Background passes go on while a
     /// compaction of this call runs, however long it takes.
     ///
