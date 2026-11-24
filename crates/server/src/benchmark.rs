@@ -194,6 +194,7 @@ mod tests {
             storage: StorageConfig::Memory,
             wal_flush_interval_ms: None,
             sst_compression: db::config::SstCompression::default(),
+            vector_bulk_build_memory: db::config::VectorBulkBuildMemory::default(),
             index_operation_queue: db::config::IndexOperationQueueTuning::default()
                 .with_strong_vector_search_max_pending_bytes(
                     std::num::NonZeroU64::new(1 << 20).unwrap(),
@@ -308,6 +309,7 @@ mod tests {
             },
             wal_flush_interval_ms: None,
             sst_compression: db::config::SstCompression::default(),
+            vector_bulk_build_memory: db::config::VectorBulkBuildMemory::default(),
             index_operation_queue: db::config::IndexOperationQueueTuning::default(),
         };
         let writer = open_database(Role::Writer, QueueLayout::Map, &config)

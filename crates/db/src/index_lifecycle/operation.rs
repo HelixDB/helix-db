@@ -1,6 +1,6 @@
 //! Valid-by-construction operation, progress, and execution-state contracts.
 
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::{NonZeroU32, NonZeroU64, NonZeroU8};
 
 use bytes::Bytes;
 
@@ -27,6 +27,9 @@ pub enum IndexOperationModelError {
     /// A claim sequence is zero.
     #[error("operation claim sequence must be non-zero")]
     ZeroClaimSequence,
+    /// A bulk vector build names no started attempt.
+    #[error("bulk vector build attempt count must be non-zero")]
+    ZeroBulkBuildAttempts,
     /// Progress family disagrees with the operation family.
     #[error("operation progress family does not match operation family")]
     ProgressFamilyMismatch,
@@ -109,6 +112,69 @@ pub struct SourceScanProgress {
     pub cursor: Option<IndexCursor>,
     /// Cumulative bounded-work counters.
     pub counters: OperationCounters,
+}
+
+/// Number of bulk attempts started for one vector BUILD since its record
+/// was last at the serial scan stage: at least one.
+///
+/// A process counts its attempt here before it reads the source, so the count
+/// survives the process. It never falls while the record stays at the bulk
+/// stage, whichever way an attempt ends; a build that returns to the serial
+/// stage stores no count, and starts at one if it takes the bulk path again.
+///
+/// ```
+/// use db::index_lifecycle::BulkBuildAttempts;
+///
+/// let first = BulkBuildAttempts::FIRST;
+/// assert_eq!(first.get(), 1);
+/// assert_eq!(first.next().map(BulkBuildAttempts::get), Some(2));
+/// assert_eq!(BulkBuildAttempts::new(2), Ok(first.next().unwrap()));
+/// assert!(BulkBuildAttempts::new(0).is_err());
+/// assert_eq!(BulkBuildAttempts::new(u8::MAX).unwrap().next(), None);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BulkBuildAttempts(NonZeroU8);
+
+impl BulkBuildAttempts {
+    /// The count of a build's first attempt.
+    pub const FIRST: Self = Self(NonZeroU8::MIN);
+
+    /// Bulk attempts one build may start, counted from its record's last
+    /// serial stage, before it scans serially.
+    pub const LIMIT: u8 = 3;
+
+    /// Validates a stored attempt count.
+    pub fn new(value: u8) -> Result<Self, IndexOperationModelError> {
+        NonZeroU8::new(value)
+            .map(Self)
+            .ok_or(IndexOperationModelError::ZeroBulkBuildAttempts)
+    }
+
+    /// Returns the number of attempts started.
+    pub const fn get(self) -> u8 {
+        self.0.get()
+    }
+
+    /// The count once one more attempt starts, or `None` when the stored
+    /// byte cannot hold it.
+    pub fn next(self) -> Option<Self> {
+        self.0.checked_add(1).map(Self)
+    }
+}
+
+/// Progress of a vector BUILD that links its whole graph in memory.
+///
+/// `scan` is the write pass's position in the source: without a cursor while
+/// an attempt waits, reads and links, or while the rows of an abandoned
+/// attempt are deleted, and with the cursor of the last stored source row
+/// while the graph is written. Its counters are those of the current
+/// attempt's write pass alone.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BulkBuildProgress {
+    /// Source bound, write-pass cursor and write-pass counters.
+    pub scan: SourceScanProgress,
+    /// Bulk attempts started for this operation, this one included.
+    pub attempts: BulkBuildAttempts,
 }
 
 /// Prefix scan with strict resume-after cursor.
@@ -419,8 +485,14 @@ pub enum VectorBuildStage {
     AdoptLegacy(LegacyVectorValidationProgress),
     /// Validate the compact directory produced while adopting legacy vectors.
     ValidateAdoptedDirectory(LegacyVectorDirectoryValidationProgress),
-    /// Scan authoritative graph rows into a hidden HNSW generation.
+    /// Scan authoritative graph rows into a hidden HNSW generation, one
+    /// entity at a time.
     Scan(SourceScanProgress),
+    /// Link the whole graph in memory and store it once. The generation may
+    /// hold part of a graph whose links name nodes not stored yet, which only
+    /// the process that linked it can complete: every other process deletes
+    /// those rows before it does anything else with the generation.
+    BulkBuild(BulkBuildProgress),
     /// Apply coalesced mutations that raced the source scan.
     CatchUp(PrefixScanProgress),
     /// Validate the complete physical descriptor and graph rows.
@@ -619,7 +691,10 @@ impl IndexOperationProgress {
                     progress.cursor.as_ref().is_none_or(&mut validate)
                         && progress.verified_markers <= progress.expected_markers
                 }
-                VectorBuildStage::Scan(progress) => source_is_valid(progress, &mut validate),
+                VectorBuildStage::Scan(progress)
+                | VectorBuildStage::BulkBuild(BulkBuildProgress { scan: progress, .. }) => {
+                    source_is_valid(progress, &mut validate)
+                }
                 VectorBuildStage::CatchUp(progress)
                 | VectorBuildStage::ValidateDescriptor(progress) => {
                     prefix_is_valid(progress, &mut validate)
@@ -714,7 +789,10 @@ impl IndexOperationProgress {
                 VectorBuildStage::ValidateAdoptedDirectory(progress) => {
                     map_optional(&mut progress.cursor, map)?;
                 }
-                VectorBuildStage::Scan(progress) => map_source(progress, map)?,
+                VectorBuildStage::Scan(progress)
+                | VectorBuildStage::BulkBuild(BulkBuildProgress { scan: progress, .. }) => {
+                    map_source(progress, map)?
+                }
                 VectorBuildStage::CatchUp(progress)
                 | VectorBuildStage::ValidateDescriptor(progress) => map_prefix(progress, map)?,
                 VectorBuildStage::Activate(_) => {}
@@ -1889,6 +1967,17 @@ mod tests {
                 false,
             ),
             (vector_constructing(), 2, true, false),
+            (
+                IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+                    VectorBuildStage::BulkBuild(BulkBuildProgress {
+                        scan: source(),
+                        attempts: BulkBuildAttempts::FIRST,
+                    }),
+                )),
+                2,
+                true,
+                false,
+            ),
             (
                 IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
                     VectorBuildStage::CatchUp(prefix()),

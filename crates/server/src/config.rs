@@ -78,6 +78,9 @@ pub struct ServerConfig {
     /// Block codec of the SSTs the writer produces, WAL SSTs included
     /// (`HELIX_SST_COMPRESSION`, none when unset).
     pub sst_compression: db::config::SstCompression,
+    /// Memory in-memory vector index builds may hold together
+    /// (`HELIX_VECTOR_BULK_BUILD_MEMORY_BYTES`, off when unset).
+    pub vector_bulk_build_memory: db::config::VectorBulkBuildMemory,
 }
 
 impl ServerConfig {
@@ -103,6 +106,10 @@ impl ServerConfig {
     /// `HELIX_SST_COMPRESSION`, `none` (the default) or `zstd` in any case,
     /// picks the block codec of the SSTs the writer produces
     /// ([`db::config::SstCompression`]).
+    /// `HELIX_VECTOR_BULK_BUILD_MEMORY_BYTES` turns in-memory vector index
+    /// builds on, which are off when it is unset or `0`: `auto`, in any
+    /// case, gives them what the process's memory ceiling leaves, and a byte
+    /// count exactly that much ([`db::config::VectorBulkBuildMemory`]).
     pub fn from_env() -> Result<Self, ServerConfigError> {
         Self::from_lookup(|name| env::var_os(name))
     }
@@ -151,6 +158,27 @@ impl ServerConfig {
             })
             .transpose()?
             .unwrap_or_default();
+        let vector_bulk_build_memory =
+            text(&mut lookup, &["HELIX_VECTOR_BULK_BUILD_MEMORY_BYTES"])?
+                .map(|(_, value)| {
+                    if value.eq_ignore_ascii_case("auto") {
+                        return Ok(db::config::VectorBulkBuildMemory::Automatic);
+                    }
+                    value
+                        .parse::<u64>()
+                        .map(|bytes| {
+                            NonZeroU64::new(bytes).map_or(
+                                db::config::VectorBulkBuildMemory::Off,
+                                db::config::VectorBulkBuildMemory::Bytes,
+                            )
+                        })
+                        .map_err(|source| ServerConfigError::VectorBulkBuildMemory {
+                            value,
+                            source,
+                        })
+                })
+                .transpose()?
+                .unwrap_or_default();
         // Last, so every other variable is valid before a cache directory is
         // created.
         let storage = StorageConfig::from_lookup(&mut lookup)?;
@@ -163,6 +191,7 @@ impl ServerConfig {
             index_operation_queue,
             wal_flush_interval_ms,
             sst_compression,
+            vector_bulk_build_memory,
         })
     }
 
@@ -184,7 +213,7 @@ impl ServerConfig {
     }
 
     /// Build the DB runtime config for the selected storage, cache, index
-    /// queue policy, and SST codec.
+    /// queue policy, SST codec, and bulk vector build memory.
     ///
     /// Memory storage, and disk storage without a hybrid cache, keep
     /// [`db::DbConfig::new`]'s bounded in-memory caches.
@@ -213,6 +242,7 @@ impl ServerConfig {
     ///         storage,
     ///         wal_flush_interval_ms: None,
     ///         sst_compression: db::config::SstCompression::default(),
+    ///         vector_bulk_build_memory: db::config::VectorBulkBuildMemory::default(),
     ///         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
     ///     };
     ///     let db::config::CacheMode::Hybrid { object_store, .. } =
@@ -252,6 +282,14 @@ impl ServerConfig {
         }
         .with_index_operation_queue_tuning(self.index_operation_queue)
         .with_sst_compression(self.sst_compression);
+        let throughput = config.index_lifecycle_throughput();
+        let config = config.with_index_lifecycle_throughput_tuning(
+            throughput.with_vector_bulk_build(
+                throughput
+                    .vector_bulk_build()
+                    .with_memory(self.vector_bulk_build_memory),
+            ),
+        );
         match self.wal_flush_interval_ms {
             Some(interval) => config.with_wal_flush_interval_ms(interval),
             None => config,
@@ -273,6 +311,7 @@ impl ServerConfig {
     ///     storage: StorageConfig::Memory,
     ///     wal_flush_interval_ms: None,
     ///     sst_compression: db::config::SstCompression::default(),
+    ///     vector_bulk_build_memory: db::config::VectorBulkBuildMemory::default(),
     ///     index_operation_queue: db::config::IndexOperationQueueTuning::default(),
     /// };
     /// assert_eq!(config.required_open_files(), None);
@@ -972,6 +1011,17 @@ pub enum ServerConfigError {
         /// Largest accepted interval, in milliseconds.
         maximum: u64,
     },
+    /// `HELIX_VECTOR_BULK_BUILD_MEMORY_BYTES` was neither `auto` nor a byte
+    /// count.
+    #[error(
+        "invalid HELIX_VECTOR_BULK_BUILD_MEMORY_BYTES `{value}`: expected `auto`, a byte count, or 0 to keep bulk builds off"
+    )]
+    VectorBulkBuildMemory {
+        /// Raw value.
+        value: String,
+        /// Parse error.
+        source: ParseIntError,
+    },
     /// A cache size was not a positive integer byte count.
     #[error("invalid {variable} `{value}`: expected a positive byte count")]
     CacheBytes {
@@ -1217,6 +1267,7 @@ mod tests {
                 index_operation_queue: db::config::IndexOperationQueueTuning::default(),
                 wal_flush_interval_ms: None,
                 sst_compression: db::config::SstCompression::default(),
+                vector_bulk_build_memory: db::config::VectorBulkBuildMemory::default(),
             };
             let default_cache = config.db_config().cache().clone();
 
@@ -1230,6 +1281,92 @@ mod tests {
                 config.storage
             );
             assert_eq!(db_config.cache(), &default_cache);
+        }
+    }
+
+    /// Bulk builds are off unless `HELIX_VECTOR_BULK_BUILD_MEMORY_BYTES`
+    /// turns them on: `auto` in any case for the automatic budget, a byte
+    /// count for exactly that much. Zero keeps them off, and anything else
+    /// is rejected before storage creates a cache directory.
+    #[test]
+    fn bulk_builds_are_off_unless_their_memory_is_set() {
+        use db::config::VectorBulkBuildMemory as Memory;
+        const VARIABLE: &str = "HELIX_VECTOR_BULK_BUILD_MEMORY_BYTES";
+        let memory = |config: &ServerConfig| {
+            config
+                .db_config()
+                .index_lifecycle_throughput()
+                .vector_bulk_build()
+                .memory()
+        };
+        let unset = ServerConfig::from_lookup(|_| None).unwrap();
+        assert_eq!(unset.vector_bulk_build_memory, Memory::Off);
+        assert_eq!(memory(&unset), Memory::Off);
+        for (raw, expected) in [
+            ("0", Memory::Off),
+            ("auto", Memory::Automatic),
+            ("AUTO", Memory::Automatic),
+            ("Auto", Memory::Automatic),
+            ("1", Memory::Bytes(NonZeroU64::MIN)),
+            (
+                "8589934592",
+                Memory::Bytes(NonZeroU64::new(8 << 30).unwrap()),
+            ),
+            ("18446744073709551615", Memory::Bytes(NonZeroU64::MAX)),
+        ] {
+            let config =
+                ServerConfig::from_lookup(|name| (name == VARIABLE).then(|| OsString::from(raw)))
+                    .unwrap();
+            assert_eq!(
+                config.vector_bulk_build_memory, expected,
+                "{VARIABLE}={raw}"
+            );
+            assert_eq!(memory(&config), expected, "{VARIABLE}={raw}");
+            // The setting changes nothing else of the build policy.
+            let (set, default) = (
+                config.db_config().index_lifecycle_throughput(),
+                unset.db_config().index_lifecycle_throughput(),
+            );
+            assert_eq!(set.scan(), default.scan());
+            assert_eq!(set.concurrency(), default.concurrency());
+            assert_eq!(
+                set.vector_bulk_build(),
+                default.vector_bulk_build().with_memory(expected)
+            );
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let cache_root = directory.path().join("cache");
+        for value in [
+            "",
+            "off",
+            "automatic",
+            "auto ",
+            "-1",
+            "1.5",
+            "4GiB",
+            "18446744073709551616",
+        ] {
+            let error = ServerConfig::from_lookup(|name| match name {
+                VARIABLE => Some(OsString::from(value)),
+                "S3_BUCKET" => Some(OsString::from("bucket")),
+                "HELIX_DISK_CACHE_DIR" => Some(cache_root.clone().into_os_string()),
+                _ => None,
+            })
+            .unwrap_err();
+            assert!(
+                matches!(
+                    &error,
+                    ServerConfigError::VectorBulkBuildMemory { value: raw, .. } if raw == value
+                ),
+                "{VARIABLE}={value:?} produced {error:?}"
+            );
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "invalid {VARIABLE} `{value}`: expected `auto`, a byte count, or 0 to keep bulk builds off"
+                )
+            );
+            assert!(!cache_root.exists(), "{value:?} created a cache directory");
         }
     }
 

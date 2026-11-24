@@ -19,6 +19,7 @@ fn memory_config(name: &str) -> ServerConfig {
         storage: StorageConfig::Memory,
         wal_flush_interval_ms: None,
         sst_compression: db::config::SstCompression::default(),
+        vector_bulk_build_memory: db::config::VectorBulkBuildMemory::default(),
         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
     }
 }
@@ -548,6 +549,7 @@ async fn hybrid_disk_cache_serves_reopened_reads_from_local_disk() {
         },
         wal_flush_interval_ms: None,
         sst_compression: db::config::SstCompression::default(),
+        vector_bulk_build_memory: db::config::VectorBulkBuildMemory::default(),
         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
     };
     let write = query::QueryRequest::write(
@@ -717,6 +719,7 @@ async fn hybrid_disk_cache_admits_full_text_splits_only_on_demand_contract() {
         },
         wal_flush_interval_ms: None,
         sst_compression: db::config::SstCompression::default(),
+        vector_bulk_build_memory: db::config::VectorBulkBuildMemory::default(),
         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
     };
     let search = query::QueryRequest::read(
@@ -874,6 +877,7 @@ async fn a_hybrid_cache_directory_serves_one_server_at_a_time() {
         },
         wal_flush_interval_ms: None,
         sst_compression: db::config::SstCompression::default(),
+        vector_bulk_build_memory: db::config::VectorBulkBuildMemory::default(),
         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
     };
     let first = open_database(&config(128 * MIB)).await.unwrap();
@@ -957,6 +961,7 @@ async fn a_benchmark_writer_holds_its_hybrid_cache_directory_like_the_server() {
         },
         wal_flush_interval_ms: None,
         sst_compression: db::config::SstCompression::default(),
+        vector_bulk_build_memory: db::config::VectorBulkBuildMemory::default(),
         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
     };
     let benchmark = crate::benchmark::open_database(

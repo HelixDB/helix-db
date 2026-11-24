@@ -330,6 +330,12 @@ async fn reuses_only_the_exact_committed_checkpoint_and_bounds_the_budget() {
             Arc::new(vector::SimHasherRegistry::default()),
             crate::batch_reads::BatchReads::Single,
             &cache,
+            &bulk::BulkBuilds::new(
+                VectorBulkBuildTuning::disabled(),
+                0,
+                0,
+                crate::index_lifecycle::worker::IndexWorkerWakeHandle::default(),
+            ),
         )
         .await,
         Err(HelixDbError::IndexCatalogCorruption(_))
@@ -353,6 +359,12 @@ async fn reuses_only_the_exact_committed_checkpoint_and_bounds_the_budget() {
         Arc::new(vector::SimHasherRegistry::default()),
         crate::batch_reads::BatchReads::Single,
         &cache,
+        &bulk::BulkBuilds::new(
+            VectorBulkBuildTuning::disabled(),
+            0,
+            0,
+            crate::index_lifecycle::worker::IndexWorkerWakeHandle::default(),
+        ),
     )
     .await
     .is_err());

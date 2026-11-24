@@ -471,6 +471,21 @@ fn valid_stage_cases(scope: DataScope) -> Vec<CursorStageCase> {
             wrong_owner: graph_cursor(scope, IndexElementKind::Edge, 11),
         },
         CursorStageCase {
+            name: "vector bulk build",
+            operation: operation(
+                9,
+                IndexIdentityFamily::Vector,
+                node,
+                IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+                    VectorBuildStage::BulkBuild(BulkBuildProgress {
+                        scan: source_progress(scope, node),
+                        attempts: BulkBuildAttempts::FIRST,
+                    }),
+                )),
+            ),
+            wrong_owner: graph_cursor(scope, IndexElementKind::Edge, 11),
+        },
+        CursorStageCase {
             name: "vector applied-state validation",
             operation: operation(
                 10,
@@ -797,6 +812,17 @@ fn edge_source_scans_accept_non_entity_rows_inside_the_shared_physical_prefix() 
                 IndexElementKind::Edge,
                 IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
                     VectorBuildStage::Scan(progress.clone()),
+                )),
+            ),
+            operation(
+                33,
+                IndexIdentityFamily::Vector,
+                IndexElementKind::Edge,
+                IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+                    VectorBuildStage::BulkBuild(BulkBuildProgress {
+                        scan: progress.clone(),
+                        attempts: BulkBuildAttempts::FIRST,
+                    }),
                 )),
             ),
             operation(

@@ -61,6 +61,23 @@ const parsedOperationStatus = parseIndexOperationStatus({
   future: true,
 });
 assert.equal(parsedOperationStatus.status, "blocked");
+// What a server reports of an in-memory vector build, in fields this SDK does not model.
+assert.equal(
+  parseIndexOperationStatus({
+    status: "running",
+    operation_id: operationId,
+    index_id: "42",
+    generation: "3",
+    operation_kind: "build",
+    family: "vector",
+    stage: "scan",
+    attempt: 0,
+    progress: { entities: "0", input_bytes: "0", output_operations: "0", output_bytes: "0" },
+    vector_build_path: { path: "bulk" },
+    vector_bulk_build: { bulk_attempt: 2, bulk_attempt_limit: 3, phase: "waiting", waiting_for: "memory" },
+  }).status,
+  "running",
+);
 for (const [family, stage] of [
   ["vector", "validate_legacy_physical"],
   ["text", "validate_manifests"],

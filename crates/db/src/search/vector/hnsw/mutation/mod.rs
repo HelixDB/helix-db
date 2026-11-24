@@ -42,8 +42,8 @@ use crate::search::vector::storage::{
 };
 use crate::search::vector::{
     encode_item, select_diverse, Connections, Layer0Connections, MeasuredVectorTransaction,
-    ValidatedMetricVector, VectorDimension, VectorGenerationIdentity, VectorIndexMetadata,
-    VectorIndexState,
+    ValidatedMetricVector, VectorDimension, VectorGenerationIdentity, VectorIndexConfig,
+    VectorIndexMetadata, VectorIndexState,
 };
 
 const LAYER0_NEIGHBOR_PREFETCH_MAX_PER_STEP: usize = 2;
@@ -233,15 +233,19 @@ pub(in crate::search::vector) enum VectorInsertContract {
 
 /// Validated upper- and layer-zero degree limits shared by graph mutations.
 #[derive(Debug, Clone, Copy)]
-struct MutationDegreeLimits {
-    upper: Connections,
+pub(in crate::search::vector) struct MutationDegreeLimits {
+    pub(in crate::search::vector) upper: Connections,
     conventional_layer0: Layer0Connections,
-    layer0: Layer0Connections,
+    pub(in crate::search::vector) layer0: Layer0Connections,
 }
 
 impl MutationDegreeLimits {
     /// Returns the beam width of a mutation search at `layer`.
-    fn search_width(self, layer: u16, ef_construction: usize) -> usize {
+    pub(in crate::search::vector) fn search_width(
+        self,
+        layer: u16,
+        ef_construction: usize,
+    ) -> usize {
         ef_construction.max(if layer == 0 {
             self.layer0.get()
         } else {
@@ -251,12 +255,19 @@ impl MutationDegreeLimits {
 
     /// Validates persisted degree settings and retains the conventional doubled floor.
     fn try_from_metadata(metadata: &VectorIndexMetadata) -> Result<Self, HelixDbError> {
-        let upper = Connections::try_new(metadata.config.m)
+        Self::try_from_config(&metadata.config)
+    }
+
+    /// Validates the degree settings of an index configuration.
+    pub(in crate::search::vector) fn try_from_config(
+        config: &VectorIndexConfig,
+    ) -> Result<Self, HelixDbError> {
+        let upper = Connections::try_new(config.m)
             .map_err(|error| HelixDbError::InvalidVectorConfig(error.into()))?;
         let doubled_layer0 = upper
             .checked_double()
             .map_err(|error| HelixDbError::InvalidVectorConfig(error.into()))?;
-        let configured_layer0 = Layer0Connections::try_new(metadata.config.m0, upper)
+        let configured_layer0 = Layer0Connections::try_new(config.m0, upper)
             .map_err(|error| HelixDbError::InvalidVectorConfig(error.into()))?;
         let layer0 = if configured_layer0.get() >= doubled_layer0.get() {
             configured_layer0

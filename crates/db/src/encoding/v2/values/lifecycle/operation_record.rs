@@ -6,14 +6,14 @@ use bytes::Bytes;
 
 use crate::encoding::error::EncodingError;
 use crate::index_lifecycle::{
-    BuildOperationOutcome, IndexOperationExecutionState, IndexOperationFamily, IndexOperationKind,
-    IndexOperationOutcome, IndexOperationProgress, IndexOperationQueueSchedule,
-    IndexOperationRecord, LegacyVectorDirectoryValidationProgress, LegacyVectorValidationLane,
-    LegacyVectorValidationProgress, NoCursorProgress, PrefixScanProgress, SecondaryBuildProgress,
-    SecondaryBuildStage, SecondaryCleanupProgress, SourceScanProgress, TextBuildProgress,
-    TextBuildStage, TextCleanupProgress, TextManifestPageValidationProgress,
-    TextManifestPartitionValidation, TextManifestValidationProgress, VectorBuildProgress,
-    VectorBuildStage, VectorCleanupProgress,
+    BuildOperationOutcome, BulkBuildAttempts, BulkBuildProgress, IndexOperationExecutionState,
+    IndexOperationFamily, IndexOperationKind, IndexOperationOutcome, IndexOperationProgress,
+    IndexOperationQueueSchedule, IndexOperationRecord, LegacyVectorDirectoryValidationProgress,
+    LegacyVectorValidationLane, LegacyVectorValidationProgress, NoCursorProgress,
+    PrefixScanProgress, SecondaryBuildProgress, SecondaryBuildStage, SecondaryCleanupProgress,
+    SourceScanProgress, TextBuildProgress, TextBuildStage, TextCleanupProgress,
+    TextManifestPageValidationProgress, TextManifestPartitionValidation,
+    TextManifestValidationProgress, VectorBuildProgress, VectorBuildStage, VectorCleanupProgress,
 };
 
 #[cfg(test)]
@@ -159,6 +159,14 @@ fn put_operation_progress(encoder: &mut ValueEncoder, progress: &IndexOperationP
                     VectorBuildStage::Scan(progress) => {
                         encoder.put_u8(0x01);
                         put_source_scan(encoder, progress);
+                    }
+                    // A binary from before bulk builds knows no stage 0x07 and
+                    // fails to decode the record, so it cannot take a partly
+                    // written bulk graph for a serial scan.
+                    VectorBuildStage::BulkBuild(BulkBuildProgress { scan, attempts }) => {
+                        encoder.put_u8(0x07);
+                        put_source_scan(encoder, scan);
+                        encoder.put_u8(attempts.get());
                     }
                     VectorBuildStage::CatchUp(progress) => {
                         encoder.put_u8(0x02);
@@ -316,6 +324,11 @@ fn take_operation_progress(
                         0x06 => VectorBuildStage::ValidateAdoptedDirectory(
                             take_legacy_vector_directory_validation(decoder)?,
                         ),
+                        0x07 => VectorBuildStage::BulkBuild(BulkBuildProgress {
+                            scan: take_source_scan(decoder)?,
+                            attempts: BulkBuildAttempts::new(decoder.take_u8()?)
+                                .map_err(operation_model_error)?,
+                        }),
                         unknown => {
                             return Err(unknown_discriminant("vector build stage", unknown));
                         }
@@ -900,6 +913,182 @@ index_record=010100000000000000010101000000014c00000001700101000000014c000000017
 operation_record=01021111111111111111111111111111111100000000000000010101000000014c0000000170000000000000000200000000000000030000000000000004010101010000000575707065720100000006637572736f720000000000000005000000000000000600000000000000070000000000000008000000090101
 "
         );
+    }
+
+    /// A vector BUILD at `stage`, claimed nowhere.
+    fn vector_build(stage: VectorBuildStage) -> IndexOperationRecord {
+        let identity = ValidatedDynamicIndexDefinition::try_from(
+            crate::config::VectorIndexDefinition::new_node(
+                "L",
+                "p",
+                2,
+                crate::search::vector::VectorDistanceMetric::Euclidean,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .identity();
+        IndexOperationRecord::try_new(
+            operation_id(),
+            index_id(),
+            identity,
+            generation(),
+            IndexRevision::new(3).unwrap(),
+            IndexOperationRevision::new(4).unwrap(),
+            IndexOperationKind::Build,
+            IndexOperationFamily::Vector,
+            IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(stage)),
+            9,
+            IndexOperationExecutionState::Queued {
+                not_before_unix_millis: None,
+            },
+        )
+        .unwrap()
+    }
+
+    fn source_scan() -> SourceScanProgress {
+        SourceScanProgress {
+            inclusive_upper_bound: IndexCursor::try_new(Bytes::from_static(b"upper")).unwrap(),
+            cursor: Some(IndexCursor::try_new(Bytes::from_static(b"cursor")).unwrap()),
+            counters: OperationCounters {
+                entities: 5,
+                input_bytes: 6,
+                output_operations: 7,
+                output_bytes: 8,
+            },
+        }
+    }
+
+    /// The bulk build stage is byte `0x07`, the serial scan's payload and one
+    /// byte of attempts, and nothing else of the record moves: the encoding
+    /// differs from the serial scan's only in the stage byte and that last
+    /// payload byte.
+    #[test]
+    fn vector_bulk_build_stage_bytes_are_frozen() {
+        let serial = vector_build(VectorBuildStage::Scan(source_scan()));
+        let bulk = vector_build(VectorBuildStage::BulkBuild(BulkBuildProgress {
+            scan: source_scan(),
+            attempts: BulkBuildAttempts::new(3).unwrap(),
+        }));
+        let waiting = vector_build(VectorBuildStage::BulkBuild(BulkBuildProgress {
+            scan: SourceScanProgress {
+                cursor: None,
+                counters: OperationCounters::default(),
+                ..source_scan()
+            },
+            attempts: BulkBuildAttempts::FIRST,
+        }));
+        let encoded_serial = encode_operation_record(&serial);
+        let encoded_bulk = encode_operation_record(&bulk);
+        let encoded_waiting = encode_operation_record(&waiting);
+        assert_eq!(decode_operation_record(&encoded_serial).unwrap(), serial);
+        assert_eq!(decode_operation_record(&encoded_bulk).unwrap(), bulk);
+        assert_eq!(decode_operation_record(&encoded_waiting).unwrap(), waiting);
+
+        // The stage byte follows the header, the identity and the mode byte.
+        let stage_at = encoded_serial
+            .iter()
+            .zip(encoded_bulk.iter())
+            .position(|(serial, bulk)| serial != bulk)
+            .expect("the stage byte differs");
+        assert_eq!(
+            (encoded_serial[stage_at], encoded_bulk[stage_at]),
+            (0x01, 0x07)
+        );
+        // Attempt count, then the claim attempt (u32) and two bytes of state.
+        let attempts_at = encoded_bulk.len() - 7;
+        assert_eq!(encoded_bulk[attempts_at], 0x03);
+        let without_attempts = [
+            &encoded_bulk[..attempts_at],
+            &encoded_bulk[attempts_at + 1..],
+        ]
+        .concat();
+        assert_eq!(without_attempts[..stage_at], encoded_serial[..stage_at]);
+        assert_eq!(
+            without_attempts[stage_at + 1..],
+            encoded_serial[stage_at + 1..]
+        );
+
+        insta::assert_snapshot!(
+            format!(
+                "vector_scan={}\nvector_bulk_build={}\nvector_bulk_build_waiting={}\nbulk_build_stage={}\n",
+                hex(&encoded_serial),
+                hex(&encoded_bulk),
+                hex(&encoded_waiting),
+                hex(&encoded_bulk[stage_at..=attempts_at]),
+            ),
+            @"
+vector_scan=01021111111111111111111111111111111100000000000000010301000000014c0000000170000000000000000200000000000000030000000000000004010201010000000575707065720100000006637572736f720000000000000005000000000000000600000000000000070000000000000008000000090101
+vector_bulk_build=01021111111111111111111111111111111100000000000000010301000000014c0000000170000000000000000200000000000000030000000000000004010201070000000575707065720100000006637572736f72000000000000000500000000000000060000000000000007000000000000000803000000090101
+vector_bulk_build_waiting=01021111111111111111111111111111111100000000000000010301000000014c00000001700000000000000002000000000000000300000000000000040102010700000005757070657200000000000000000000000000000000000000000000000000000000000000000001000000090101
+bulk_build_stage=070000000575707065720100000006637572736f72000000000000000500000000000000060000000000000007000000000000000803
+"
+        );
+    }
+
+    /// A stage `0x07` record decodes only with exactly its payload: a source
+    /// scan and one non-zero attempt byte.
+    #[test]
+    fn vector_bulk_build_stage_rejects_every_other_payload() {
+        let bulk = vector_build(VectorBuildStage::BulkBuild(BulkBuildProgress {
+            scan: source_scan(),
+            attempts: BulkBuildAttempts::new(3).unwrap(),
+        }));
+        let encoded = encode_operation_record(&bulk);
+        let attempts_at = encoded.len() - 7;
+
+        // Truncated anywhere, the attempt byte and the bytes behind it
+        // included.
+        for len in 0..encoded.len() {
+            assert!(
+                decode_operation_record(&encoded[..len]).is_err(),
+                "a record truncated to {len} bytes decodes"
+            );
+        }
+        // Without its attempt byte the record is a byte short: the claim
+        // attempt is read where the count belongs.
+        let missing = [&encoded[..attempts_at], &encoded[attempts_at + 1..]].concat();
+        assert!(decode_operation_record(&missing).is_err());
+        // A second attempt byte, or any byte behind the record, is overlong.
+        let doubled = [&encoded[..=attempts_at], &encoded[attempts_at..]].concat();
+        assert!(decode_operation_record(&doubled).is_err());
+        let trailing = [&encoded[..], &[0x00]].concat();
+        assert!(decode_operation_record(&trailing)
+            .unwrap_err()
+            .to_string()
+            .contains("trailing"));
+        // No attempt is no bulk build.
+        let mut zero = encoded.to_vec();
+        zero[attempts_at] = 0x00;
+        assert!(decode_operation_record(&zero)
+            .unwrap_err()
+            .to_string()
+            .contains("attempt count must be non-zero"));
+        // Every non-zero count is a count, whatever limit a binary applies.
+        let mut most = encoded.to_vec();
+        most[attempts_at] = 0xFF;
+        let IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+            VectorBuildStage::BulkBuild(progress),
+        )) = decode_operation_record(&most).unwrap().progress().clone()
+        else {
+            panic!("stage 0x07 decodes to a bulk build");
+        };
+        assert_eq!(progress.attempts.get(), u8::MAX);
+        assert_eq!(progress.scan, source_scan());
+        // The stage belongs to vector builds alone, and the next byte is no
+        // stage of any binary.
+        let stage_at =
+            encode_operation_record(&vector_build(VectorBuildStage::Scan(source_scan())))
+                .iter()
+                .zip(encoded.iter())
+                .position(|(serial, bulk)| serial != bulk)
+                .unwrap();
+        let mut unknown = encoded.to_vec();
+        unknown[stage_at] = 0x08;
+        assert!(decode_operation_record(&unknown)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown V2 vector build stage discriminant 0x08"));
     }
 
     #[test]

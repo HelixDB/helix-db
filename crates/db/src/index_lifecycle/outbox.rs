@@ -39,9 +39,10 @@ use super::failpoints::{self, IndexOutboxFailpoint};
 use super::{
     BuildOperationOutcome, ClaimContinuation, ClaimSequence, IndexOperationBlocker,
     IndexOperationExecutionState, IndexOperationFamily, IndexOperationId, IndexOperationOutcome,
-    IndexOperationProgress, IndexOperationRecord, IndexOperationRevision, IndexOperationStage,
-    IndexOperationStatus, IndexRecordV2, IndexRevision, IndexStateTransition, IndexStateV2,
-    IndexV2MetadataValue, OperationClaim, OperationQueuePointerValue, WriterEpoch,
+    IndexOperationProgress, IndexOperationPublicProgress, IndexOperationRecord,
+    IndexOperationRevision, IndexOperationStage, IndexOperationStatus, IndexRecordV2,
+    IndexRevision, IndexStateTransition, IndexStateV2, IndexV2MetadataValue, OperationClaim,
+    OperationQueuePointerValue, WriterEpoch,
 };
 
 /// Maximum scheduling delay used for one observation of a persisted deadline.
@@ -279,14 +280,30 @@ impl StepResourceUsage {
 pub(crate) enum CommittedStepState {
     /// Vector planning cache that mirrors the physical rows this step commits.
     VectorBuild(Box<super::vector::OfferedVectorBuild>),
+    /// Progress of an in-memory bulk vector graph that this step's commit
+    /// makes true of the stored rows.
+    VectorBulkBuild(super::vector::BulkBuildCommit),
 }
 
 impl core::fmt::Debug for CommittedStepState {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::VectorBuild(_) => formatter.write_str("CommittedStepState::VectorBuild"),
+            Self::VectorBulkBuild(_) => formatter.write_str("CommittedStepState::VectorBulkBuild"),
         }
     }
+}
+
+/// How the counters a progressed step stores follow the ones stored before
+/// it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StepCounters {
+    /// They continue the stored counters, and none is below its stored value:
+    /// the step used the difference.
+    Continued,
+    /// The step begins the operation's counted work again, so its counters
+    /// start from zero: the step used all they hold.
+    Restarted,
 }
 
 /// One driver result plus disposable measurements from the same bounded turn.
@@ -294,6 +311,7 @@ impl core::fmt::Debug for CommittedStepState {
 pub(crate) struct IndexOperationStepExecution {
     result: IndexOperationStepResult,
     resources: StepResourceUsage,
+    counters: StepCounters,
     committed_state: Option<CommittedStepState>,
 }
 
@@ -332,8 +350,17 @@ impl IndexOperationStepExecution {
                     retained_payload_bytes: 0,
                 },
             },
+            counters: StepCounters::Continued,
             committed_state: None,
         }
+    }
+
+    /// Declares how the step's counters follow the stored ones. A step that
+    /// stores counters below the stored ones without declaring them
+    /// [`StepCounters::Restarted`] fails as corruption.
+    pub(crate) const fn with_counters(mut self, counters: StepCounters) -> Self {
+        self.counters = counters;
+        self
     }
 
     /// Attaches family-specific measurements made while preparing the step.
@@ -531,6 +558,18 @@ pub(crate) trait IndexOperationDriver: Send + Sync {
         operation: &IndexOperationRecord,
         limits: SearchIndexBatchLimits,
     ) -> Result<IndexOperationStepExecution>;
+
+    /// When the worker offers `operation` a step again at the latest, if a
+    /// step now could only wait for something this process will signal.
+    ///
+    /// The step that parks an operation releases its claim with its own
+    /// commit, so the family's lane goes to other operations, and the worker
+    /// passes over a parked operation until the driver stops reporting it or
+    /// the returned time passes. The driver wakes the worker when the wait
+    /// ends. The default never parks.
+    fn parked_until(&self, _operation: &IndexOperationRecord) -> Option<Instant> {
+        None
+    }
 
     /// Applies disposable runtime cleanup once the staged step committed.
     ///
@@ -1217,6 +1256,7 @@ pub(crate) async fn execute_claimed_step_with_evidence(
         let IndexOperationStepExecution {
             result: step,
             resources,
+            counters,
             committed_state,
         } = execution;
         if matches!(step, IndexOperationStepResult::TransientFailure) {
@@ -1224,6 +1264,12 @@ pub(crate) async fn execute_claimed_step_with_evidence(
         }
 
         failpoints::trip(IndexOutboxFailpoint::CheckpointStagingBefore)?;
+        // A step that parked its operation releases the claim with its own
+        // commit: the next step could only wait.
+        let claim = match parked(driver, &operation) {
+            Some(_) => ClaimContinuation::Release,
+            None => claim,
+        };
         let operation_key = scoped_operation_key(claimed.scope, operation.operation_id());
         let pointer_key = global_operation_key(operation.operation_id());
         let before_status = IndexOperationStatus::from_record(&operation);
@@ -1247,7 +1293,13 @@ pub(crate) async fn execute_claimed_step_with_evidence(
                 (
                     CommittedOperationStep::Progressed,
                     after_status.common().stage,
-                    step_counter_resources(&before_status, &after_status)?,
+                    step_counter_resources(
+                        match counters {
+                            StepCounters::Continued => before_status.common().progress,
+                            StepCounters::Restarted => IndexOperationPublicProgress::default(),
+                        },
+                        after_status.common().progress,
+                    )?,
                     (claim == ClaimContinuation::Retain).then_some(next),
                 )
             }
@@ -1300,8 +1352,8 @@ pub(crate) async fn execute_claimed_step_with_evidence(
                     CommittedOperationStep::Completed,
                     IndexOperationStatus::from_record(&next).common().stage,
                     step_counter_resources(
-                        &before_status,
-                        &IndexOperationStatus::from_record(&next),
+                        before_status.common().progress,
+                        IndexOperationStatus::from_record(&next).common().progress,
                     )?,
                     None,
                 )
@@ -1437,6 +1489,56 @@ pub(crate) async fn execute_claimed_step_with_evidence(
     })
 }
 
+/// Until when `driver` parks `operation`, if that time is still ahead: a
+/// parked operation whose time has passed is offered a step like any other.
+pub(crate) fn parked(
+    driver: &dyn IndexOperationDriver,
+    operation: &IndexOperationRecord,
+) -> Option<Instant> {
+    driver
+        .parked_until(operation)
+        .filter(|until| *until > Instant::now())
+}
+
+/// What the outbox does with an error a driver's preparation or step
+/// returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DriverFailure {
+    /// The process no longer holds the database (it is closed, or another
+    /// writer fenced it): the worker cycle ends with the error and nothing
+    /// is recorded.
+    Stops,
+    /// The same step is offered again after a delay: a commit conflict, or
+    /// storage that is unavailable for now.
+    Retried(TransientRetry),
+    /// The operation blocks with
+    /// [`IndexOperationBlocker::InvariantViolation`] beside its unchanged
+    /// checkpoint until it is retried or aborted.
+    Blocks,
+}
+
+impl DriverFailure {
+    /// Classifies `error`.
+    pub(crate) fn of(error: &HelixDbError) -> Self {
+        if matches!(
+            error,
+            HelixDbError::DatabaseClosed | HelixDbError::WriterFencedCommitOutcomeUnknown
+        ) || matches!(error, HelixDbError::Storage(storage) if matches!(storage.kind(), slatedb::ErrorKind::Closed(_)))
+        {
+            return Self::Stops;
+        }
+        if error.is_transaction_conflict() {
+            return Self::Retried(TransientRetry::Conflict);
+        }
+        if matches!(error, HelixDbError::Storage(storage) if storage.kind() == slatedb::ErrorKind::Unavailable)
+            || matches!(error, HelixDbError::ObjectStore(error) if failure::is_retryable_object_store(error))
+        {
+            return Self::Retried(TransientRetry::Backoff);
+        }
+        Self::Blocks
+    }
+}
+
 /// Records failures only after failed preparation and staging have been discarded.
 /// The exact claim is rechecked in a fresh serializable transaction so a stale
 /// worker cannot block an operation that another writer or an abort has advanced.
@@ -1450,16 +1552,13 @@ async fn record_driver_failure(
     now_unix_millis: u64,
     started: Instant,
 ) -> Result<CommittedOperationStepEvidence> {
-    if matches!(
-        error,
-        HelixDbError::DatabaseClosed | HelixDbError::WriterFencedCommitOutcomeUnknown
-    ) || matches!(&error, HelixDbError::Storage(storage) if matches!(storage.kind(), slatedb::ErrorKind::Closed(_)))
-    {
-        return Err(error);
-    }
-    let retryable = error.is_transaction_conflict()
-        || matches!(&error, HelixDbError::Storage(storage) if storage.kind() == slatedb::ErrorKind::Unavailable)
-        || matches!(&error, HelixDbError::ObjectStore(error) if failure::is_retryable_object_store(error));
+    let failure = DriverFailure::of(&error);
+    let retry = match failure {
+        DriverFailure::Stops => return Err(error),
+        DriverFailure::Retried(retry) => Some(retry),
+        DriverFailure::Blocks => None,
+    };
+    let retryable = retry.is_some();
     let status = IndexOperationStatus::from_record(&claimed.record);
     tracing::warn!(
         operation_id = %claimed.record.operation_id().as_uuid(),
@@ -1470,49 +1569,47 @@ async fn record_driver_failure(
         retryable,
         "index operation driver failed"
     );
-    let outcome = if retryable {
-        let retry = if error.is_transaction_conflict() {
-            TransientRetry::Conflict
-        } else {
-            TransientRetry::Backoff
-        };
-        release_transient_claim(db, claimed, now_unix_millis, retry).await?;
-        CommittedOperationStep::TransientFailure
-    } else {
-        let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
-        let Some((index, operation, _)) =
-            load_exact_link(&transaction, claimed.scope, claimed.record.operation_id()).await?
-        else {
-            return Err(corruption("failed operation disappeared before blocking"));
-        };
-        if operation.operation_revision() != claimed.record.operation_revision()
-            || operation.execution_state() != claimed.record.execution_state()
-        {
-            return Err(HelixDbError::TransactionConflict(
-                "failed index claim has advanced".into(),
-            ));
+    let outcome = match retry {
+        Some(retry) => {
+            release_transient_claim(db, claimed, now_unix_millis, retry).await?;
+            CommittedOperationStep::TransientFailure
         }
-        let next = operation
-            .block(IndexOperationBlocker::InvariantViolation)
-            .map_err(operation_model_error)?;
-        validate_link(claimed.scope, &index, &next, None)?;
-        Mutation::put(
-            &transaction,
-            scoped_operation_key(claimed.scope, next.operation_id()),
-            encode_operation_record(&next),
-        )?;
-        transaction.delete(global_operation_key(next.operation_id()))?;
-        transaction.commit().await?;
-        driver
-            .after_commit(
-                claimed.scope,
-                &index,
-                &claimed.record,
-                CommittedOperationStep::Blocked,
-                None,
-            )
-            .await;
-        CommittedOperationStep::Blocked
+        None => {
+            let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
+            let Some((index, operation, _)) =
+                load_exact_link(&transaction, claimed.scope, claimed.record.operation_id()).await?
+            else {
+                return Err(corruption("failed operation disappeared before blocking"));
+            };
+            if operation.operation_revision() != claimed.record.operation_revision()
+                || operation.execution_state() != claimed.record.execution_state()
+            {
+                return Err(HelixDbError::TransactionConflict(
+                    "failed index claim has advanced".into(),
+                ));
+            }
+            let next = operation
+                .block(IndexOperationBlocker::InvariantViolation)
+                .map_err(operation_model_error)?;
+            validate_link(claimed.scope, &index, &next, None)?;
+            Mutation::put(
+                &transaction,
+                scoped_operation_key(claimed.scope, next.operation_id()),
+                encode_operation_record(&next),
+            )?;
+            transaction.delete(global_operation_key(next.operation_id()))?;
+            transaction.commit().await?;
+            driver
+                .after_commit(
+                    claimed.scope,
+                    &index,
+                    &claimed.record,
+                    CommittedOperationStep::Blocked,
+                    None,
+                )
+                .await;
+            CommittedOperationStep::Blocked
+        }
     };
     Ok(CommittedOperationStepEvidence {
         outcome,
@@ -1523,12 +1620,12 @@ async fn record_driver_failure(
     })
 }
 
+/// What a step used, as the counters it stores exceed `before`: the stored
+/// counters, or zero for a step that restarts them.
 fn step_counter_resources(
-    before: &IndexOperationStatus,
-    after: &IndexOperationStatus,
+    before: IndexOperationPublicProgress,
+    after: IndexOperationPublicProgress,
 ) -> Result<StepResourceUsage> {
-    let before = before.common().progress;
-    let after = after.common().progress;
     Ok(StepResourceUsage {
         source_entities: after.entities.checked_sub(before.entities).ok_or_else(|| {
             corruption("operation entity counter regressed across one committed step")
@@ -1653,6 +1750,24 @@ pub(crate) async fn retry_blocked_operation(
             Ok(Some(operation))
         }
     }
+}
+
+/// The record of `operation_id` as a restart would find it: what object
+/// storage holds, without the writes this process has applied and not yet
+/// uploaded. `None` while the operation's creation is one of those.
+pub(crate) async fn read_durable_operation_record(
+    db: &Db,
+    scope: DataScope,
+    operation_id: IndexOperationId,
+) -> Result<Option<IndexOperationRecord>> {
+    db.get_with_options(
+        scoped_operation_key(scope, operation_id),
+        &slatedb::config::ReadOptions::new()
+            .with_durability_filter(slatedb::config::DurabilityLevel::Remote),
+    )
+    .await?
+    .map(|value| decode_operation_record(&value).map_err(HelixDbError::from))
+    .transpose()
 }
 
 /// Point-reads one operation in exactly the caller-provided scope.
@@ -1844,7 +1959,7 @@ fn operation_not_found(operation_id: IndexOperationId) -> HelixDbError {
 /// attempts, so it also grows the backoff of a later failure at the same
 /// checkpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TransientRetry {
+pub(crate) enum TransientRetry {
     /// Exponential in the attempts since the last progress: the first
     /// failure after progress waits the base delay however long the
     /// operation has run, and only repeated failures at one checkpoint grow

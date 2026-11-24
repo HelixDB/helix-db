@@ -851,7 +851,7 @@ pub(crate) fn operation_record_cursors_are_valid(
     operation: &IndexOperationRecord,
 ) -> bool {
     use super::{
-        IndexOperationProgress, SecondaryBuildProgress, SecondaryBuildStage,
+        BulkBuildProgress, IndexOperationProgress, SecondaryBuildProgress, SecondaryBuildStage,
         SecondaryCleanupProgress, TextBuildProgress, TextBuildStage, TextCleanupProgress,
         TextManifestValidationProgress, VectorBuildProgress, VectorBuildStage,
         VectorCleanupProgress,
@@ -911,7 +911,8 @@ pub(crate) fn operation_record_cursors_are_valid(
                             }
                         }
                 }
-                VectorBuildStage::Scan(progress) => {
+                VectorBuildStage::Scan(progress)
+                | VectorBuildStage::BulkBuild(BulkBuildProgress { scan: progress, .. }) => {
                     source_progress_is_valid(scope, operation, progress)
                 }
                 VectorBuildStage::CatchUp(progress) => progress.cursor.is_none(),

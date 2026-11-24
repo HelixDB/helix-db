@@ -343,16 +343,74 @@ pub(super) async fn partitioned_drop_resumes_each_mapping_and_removes_every_name
         .expect("partitioned Active record projects a handle");
     let mappings = mapping_values(&db, scope, index_id, generation).await;
     assert_eq!(mappings.len(), 2);
-    let indexes = mappings
+    let generations = mappings
         .iter()
         .map(|mapping| {
-            let generation = ValidatedVectorGenerationHandle::try_from_active::<
-                vector::distance::Euclidean,
-            >(&active_handle, mapping.physical_index_id)
-            .expect("partition mapping validates against the Active handle");
-            VectorIndex::<vector::distance::Euclidean>::from_generation(&generation)
+            ValidatedVectorGenerationHandle::try_from_active::<vector::distance::Euclidean>(
+                &active_handle,
+                mapping.physical_index_id,
+            )
+            .expect("partition mapping validates against the Active handle")
         })
         .collect::<Vec<_>>();
+    let indexes = generations
+        .iter()
+        .map(VectorIndex::<vector::distance::Euclidean>::from_generation)
+        .collect::<Vec<_>>();
+
+    // A position in the first partition's namespace is no position in the
+    // second: the scan of the second starts over and proves it empty.
+    let one_operation = SearchIndexBatchLimits::try_new(
+        NonZeroUsize::new(1024).unwrap(),
+        NonZeroU64::new(1024 * 1024).unwrap(),
+        NonZeroU64::MIN,
+        NonZeroU64::new(16 * 1024 * 1024).unwrap(),
+        NonZeroU64::new(16 * 1024 * 1024).unwrap(),
+    )
+    .unwrap();
+    let transaction = db
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+    let Ok(PhysicalCleanupOutcome::Progress {
+        resume: Some(first_partition_row),
+        ..
+    }) = delete_physical_namespace::<vector::distance::Euclidean>(
+        &transaction,
+        &generations[0],
+        None,
+        None,
+        IndexElementKind::Node,
+        OperationCounters::default(),
+        one_operation,
+    )
+    .await
+    else {
+        panic!("one delete of the first partition hands on its position");
+    };
+    drop(transaction);
+    let transaction = db
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+    let Ok(PhysicalCleanupOutcome::Progress {
+        namespace_empty: true,
+        resume: None,
+        ..
+    }) = delete_physical_namespace::<vector::distance::Euclidean>(
+        &transaction,
+        &generations[1],
+        None,
+        Some(&first_partition_row),
+        IndexElementKind::Node,
+        OperationCounters::default(),
+        SearchIndexBackfillLimits::default().batch(),
+    )
+    .await
+    else {
+        panic!("a position in another namespace restarts the scan from the start");
+    };
+    drop(transaction);
 
     let IndexDdlReceipt::Accepted {
         operation_id: drop_id,
@@ -387,7 +445,7 @@ pub(super) async fn partitioned_drop_resumes_each_mapping_and_removes_every_name
         .is_empty());
     for index in indexes {
         assert!(index
-            .cleanup_scan(&db)
+            .cleanup_scan(&db, None)
             .await
             .unwrap()
             .next()
@@ -1036,6 +1094,7 @@ pub(super) async fn pre_queue_build_deltas_block_catch_up_validation_and_activat
                 registry,
                 driver.batch_reads,
                 &driver.build_cache,
+                &driver.bulk,
             )
             .await
             .expect("vector build step runs")
@@ -1908,6 +1967,7 @@ async fn activation_result(
         Arc::clone(&driver.simhasher_registry),
         driver.batch_reads,
         &driver.build_cache,
+        &driver.bulk,
     )
     .await
 }
@@ -2265,7 +2325,7 @@ pub(super) async fn descriptor_validation_batches_and_blocks() {
             ))
         )
     };
-    let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let mut transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
     // The applied-state lane blocks on a row no batch holds and stops at
     // the input ceiling after its first row.
     assert!(blocked(
@@ -2292,6 +2352,49 @@ pub(super) async fn descriptor_validation_batches_and_blocks() {
         )
         .await
     ));
+    // Every applied-state row of this fixture names another partition, and a
+    // partition costs a metadata read: the lane stops at the entity ceiling's
+    // worth of them, and at the output-operation ceiling after as many rows
+    // as it may delete.
+    let resumed_at = |result: Result<IndexOperationStepResult>| {
+        let Ok(IndexOperationStepResult::Progressed(IndexOperationProgress::VectorBuild(
+            VectorBuildProgress::Constructing(VectorBuildStage::ValidateDescriptor(
+                PrefixScanProgress {
+                    cursor: Some(cursor),
+                    ..
+                },
+            )),
+        ))) = result
+        else {
+            panic!("validation resumes at a cursor");
+        };
+        Bytes::copy_from_slice(cursor.as_bytes())
+    };
+    for (limits, last_deleted) in [
+        (batch_limits(1024, generous, 2, generous), &applied[1].0),
+        (batch_limits(1, generous, 1024, generous), &applied[0].0),
+        (batch_limits(2, generous, 1024, generous), &applied[1].0),
+    ] {
+        drop(transaction);
+        transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        assert_eq!(
+            &resumed_at(
+                validation_result(
+                    &db,
+                    &transaction,
+                    &operation,
+                    &record,
+                    &definition,
+                    None,
+                    limits
+                )
+                .await
+            ),
+            last_deleted
+        );
+    }
+    drop(transaction);
+    let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
     // The mapping lane resumes after its cursor: it blocks on a row no batch
     // holds, stops at the input ceiling after one row, and stops at the
     // entity ceiling.
@@ -2334,34 +2437,45 @@ pub(super) async fn descriptor_validation_batches_and_blocks() {
     ));
     drop(transaction);
 
-    // A mapped partition without physical metadata fails closed.
+    // A mapped partition without physical metadata fails closed, in the
+    // mapping lane and in the applied-state lane. The applied-state lane
+    // checks each partition it meets, not only the first: a batch that may
+    // delete two rows fails on the second entity, whose partition lost its
+    // metadata, before it would hand on a cursor.
     let missing = mapping_values(&db, scope, index_id, generation).await[1].physical_index_id;
-    let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
-    transaction
-        .delete(
-            DataKey::Data {
-                scope,
-                kind: DataKeyKind::Vector(VectorKey::IndexMetadata(VectorIndexMetadataKey::new(
-                    missing.get(),
-                ))),
-            }
-            .to_bytes(),
-        )
-        .unwrap();
-    assert!(matches!(
-        validation_result(
-            &db,
-            &transaction,
-            &operation,
-            &record,
-            &definition,
+    for (cursor, limits) in [
+        (
             Some(mappings[0].0.clone()),
             SearchIndexBackfillLimits::default().batch(),
-        )
-        .await,
-        Err(HelixDbError::IndexCatalogCorruption(_))
-    ));
-    drop(transaction);
+        ),
+        (None, batch_limits(1024, generous, 2, generous)),
+    ] {
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        transaction
+            .delete(
+                DataKey::Data {
+                    scope,
+                    kind: DataKeyKind::Vector(VectorKey::IndexMetadata(
+                        VectorIndexMetadataKey::new(missing.get()),
+                    )),
+                }
+                .to_bytes(),
+            )
+            .unwrap();
+        assert!(matches!(
+            validation_result(
+                &db,
+                &transaction,
+                &operation,
+                &record,
+                &definition,
+                cursor,
+                limits,
+            )
+            .await,
+            Err(HelixDbError::IndexCatalogCorruption(_))
+        ));
+    }
 
     // Applied state that is empty, or names another element kind, is not
     // this build's.

@@ -185,6 +185,7 @@ pub(crate) use domain::{ValidatedMetricVector, VectorValidationError};
 pub(crate) use generation::ValidatedVectorCleanupAuthority;
 pub(crate) use generation::{ValidatedVectorBuildGenerationHandle, VectorGenerationIdentity};
 pub(crate) use generation::{ValidatedVectorGenerationHandle, VectorGenerationValidationError};
+pub(crate) use hnsw::bulk::{BulkConstruction, BulkGraph, BulkParameters, BulkVectors, LinkChange};
 pub(crate) use hnsw::index::VectorIndex;
 pub(crate) use hnsw::model::Candidate;
 pub(crate) use hnsw::mutation::{

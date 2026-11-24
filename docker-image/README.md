@@ -109,6 +109,129 @@ records its codec, so changing it needs no migration: existing SSTs stay readabl
 compaction rewrites them with the current codec. Images released before zstd support
 cannot read zstd SSTs. Startup fails naming it for any other value.
 
+`HELIX_VECTOR_BULK_BUILD_MEMORY_BYTES` turns in-memory vector index builds on and sets
+the memory they may hold together. Unset or `0`, they are off, and every vector index is
+built one vector at a time. `auto` gives them what the memory limit leaves beside the
+configured caches and write buffers and an eighth of it kept free. A byte count gives
+them exactly that much, whatever else the server holds: one larger than the memory limit
+leaves free gets the server OOM-killed during the build, up to three times for each
+index before the build continues serially. A build that fits links its whole graph in
+memory, many times faster than inserting one vector at a time; one that does not is
+built serially. Startup fails naming the variable when it is neither `auto` nor a byte
+count. Turn it on only as [below](#turning-in-memory-vector-builds-on).
+
+The status of a vector build (`get_index_operation`) reports its path in
+`vector_build_path`: `{"path": "bulk"}` for an in-memory build, or
+`{"path": "serial", "reason": "..."}` with why it is serial (`bulk_builds_disabled`,
+`over_memory_budget`, `too_few_vectors`, `tenant_partitioned`,
+`earlier_attempts_failed`, `bulk_attempt_failed`, `too_many_rows_changed`,
+`resumed_serial_scan`). `bulk` at stage
+`scan` is stored with
+the operation and reported by every server; every other value is known only to the
+server running the build and is absent after it restarts.
+
+While a build is on the in-memory path its status also carries `vector_bulk_build`:
+
+| Field | Meaning |
+| --- | --- |
+| `bulk_attempt`, `bulk_attempt_limit` | Which in-memory attempt this is, of three. Stored with the operation, so every server reports it. Not the operation's own `attempt`, which counts retried steps |
+| `phase` | What the attempt is doing, from the server running it: `waiting`, `reading`, `linking`, `writing` or `discarding` |
+| `waiting_for` | With `waiting`: `turn` while another build reads or links (one does at a time), `memory` while running in-memory builds hold what this one needs |
+| `members_read`, `members` | With `reading`: source rows read, of the label's members |
+| `vectors_linked`, `vectors` | With `linking`: vectors inserted into the graph, of those the read found |
+| `nodes_written`, `nodes`, `paused_for_write_buffer` | With `writing`: graph nodes stored, and whether the build is holding back because the write buffer is full, of its own rows or of other writes |
+| `rows_deleted` | With `discarding`: rows of an attempt that did not finish, deleted before the next one starts |
+
+The `progress` counters of the operation move only while the build writes. A build that
+waits takes no step until what it waits for is released, so it does not slow other
+vector index operations, and the server log says once what it waits for. The log also
+names each step of a build (`reserved its memory`, with the budget it was admitted
+under and what the rest of the server was taken to hold, `read its source`,
+`linked its graph`, `stored its graph`, with the rows it took out of the graph
+(`nodes_unlinked`), the time that took (`unlink_ms`) and its longest step
+(`longest_step_ms`), `deleting a partially written bulk vector graph`).
+
+An attempt that a restart interrupts is discarded and the build starts again, as the
+next attempt. Every attempt counts that ended without the build finishing its
+in-memory stage or leaving it: the server was killed, crashed, stopped, restarted for a
+deploy, or lost the writer role. After three, the build continues serially
+(`earlier_attempts_failed`). A read of the source that object storage fails for a
+moment is repeated in place, up to three times, and costs no attempt. A build that
+blocks first deletes what it wrote and returns to the serial stage, so a `blocked` build
+reports no `bulk` path, and its retry starts at attempt one. Discarding takes about
+three times as long as writing the same rows did (about 2,600 entities a second on S3)
+and reports `rows_deleted` meanwhile.
+
+An in-memory attempt that fails in a way a build one vector at a time cannot does not
+block the build and is not tried again: the server logs the failure as an error (`bulk
+vector build failed where a serial build may not`), deletes what the attempt wrote and
+builds the index serially at once (`bulk_attempt_failed`). Please report such a log
+line. An attempt that cannot start because object storage refuses the upload of its
+count goes the same way, with a warning that says so instead.
+
+A row that changes after an in-memory build read it is taken out of the graph before
+the graph is written, and indexed after the build like any write. Taking a row out
+costs about 4 ms at 128 dimensions and 21 ms at 1,536, against a fraction of a
+millisecond for a row that did not change, so a build is bounded twice. One step of it
+spends at most a quarter of a second on such rows before other index operations get
+their turn. And once it has taken a thousand rows out, a build stops its in-memory
+attempt if the rows it has not written yet would hold, at the share changed so far,
+more changed rows than an eighth of the index: it logs `source changed too much to
+finish in bulk`, deletes what it wrote and builds serially at once
+(`too_many_rows_changed`), which is then the faster way. A build with fewer changed
+rows than that finishes in memory and pays for each: a tenth of a million vectors of
+1,536 dimensions changed adds about 35 minutes.
+
+The automatic budget is measured against what the rest of the server holds when no
+in-memory build runs. Memory a build leaves resident after it ends is counted as the
+build's, so the next build gets the same budget. If the rest of the server grows while
+a build runs, the growth lowers later budgets as far as the server saw it. What it
+sees is memory beyond the larger of two amounts: the most the running builds reserved
+at once, and what earlier builds had left resident when they started. Growth below
+that, which can be the whole of the larger amount while the builds themselves hold
+little, is taken for memory the builds left and makes the next budget too large by as
+much, within the eighth of the memory limit the budget keeps free. Growth the server
+saw even for a moment keeps lowering budgets until that memory has been returned to
+the operating system.
+
+#### Turning in-memory vector builds on
+
+In-memory builds are off unless `HELIX_VECTOR_BULK_BUILD_MEMORY_BYTES` turns them on,
+because an image from before them (v0.0.18 and earlier) cannot read the stage they
+store. Such an image that opens the database as its writer while an in-memory build is
+in progress fails at startup (see below), and by opening it takes the writer role from
+the server that was running. That server stays up and answers every request, reads
+included, with `detected newer DB client` until it is restarted, and the restarted
+build has used one of its three attempts. So set the variable only once every server
+that can become the writer (a standby, the rest of a rollout, the target of an automatic
+rollback) runs an image that has in-memory builds. While the variable is unset this
+image stores nothing an earlier image cannot read.
+
+#### Rolling back during an in-memory vector build
+
+Images from before in-memory builds (v0.0.18 and earlier) do not know the stage such a
+build stores. While any operation reports stage `scan` with `vector_build_path` path
+`bulk`, they refuse to open the database as its writer: startup fails with
+`unknown V2 vector build stage discriminant 0x07` and the build stays as it is. A server
+reports the two for as long as they are what a restart would find, so once no operation
+reports them an earlier image can open the database, also after a kill. Before rolling
+back, do one of:
+
+- Let the build finish. Every stage after `scan` is readable by earlier images.
+- Restart the current image with `HELIX_VECTOR_BULK_BUILD_MEMORY_BYTES` unset or `0` and
+  poll the operation until `vector_build_path` no longer reports `bulk`. The server
+  deletes what the build wrote, at about 2,600 entities a second, and continues it
+  serially, which the earlier image can take over.
+- Abort it (`abort_index_operation`), wait until it reports `aborted`, and create the
+  index again afterwards. An earlier image can finish the abort itself. Under either
+  image an abort deletes what the build wrote far more slowly than the way above: 46 to
+  60 minutes for a fifth of a million-vector index, and more than in proportion for
+  more.
+
+A `blocked` build needs none of these: it left the in-memory path before it blocked.
+The one exception still reports `bulk` while blocked, a build whose written rows could
+not be deleted: abort it.
+
 ### Benchmark images
 
 `docker-image/build.sh --async-index-benchmark` builds a separate benchmark

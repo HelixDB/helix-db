@@ -27,8 +27,9 @@ use super::tests::{
 use super::text_publication_tests::{distinct_terms, tight_publication_config};
 use super::QueueTarget;
 use crate::config::{
-    DbConfig, IndexOperationQueueTuning, QueueLayout, SearchIndexBackfillLimits,
-    SearchIndexBatchLimits, TextIndexDefinition,
+    DbConfig, IndexLifecycleThroughputTuning, IndexOperationQueueTuning, QueueLayout,
+    SearchIndexBackfillLimits, SearchIndexBatchLimits, TextIndexDefinition, VectorBulkBuildMemory,
+    VectorBulkBuildTuning,
 };
 use crate::encoding::v2::keys::indexes::vector::VectorKey;
 use crate::encoding::v2::keys::scope::DataScope;
@@ -36,9 +37,10 @@ use crate::encoding::v2::keys::{DataKey, DataKeyKind, IndexEntity};
 use crate::encoding::v2::values::indexes::operation_queue::{QueueFamily, QueuedOperationId};
 use crate::index_lifecycle::outbox::step_pause::{self, StepPause};
 use crate::index_lifecycle::{
-    IndexElementKind, IndexEntityId, IndexGenerationPublicationPermit, IndexOperationProgress,
-    SourceScanProgress, TextBuildProgress, TextBuildStage, ValidatedDynamicIndexDefinition,
-    VectorBuildProgress, VectorBuildStage,
+    IndexElementKind, IndexEntityId, IndexGenerationPublicationPermit, IndexOperationId,
+    IndexOperationProgress, SourceScanProgress, TextBuildProgress, TextBuildStage,
+    ValidatedDynamicIndexDefinition, VectorBuildPath, VectorBuildProgress, VectorBuildStage,
+    VectorSerialBuildReason,
 };
 use crate::HelixDB;
 
@@ -188,8 +190,9 @@ pub(super) async fn create_held(
 /// with ownership held so no further step runs.
 ///
 /// Ownership is a fair lock: it is handed over only once the build queues
-/// for it, and taken back by queueing right behind the build, so exactly one
-/// step runs per handoff however fast steps are.
+/// for it, and this task queues for it again before it hands it over, so
+/// exactly one step runs per handoff however fast steps are and however long
+/// this task is descheduled.
 pub(super) async fn pause_when(
     db: &HelixDB,
     operation: &str,
@@ -198,12 +201,8 @@ pub(super) async fn pause_when(
 ) -> IndexGenerationPublicationPermit {
     let deadline = Instant::now() + Duration::from_secs(60);
     let target = held.target();
-    let mut held = Some(held);
+    let mut permit = held;
     loop {
-        let permit = match held.take() {
-            Some(permit) => permit,
-            None => db.inner.index_scope_gates.publication_permit(target).await,
-        };
         let current = status(db, operation).await;
         if ready(&current) {
             return permit;
@@ -224,7 +223,15 @@ pub(super) async fn pause_when(
             );
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
+        // Queued behind the build's step before the handoff: a request made
+        // only after it could lose to the build's next step.
+        let mut next = Box::pin(db.inner.index_scope_gates.publication_permit(target));
+        assert!(
+            futures::poll!(next.as_mut()).is_pending(),
+            "ownership is held until it is handed over"
+        );
         drop(permit);
+        permit = next.await;
     }
 }
 
@@ -411,6 +418,649 @@ async fn restart_during_a_build_and_after_activation_recovers_queued_operations(
     assert_exact_vectors(&db, &state, SearchConsistency::Strong).await;
     drain(&db, target).await;
     assert_exact_vectors(&db, &state, SearchConsistency::Eventual).await;
+    db.close().await.unwrap();
+}
+
+/// A [`pause_when`] condition that holds once `steps` steps have stored
+/// rows since it first saw the build. `pause_when` lets the build run one
+/// step between two looks, and a step of a bulk build's write pass stores the
+/// next four source entities (see [`config`]). The steps before the write
+/// pass, which count the attempt and wait for it to read and link, store no
+/// row and move no counter.
+fn after_write_steps(steps: usize) -> impl Fn(&serde_json::Value) -> bool {
+    let seen = std::cell::Cell::new((None::<u64>, 0_usize));
+    move |status| {
+        let operations = status["progress"]["output_operations"]
+            .as_str()
+            .and_then(|operations| operations.parse::<u64>().ok())
+            .unwrap_or_else(|| panic!("status reports progress: {status}"));
+        let (last, stored) = seen.get();
+        let stored = stored + usize::from(last.is_some_and(|last| operations > last));
+        seen.set((Some(operations), stored));
+        stored >= steps
+    }
+}
+
+/// [`config`] with a bulk build of every unpartitioned vector source.
+fn bulk_config() -> DbConfig {
+    config().with_index_lifecycle_throughput_tuning(
+        IndexLifecycleThroughputTuning::default().with_vector_bulk_build(
+            VectorBulkBuildTuning::try_new(
+                2,
+                VectorBulkBuildMemory::Bytes(NonZeroU64::new(8 << 30).unwrap()),
+                1,
+            )
+            .unwrap(),
+        ),
+    )
+}
+
+/// [`vector_spec`] without its tenant property, the layout bulk builds take.
+fn unpartitioned_vector_spec() -> IndexSpec {
+    IndexSpec::node_vector(
+        "Doc",
+        "embedding",
+        NonZeroUsize::new(2).unwrap(),
+        VectorDistanceMetric::Euclidean,
+        None::<&str>,
+    )
+}
+
+fn typed_operation_id(operation: &str) -> IndexOperationId {
+    IndexOperationId::new(uuid::Uuid::parse_str(operation).unwrap()).unwrap()
+}
+
+/// Build path this process recorded for `operation`.
+async fn build_path(db: &HelixDB, operation: &str) -> Option<VectorBuildPath> {
+    db.get_index_operation(DataScope::LegacyUnscoped, typed_operation_id(operation))
+        .await
+        .unwrap()
+        .common()
+        .vector_build_path
+}
+
+/// Asserts searches of the unpartitioned index equal exact search over every
+/// document of `state`, whatever its tenant.
+async fn assert_exact_unpartitioned(
+    db: &HelixDB,
+    state: &VectorState,
+    consistency: SearchConsistency,
+) {
+    for query in [[3.31_f32, 2.77], [9.4, 0.6], [20.2, 3.1], [0.2, 10.8]] {
+        let mut exact = state
+            .iter()
+            .map(|(id, (_, vector))| {
+                let distance = (vector[0] - query[0]).powi(2) + (vector[1] - query[1]).powi(2);
+                (distance, *id)
+            })
+            .collect::<Vec<_>>();
+        exact.sort_by(|left, right| left.partial_cmp(right).unwrap());
+        let expected = exact.iter().take(8).map(|(_, id)| *id).collect::<Vec<_>>();
+        let found = vector_search(db, query, 8, None, consistency)
+            .await
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            found, expected,
+            "query {query:?} with {consistency:?} search"
+        );
+    }
+}
+
+/// A bulk build linked its graph from the source as the first step read it.
+/// Updates, deletes and inserts committed while its write pass is paused, on
+/// entities the pass has stored and on entities it has not reached, leave
+/// searches exact before and after their queued operations publish: a changed
+/// entity the pass had not reached is left out of the stored graph and
+/// indexed by its queued operation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bulk_vector_build_with_concurrent_writes_matches_exact_search_through_publication() {
+    let db = open(
+        "bulk-build-vector",
+        Arc::new(InMemory::new()),
+        bulk_config(),
+    )
+    .await;
+    let (ids, mut state) = seed_vectors(&db, 120).await;
+    let (operation, target, held) =
+        create_held(&db, unpartitioned_vector_spec(), QueueFamily::Vector, 1).await;
+
+    // Forty entities are stored, eighty are not.
+    let paused = pause_when(&db, &operation, held, after_write_steps(10)).await;
+    let mid_write = status(&db, &operation).await;
+    assert_eq!(mid_write["stage"], "scan", "paused mid-write");
+    assert_eq!(
+        scanned(&mid_write),
+        40,
+        "the write pass counts what it stored"
+    );
+    // The stored stage says so, to this process and to any other.
+    assert_eq!(
+        mid_write["vector_build_path"],
+        serde_json::json!({"path": "bulk"})
+    );
+    assert_eq!(
+        build_path(&db, &operation).await,
+        Some(VectorBuildPath::Bulk)
+    );
+    // And what its first attempt is doing, from the process that runs it.
+    assert_eq!(
+        mid_write["vector_bulk_build"],
+        serde_json::json!({
+            "bulk_attempt": 1,
+            "bulk_attempt_limit": 3,
+            "phase": "writing",
+            "nodes_written": "40",
+            "nodes": "120",
+            "paused_for_write_buffer": false,
+        })
+    );
+    // A status of this process checks the record a restart would find for
+    // as long as its steps find the build at the bulk stage.
+    let reports = &db.inner.vector_build_reports;
+    assert!(reports
+        .bulk_stage_sightings(typed_operation_id(&operation))
+        .is_some());
+    concurrent_vector_writes(&db, &ids, &mut state, 0).await;
+    drop(paused);
+
+    // Past the entities the first round changed, short of the last.
+    let paused = pause_when(
+        &db,
+        &operation,
+        db.inner.index_scope_gates.publication_permit(target).await,
+        after_write_steps(12),
+    )
+    .await;
+    assert_eq!(status(&db, &operation).await["stage"], "scan");
+    concurrent_vector_writes(&db, &ids, &mut state, 1).await;
+    drop(paused);
+
+    assert_eq!(wait_terminal(&db, &operation).await, "succeeded");
+    assert_eq!(
+        build_path(&db, &operation).await,
+        Some(VectorBuildPath::Bulk)
+    );
+    assert!(status(&db, &operation)
+        .await
+        .get("vector_bulk_build")
+        .is_none());
+    // The finished build was uploaded with its last step, so the status
+    // just read found the two records the same: no later status of it
+    // reads the durable one.
+    assert_eq!(
+        reports.bulk_stage_sightings(typed_operation_id(&operation)),
+        None
+    );
+    assert!(
+        queue(&db, QueueFamily::Vector).await.is_some(),
+        "build-time operations stay queued until published"
+    );
+    assert_exact_unpartitioned(&db, &state, SearchConsistency::Strong).await;
+
+    drain(&db, target).await;
+    assert!(queue(&db, QueueFamily::Vector).await.is_none());
+    assert_exact_unpartitioned(&db, &state, SearchConsistency::Strong).await;
+    assert_exact_unpartitioned(&db, &state, SearchConsistency::Eventual).await;
+    db.close().await.unwrap();
+}
+
+/// A database closed during a bulk build's write pass and reopened finishes
+/// the build without the graph the closed process held, and serves the
+/// build-time writes from the reloaded queue.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restart_during_a_bulk_build_finishes_it_and_recovers_queued_operations() {
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let db = open("bulk-build-restart", Arc::clone(&store), bulk_config()).await;
+    let (ids, mut state) = seed_vectors(&db, 120).await;
+    let (operation, target, held) =
+        create_held(&db, unpartitioned_vector_spec(), QueueFamily::Vector, 1).await;
+    let paused = pause_when(&db, &operation, held, after_write_steps(10)).await;
+    concurrent_vector_writes(&db, &ids, &mut state, 0).await;
+    drop(paused);
+    db.close().await.unwrap();
+
+    let db = open("bulk-build-restart", Arc::clone(&store), bulk_config()).await;
+    assert_eq!(wait_terminal(&db, &operation).await, "succeeded");
+    db.close().await.unwrap();
+
+    let db = open("bulk-build-restart", Arc::clone(&store), bulk_config()).await;
+    assert_exact_unpartitioned(&db, &state, SearchConsistency::Strong).await;
+    drain(&db, target).await;
+    assert_exact_unpartitioned(&db, &state, SearchConsistency::Eventual).await;
+    db.close().await.unwrap();
+}
+
+/// A status never says a build has left its bulk stage before a restart
+/// would agree. With the WAL uploads held, the build's steps leave the stage
+/// in what this process applied, and every status goes on reporting the
+/// stage a restart would find, however often it is asked: the durable record
+/// is read for as long as it can lag. Once the uploads land and a status has
+/// found the two records the same, no later status reads the durable one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_status_reports_the_bulk_stage_until_leaving_it_is_durable() {
+    use crate::search::vector::gated_wal::{GatedWalStore, WalUploads};
+    const BOUND: Duration = Duration::from_secs(60);
+
+    let store = Arc::new(GatedWalStore::new());
+    let db = open(
+        "bulk-build-durable-status",
+        Arc::clone(&store) as Arc<dyn ObjectStore>,
+        bulk_config(),
+    )
+    .await;
+    seed_vectors(&db, 120).await;
+    let (operation, _, held) =
+        create_held(&db, unpartitioned_vector_spec(), QueueFamily::Vector, 1).await;
+    let paused = pause_when(&db, &operation, held, after_write_steps(10)).await;
+    tokio::time::timeout(BOUND, db.inner_db().flush())
+        .await
+        .expect("the paused build flushes")
+        .unwrap();
+    let id = typed_operation_id(&operation);
+    let reports = &db.inner.vector_build_reports;
+    assert!(reports.bulk_stage_sightings(id).is_some());
+    // The applied and the durable record are the same one, at the bulk
+    // stage: a status that finds them so goes on remembering the build.
+    // Only records that agree off the stage end the durable reads.
+    assert_eq!(status(&db, &operation).await["stage"], "scan");
+    assert!(reports.bulk_stage_sightings(id).is_some());
+    // Nothing after this uploads: the steps that leave the bulk stage are
+    // applied and not durable.
+    store.uploads.send_replace(WalUploads::Held);
+    drop(paused);
+    let applied_left = async || {
+        let snapshot = db.inner_db().snapshot().await.unwrap();
+        let applied = crate::index_lifecycle::outbox::read_operation(
+            snapshot.as_ref(),
+            DataScope::LegacyUnscoped,
+            id,
+        )
+        .await
+        .unwrap()
+        .expect("the operation exists");
+        !crate::index_lifecycle::at_bulk_stage(&applied)
+    };
+    let deadline = Instant::now() + BOUND;
+    while !applied_left().await {
+        assert!(
+            Instant::now() < deadline,
+            "the write pass ends without its upload"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    for _ in 0..3 {
+        let reported = status(&db, &operation).await;
+        assert_eq!(reported["stage"], "scan");
+        assert_eq!(
+            reported["vector_build_path"],
+            serde_json::json!({"path": "bulk"})
+        );
+        assert!(reports.bulk_stage_sightings(id).is_some());
+    }
+
+    store.uploads.send_replace(WalUploads::Open);
+    assert_eq!(wait_terminal(&db, &operation).await, "succeeded");
+    status(&db, &operation).await;
+    assert_eq!(reports.bulk_stage_sightings(id), None);
+    db.close().await.unwrap();
+}
+
+/// A status that began before the worker's first step at the bulk stage, and
+/// reads the records after a step has taken the build off it, still reports
+/// the stage a restart would find. It counts the steps that found the build
+/// at the stage a second time, behind the applied record: decided on its
+/// first look, it would skip the durable record and say the stage is gone
+/// while storage holds it, which is when an operator would start an older
+/// release that cannot open the store.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_status_that_began_before_a_step_left_the_bulk_stage_reports_it() {
+    use crate::index_lifecycle::vector::StatusGate;
+    use crate::search::vector::gated_wal::{GatedWalStore, WalUploads};
+    const BOUND: Duration = Duration::from_secs(60);
+
+    let store = Arc::new(GatedWalStore::new());
+    let db = Arc::new(
+        open(
+            "bulk-build-status-began-early",
+            Arc::clone(&store) as Arc<dyn ObjectStore>,
+            bulk_config(),
+        )
+        .await,
+    );
+    seed_vectors(&db, 120).await;
+    let (operation, _, held) =
+        create_held(&db, unpartitioned_vector_spec(), QueueFamily::Vector, 1).await;
+    let paused = pause_when(&db, &operation, held, after_write_steps(10)).await;
+    tokio::time::timeout(BOUND, db.inner_db().flush())
+        .await
+        .expect("the paused build flushes")
+        .unwrap();
+    let id = typed_operation_id(&operation);
+    // As in a writer that has not stepped the build yet: nothing remembers
+    // that it stands at the bulk stage.
+    let reports = &db.inner.vector_build_reports;
+    let sightings = reports
+        .bulk_stage_sightings(id)
+        .expect("the build was stepped at the bulk stage");
+    reports.durably_left_bulk_stage(id, sightings);
+    assert_eq!(reports.bulk_stage_sightings(id), None);
+
+    // A status takes its first look at the sightings and stops there.
+    let gate = Arc::new(StatusGate {
+        arrived: tokio::sync::Semaphore::new(0),
+        open: tokio::sync::Semaphore::new(0),
+    });
+    *reports.status_gate.lock() = Some(Arc::clone(&gate));
+    let reported = tokio::spawn({
+        let (db, operation) = (Arc::clone(&db), operation.clone());
+        async move { status(&db, &operation).await }
+    });
+    tokio::time::timeout(BOUND, gate.arrived.acquire())
+        .await
+        .expect("the status reaches its first look")
+        .unwrap()
+        .forget();
+
+    // Meanwhile the build's steps leave the bulk stage, and none uploads.
+    store.uploads.send_replace(WalUploads::Held);
+    drop(paused);
+    let applied_left = async || {
+        let snapshot = db.inner_db().snapshot().await.unwrap();
+        let applied = crate::index_lifecycle::outbox::read_operation(
+            snapshot.as_ref(),
+            DataScope::LegacyUnscoped,
+            id,
+        )
+        .await
+        .unwrap()
+        .expect("the operation exists");
+        !crate::index_lifecycle::at_bulk_stage(&applied)
+    };
+    let deadline = Instant::now() + BOUND;
+    while !applied_left().await {
+        assert!(
+            Instant::now() < deadline,
+            "the write pass ends without its upload"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // The status reads the records now, and reports what is stored.
+    gate.open.add_permits(1);
+    let reported = tokio::time::timeout(BOUND, reported)
+        .await
+        .expect("the status ends")
+        .unwrap();
+    assert_eq!(reported["stage"], "scan", "{reported}");
+    assert_eq!(
+        reported["vector_build_path"],
+        serde_json::json!({"path": "bulk"})
+    );
+
+    *reports.status_gate.lock() = None;
+    store.uploads.send_replace(WalUploads::Open);
+    assert_eq!(wait_terminal(&db, &operation).await, "succeeded");
+    status(&db, &operation).await;
+    assert_eq!(reports.bulk_stage_sightings(id), None);
+    db.close().await.unwrap();
+}
+
+/// An abort takes a build off its bulk stage without a step of the process
+/// that runs it, so a writer that never stepped the build there can be ahead
+/// of storage too. While the abort is applied and its upload is held, every
+/// status is still the bulk stage a restart would find; once the upload
+/// lands the status says the build aborts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_status_reports_the_bulk_stage_until_an_abort_is_durable() {
+    use crate::search::vector::gated_wal::{GatedWalStore, WalUploads};
+    const BOUND: Duration = Duration::from_secs(60);
+
+    let store = Arc::new(GatedWalStore::new());
+    let db = Arc::new(
+        open(
+            "bulk-build-abort-status",
+            Arc::clone(&store) as Arc<dyn ObjectStore>,
+            bulk_config(),
+        )
+        .await,
+    );
+    seed_vectors(&db, 120).await;
+    let (operation, _, held) =
+        create_held(&db, unpartitioned_vector_spec(), QueueFamily::Vector, 1).await;
+    let paused = pause_when(&db, &operation, held, after_write_steps(10)).await;
+    tokio::time::timeout(BOUND, db.inner_db().flush())
+        .await
+        .expect("the paused build flushes")
+        .unwrap();
+    let id = typed_operation_id(&operation);
+    // As in a writer that has not stepped the build: nothing remembers that
+    // it stood at the bulk stage.
+    let reports = &db.inner.vector_build_reports;
+    let sightings = reports
+        .bulk_stage_sightings(id)
+        .expect("the build was stepped at the bulk stage");
+    reports.durably_left_bulk_stage(id, sightings);
+    assert_eq!(reports.bulk_stage_sightings(id), None);
+
+    // The abort is applied, and nothing after this uploads.
+    store.uploads.send_replace(WalUploads::Held);
+    let aborting = tokio::spawn({
+        let db = Arc::clone(&db);
+        async move {
+            db.abort_index_operation(DataScope::LegacyUnscoped, id)
+                .await
+        }
+    });
+    let applied_aborts = async || {
+        let snapshot = db.inner_db().snapshot().await.unwrap();
+        let applied = crate::index_lifecycle::outbox::read_operation(
+            snapshot.as_ref(),
+            DataScope::LegacyUnscoped,
+            id,
+        )
+        .await
+        .unwrap()
+        .expect("the operation exists");
+        crate::index_lifecycle::is_aborting_vector_build(&applied)
+    };
+    let deadline = Instant::now() + BOUND;
+    while !applied_aborts().await {
+        assert!(Instant::now() < deadline, "the abort is applied");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    for _ in 0..3 {
+        let reported = status(&db, &operation).await;
+        assert_eq!(reported["stage"], "scan", "{reported}");
+        assert_eq!(
+            reported["vector_build_path"],
+            serde_json::json!({"path": "bulk"})
+        );
+        assert_eq!(reports.bulk_stage_sightings(id), None);
+    }
+
+    store.uploads.send_replace(WalUploads::Open);
+    tokio::time::timeout(BOUND, aborting)
+        .await
+        .expect("the abort ends once its upload lands")
+        .unwrap()
+        .unwrap();
+    drop(paused);
+    assert_eq!(wait_terminal(&db, &operation).await, "aborted");
+    db.close().await.unwrap();
+}
+
+/// A crash that loses the WAL tail of a bulk build's write pass leaves the
+/// durable rows of a partly written graph under a durable cursor and the
+/// bulk stage. The recovered build deletes them, links the source again as
+/// its second attempt, counts its entities once, and equals exact search
+/// once its queue drains.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bulk_build_that_loses_its_wal_tail_discards_its_rows_and_builds_again() {
+    use crate::search::vector::gated_wal::{GatedWalStore, WalUploads};
+    const NAME: &str = "bulk-build-lost-wal-tail";
+    const BOUND: Duration = Duration::from_secs(60);
+
+    let store = Arc::new(GatedWalStore::new());
+    let db = open(
+        NAME,
+        Arc::clone(&store) as Arc<dyn ObjectStore>,
+        bulk_config(),
+    )
+    .await;
+    let (ids, mut state) = seed_vectors(&db, 120).await;
+    let (operation, target, held) =
+        create_held(&db, unpartitioned_vector_spec(), QueueFamily::Vector, 1).await;
+    let paused = pause_when(&db, &operation, held, after_write_steps(10)).await;
+    concurrent_vector_writes(&db, &ids, &mut state, 0).await;
+    // Everything so far is durable, and nothing after it ever uploads.
+    tokio::time::timeout(BOUND, db.inner_db().flush())
+        .await
+        .expect("the paused build flushes")
+        .unwrap();
+    let id = typed_operation_id(&operation);
+    let progress = async |db: &HelixDB| {
+        db.get_index_operation(DataScope::LegacyUnscoped, id)
+            .await
+            .unwrap()
+            .common()
+            .progress
+    };
+    let durable = progress(&db).await;
+    assert_eq!(
+        status(&db, &operation).await["stage"],
+        "scan",
+        "the crash interrupts the write pass"
+    );
+    store.uploads.send_replace(WalUploads::Held);
+    drop(paused);
+    let deadline = Instant::now() + BOUND;
+    while progress(&db).await == durable {
+        assert!(
+            Instant::now() < deadline,
+            "the write pass advanced without its WAL upload"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // The crash: the old writer never uploads again.
+    drop(db);
+
+    let db = tokio::time::timeout(
+        BOUND,
+        open(
+            NAME,
+            Arc::new(store.restarted()) as Arc<dyn ObjectStore>,
+            bulk_config(),
+        ),
+    )
+    .await
+    .expect("a new writer opens over the crashed one");
+    assert_eq!(wait_terminal(&db, &operation).await, "succeeded");
+    assert_eq!(
+        build_path(&db, &operation).await,
+        Some(VectorBuildPath::Bulk)
+    );
+    // The recovered build read every source row again, and the counter
+    // holds what its own write pass stored, nothing of the attempt that
+    // died: the source held 120 rows when the first pass read it, and two
+    // deletes and two inserts later it holds as many.
+    assert_eq!(state.len(), 120);
+    assert_eq!(scanned(&status(&db, &operation).await), 120);
+    assert_exact_unpartitioned(&db, &state, SearchConsistency::Strong).await;
+    drain(&db, target).await;
+    assert_exact_unpartitioned(&db, &state, SearchConsistency::Strong).await;
+    assert_exact_unpartitioned(&db, &state, SearchConsistency::Eventual).await;
+    db.close().await.unwrap();
+}
+
+/// A database closed during a bulk build's write pass and reopened with bulk
+/// builds off takes the build off the bulk path: the stored bulk stage is
+/// reported until the partly written graph is deleted, then the build scans
+/// serially and says why, and searches equal exact search.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reopening_with_bulk_builds_off_finishes_a_bulk_build_serially() {
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let db = open("bulk-build-turned-off", Arc::clone(&store), bulk_config()).await;
+    let (ids, mut state) = seed_vectors(&db, 120).await;
+    let (operation, target, held) =
+        create_held(&db, unpartitioned_vector_spec(), QueueFamily::Vector, 1).await;
+    let paused = pause_when(&db, &operation, held, after_write_steps(10)).await;
+    concurrent_vector_writes(&db, &ids, &mut state, 0).await;
+    drop(paused);
+    db.close().await.unwrap();
+
+    let off = config().with_index_lifecycle_throughput_tuning(
+        IndexLifecycleThroughputTuning::default()
+            .with_vector_bulk_build(VectorBulkBuildTuning::disabled()),
+    );
+    let db = open("bulk-build-turned-off", Arc::clone(&store), off).await;
+    assert_eq!(wait_terminal(&db, &operation).await, "succeeded");
+    assert_eq!(
+        build_path(&db, &operation).await,
+        Some(VectorBuildPath::Serial(
+            VectorSerialBuildReason::BulkBuildsDisabled
+        ))
+    );
+    assert_eq!(scanned(&status(&db, &operation).await), 120);
+    assert_exact_unpartitioned(&db, &state, SearchConsistency::Strong).await;
+    drain(&db, target).await;
+    assert_exact_unpartitioned(&db, &state, SearchConsistency::Eventual).await;
+    db.close().await.unwrap();
+}
+
+/// Four writers update, delete and insert documents for as long as an
+/// unpaused bulk build runs, so writes commit between pass 1 and every step
+/// of the write pass. The build activates, and searches equal exact search
+/// before and after the queue drains.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bulk_build_under_continuous_writes_matches_exact_search() {
+    let db = open(
+        "bulk-build-continuous-writes",
+        Arc::new(InMemory::new()),
+        bulk_config(),
+    )
+    .await;
+    let mut shards = Vec::new();
+    for writer in 0..WRITERS {
+        let mut shard = Documents::default();
+        shard
+            .add(&db, (writer * 30..(writer + 1) * 30).map(seeded).collect())
+            .await;
+        shards.push(shard);
+    }
+    let operation = create(&db, unpartitioned_vector_spec()).await;
+    let building = AtomicBool::new(true);
+    let serial = AtomicU64::new(0);
+    let (outcome, writes) = tokio::join!(
+        async {
+            let outcome = wait_terminal(&db, &operation).await;
+            building.store(false, Ordering::SeqCst);
+            outcome
+        },
+        futures::future::join_all(
+            shards
+                .iter_mut()
+                .map(|shard| shard.write_while(&db, &building, &serial)),
+        ),
+    );
+    assert_eq!(outcome, "succeeded");
+    assert!(
+        writes.iter().all(|count| *count > 0),
+        "every writer ran during the build: {writes:?}"
+    );
+    assert_eq!(
+        build_path(&db, &operation).await,
+        Some(VectorBuildPath::Bulk)
+    );
+    let state = shards
+        .into_iter()
+        .flat_map(|shard| shard.vectors)
+        .collect::<VectorState>();
+    assert_exact_unpartitioned(&db, &state, SearchConsistency::Strong).await;
+    drain(&db, target(&db, QueueFamily::Vector).await).await;
+    assert_exact_unpartitioned(&db, &state, SearchConsistency::Strong).await;
+    assert_exact_unpartitioned(&db, &state, SearchConsistency::Eventual).await;
     db.close().await.unwrap();
 }
 
