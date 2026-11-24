@@ -220,7 +220,10 @@ async fn a_reader_server_stays_ready_when_its_writer_is_fenced() {
         .unwrap();
     old.query(QueryRequest::write(
         batch::write_batch()
-            .var_as("created", traversal::g().add_n("Doc", Vec::<(&str, i64)>::new()))
+            .var_as(
+                "created",
+                traversal::g().add_n("Doc", Vec::<(&str, i64)>::new()),
+            )
             .returning(["created"]),
     ))
     .await
@@ -238,7 +241,10 @@ async fn a_reader_server_stays_ready_when_its_writer_is_fenced() {
         .unwrap();
     let fenced = Instant::now();
     while old.storage_state() != StorageState::Fenced {
-        assert!(fenced.elapsed() < DETECTION_BOUND, "the old writer is fenced");
+        assert!(
+            fenced.elapsed() < DETECTION_BOUND,
+            "the old writer is fenced"
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 

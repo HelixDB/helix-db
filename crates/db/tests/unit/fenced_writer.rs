@@ -115,7 +115,9 @@ async fn an_idle_fenced_writer_reports_it_and_stops_its_background_work() {
     let old = HelixDB::open_with_object_store("fenced-idle-writer", Arc::clone(&object_store))
         .await
         .expect("first writer opens");
-    old.query(add_document("before")).await.expect("first writer writes");
+    old.query(add_document("before"))
+        .await
+        .expect("first writer writes");
     assert_eq!(old.storage_state(), StorageState::Open);
     let running = background_tasks_running(&old).await;
     assert!(
@@ -149,11 +151,18 @@ async fn an_idle_fenced_writer_reports_it_and_stops_its_background_work() {
     }
 
     assert_eq!(new.storage_state(), StorageState::Open);
-    new.query(add_document("after")).await.expect("newer writer writes");
-    let count = new.query(count_documents()).await.expect("newer writer reads");
+    new.query(add_document("after"))
+        .await
+        .expect("newer writer writes");
+    let count = new
+        .query(count_documents())
+        .await
+        .expect("newer writer reads");
     assert_eq!(count["count"], 2);
 
-    old.close().await.expect("a fenced writer closes without flushing");
+    old.close()
+        .await
+        .expect("a fenced writer closes without flushing");
     assert_eq!(
         old.storage_state(),
         StorageState::Fenced,
@@ -171,7 +180,9 @@ async fn a_busy_fenced_writer_fails_its_next_write_with_the_typed_code() {
     let old = HelixDB::open_with_object_store("fenced-busy-writer", Arc::clone(&object_store))
         .await
         .expect("first writer opens");
-    old.query(add_document("before")).await.expect("first writer writes");
+    old.query(add_document("before"))
+        .await
+        .expect("first writer writes");
     let new = HelixDB::open_with_object_store("fenced-busy-writer", Arc::clone(&object_store))
         .await
         .expect("second writer opens and fences the first");
@@ -206,7 +217,9 @@ async fn a_reader_is_unaffected_when_its_writer_is_fenced() {
     let old = HelixDB::open_with_object_store("fenced-writer-reader", Arc::clone(&object_store))
         .await
         .expect("first writer opens");
-    old.query(add_document("before")).await.expect("first writer writes");
+    old.query(add_document("before"))
+        .await
+        .expect("first writer writes");
     old.flush_writer().await.expect("first writer flushes");
     let reader =
         HelixDB::open_reader_with_object_store("fenced-writer-reader", Arc::clone(&object_store))
@@ -220,7 +233,9 @@ async fn a_reader_is_unaffected_when_its_writer_is_fenced() {
         old.storage_state() == StorageState::Fenced
     })
     .await;
-    new.query(add_document("after")).await.expect("newer writer writes");
+    new.query(add_document("after"))
+        .await
+        .expect("newer writer writes");
     new.flush_writer().await.expect("newer writer flushes");
 
     eventually("the reader sees the newer writer's commit", async || {
