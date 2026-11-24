@@ -34,9 +34,11 @@
 //! A source with fewer vectors than a bulk build is started for is built
 //! serially. A label with fewer members than that is one, without reading a
 //! row; otherwise the rows of its first members are read, eight for each of
-//! those vectors, before the build waits for anything, so a small build never
-//! queues behind a large one; a source those rows do not settle is read by
-//! pass 1, which counts. One in which pass 1 finds no vector has no graph:
+//! those vectors and no more than one run of pass 1 reads
+//! ([`READ_RUN_BYTES`]), before the build waits for anything, so a small
+//! build never queues behind a large one and the step that reads them holds
+//! the lane for one bounded read; a source those rows do not settle is read
+//! by pass 1, which counts. One in which pass 1 finds no vector has no graph:
 //! the step that collects the pass ends the scan, as a serial scan of the
 //! same rows would.
 //!
@@ -3051,6 +3053,8 @@ struct TestFaults {
     row_read: std::sync::atomic::AtomicUsize,
     /// Pass-3 steps that panic before they read.
     write_panics: std::sync::atomic::AtomicUsize,
+    /// Runs read, by the probe and by pass 1.
+    runs: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(test)]
@@ -3066,6 +3070,7 @@ impl TestFaults {
 
     /// Waits for the run's permit, then fails the run if a fault is set.
     async fn before_read(&self) -> Result<()> {
+        self.runs.fetch_add(1, Ordering::Relaxed);
         let gate = self.read_gate.lock().clone();
         match gate {
             None => {}
@@ -3129,16 +3134,19 @@ impl Source {
     ///
     /// Reads the rows of at most [`PROBE_ROWS_PER_VECTOR`] members for each
     /// of the vectors, so a small source is read whole and a large one is
-    /// not. `false` also when those rows gave no answer, or one of them is a
+    /// not, and no more than [`ReadRun::bytes`] of them in all, what one run
+    /// of pass 1 reads: the probe runs on a lifecycle step, which holds the
+    /// operation's claim and its lane, so it reads that much and one read
+    /// more whatever the threshold is set to and however large the rows
+    /// are. `false` also when those rows gave no answer, or one of them is a
     /// row the scan would block on, which the read pass reports.
     async fn holds_fewer_vectors_than(&self, min_vectors: u64) -> Result<bool> {
         let probed = min_vectors.saturating_mul(PROBE_ROWS_PER_VECTOR);
         let whole = self.members.len() <= probed;
         // A run is read whole before its first row is looked at, so the
-        // probe's runs take no more ids than the answer needs vectors. The
-        // probe runs on a lifecycle step, which holds the operation's claim
-        // and its lane: a run that fails is not read again here, with a
-        // wait, but by the step the outbox offers after it.
+        // probe's runs take no more ids than the answer needs vectors. A run
+        // that fails is not read again here, with a wait, but by the step
+        // the outbox offers after it.
         let mut rows = SourceRows::new(
             self,
             self.members
@@ -3146,6 +3154,7 @@ impl Source {
                 .take(usize::try_from(probed).unwrap_or(usize::MAX))
                 .collect(),
             usize::try_from(min_vectors).unwrap_or(usize::MAX),
+            self.read_run.bytes,
             0,
         );
         let mut scratch = view::Scratch::new();
@@ -3153,7 +3162,8 @@ impl Source {
         // Imperative: the read ends at the first answer.
         loop {
             let Some(row) = rows.next().await? else {
-                return Ok(whole);
+                // The rows ended, or the bytes the probe may read did.
+                return Ok(whole && rows.left.is_empty());
             };
             if row.key.len().saturating_add(row.value.len()) as u64 > self.max_input_bytes {
                 return Ok(false);
@@ -3188,13 +3198,13 @@ impl Source {
     /// under a snapshot opened here and dropped before this returns, as a
     /// step of the serial scan reads its own ([`LabelSource::over`]): by one
     /// scan where the ids are dense in their key range, and by point reads
-    /// otherwise, until [`ReadRun::bytes`] are read. `more` says whether the
-    /// source holds ids after them.
+    /// otherwise, until `bytes` are read. `more` says whether the source
+    /// holds ids after them.
     ///
     /// Runs are therefore read at different moments. A row may be newer than
     /// the member set: its node is stored only if pass 3 still finds the
     /// vector this read (see "Source changes" in the module documentation).
-    async fn read(&self, taken: Vec<u64>, more: bool) -> Result<Run> {
+    async fn read(&self, taken: Vec<u64>, more: bool, bytes: u64) -> Result<Run> {
         #[cfg(test)]
         self.faults.before_read().await?;
         let snapshot = self.db.begin(IsolationLevel::Snapshot).await?;
@@ -3205,7 +3215,7 @@ impl Source {
             taken,
             more,
             label_source::ReadBounds {
-                input_bytes: self.read_run.bytes,
+                input_bytes: bytes,
                 point_chunk_ids: std::num::NonZeroUsize::new(READ_POINT_IDS)
                     .expect("a point read fetches a row"),
             },
@@ -3276,6 +3286,9 @@ struct SourceRows<'a> {
     left: roaring::RoaringTreemap,
     /// Most ids a run takes.
     run_ids: usize,
+    /// Row bytes the runs may still read together: the read ends, with ids
+    /// left, once they are spent.
+    bytes: u64,
     /// Times a failed run is read again in place.
     retries: u32,
     /// Rows of the last run not handed out yet.
@@ -3283,23 +3296,31 @@ struct SourceRows<'a> {
 }
 
 impl<'a> SourceRows<'a> {
-    fn new(source: &'a Source, ids: roaring::RoaringTreemap, run_ids: usize, retries: u32) -> Self {
+    fn new(
+        source: &'a Source,
+        ids: roaring::RoaringTreemap,
+        run_ids: usize,
+        bytes: u64,
+        retries: u32,
+    ) -> Self {
         Self {
             source,
             left: ids,
             run_ids: run_ids.clamp(1, source.read_run.ids.max(1)),
+            bytes,
             retries,
             rows: Vec::new().into_iter(),
         }
     }
 
-    /// The next present row, or `None` once every id is read.
+    /// The next present row, or `None` once every id is read or the bytes
+    /// the runs may read are spent, which leaves ids in `left`.
     async fn next(&mut self) -> Result<Option<label_source::SourceRow>> {
         // Imperative: a run that is used up starts the next, and a run may
         // hold no row.
         loop {
             let Some(row) = self.rows.next() else {
-                if self.left.is_empty() {
+                if self.left.is_empty() || self.bytes == 0 {
                     return Ok(None);
                 }
                 self.rows = self.run().await?.into_iter();
@@ -3317,7 +3338,8 @@ impl<'a> SourceRows<'a> {
         loop {
             let taken = self.left.iter().take(self.run_ids).collect::<Vec<_>>();
             let more = self.left.len() > taken.len() as u64;
-            match self.source.read(taken, more).await {
+            let bytes = self.bytes.min(self.source.read_run.bytes);
+            match self.source.read(taken, more, bytes).await {
                 Ok(Run { rows, passed }) => {
                     match passed {
                         Some(passed) => {
@@ -3325,6 +3347,11 @@ impl<'a> SourceRows<'a> {
                         }
                         None => self.left.clear(),
                     }
+                    let read = rows
+                        .iter()
+                        .map(|row| row.key.len().saturating_add(row.value.len()) as u64)
+                        .sum::<u64>();
+                    self.bytes = self.bytes.saturating_sub(read);
                     return Ok(rows);
                 }
                 Err(error) => {
@@ -3382,6 +3409,7 @@ where
         &source,
         source.members.clone(),
         source.read_run.ids,
+        u64::MAX,
         READ_RUN_RETRIES,
     );
     let mut counts = ReadCounts::default();

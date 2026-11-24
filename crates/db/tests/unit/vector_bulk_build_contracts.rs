@@ -2663,6 +2663,94 @@ async fn a_graph_an_unlink_left_torn_is_dropped() {
     db.close().await.expect("vector test database closes");
 }
 
+/// The read that sizes a build runs on a lifecycle step, so it reads no more
+/// than one run of pass 1 may, whatever the threshold and however large the
+/// rows: once those bytes are spent it has no answer, and the build goes on
+/// to its read pass, which has one. Rows that end within the bytes still
+/// answer at once (see `a_source_with_too_few_vectors_is_built_serially`).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_read_that_sizes_a_build_reads_one_run_of_bytes_at_most() {
+    const MIN_VECTORS: u64 = 16;
+    // Few enough members for the probe to read them all, were they small.
+    const ROWS: u64 = MIN_VECTORS * PROBE_ROWS_PER_VECTOR - 1;
+    let no_vector = [Property::new(
+        "$label",
+        PropertyValue::String("Document".to_string()),
+    )];
+    let limits = entity_limits(16);
+    for (name, vectors, path) in [
+        // Fifteen vectors among the members: too few, which only the read
+        // pass finds out.
+        (
+            "too-few",
+            MIN_VECTORS - 1,
+            VectorBuildPath::Serial(VectorSerialBuildReason::TooFewVectors),
+        ),
+        // A vector on every member: the bytes end before sixteen are read,
+        // and that is no answer either way.
+        ("enough", ROWS, VectorBuildPath::Bulk),
+    ] {
+        let db = test_db(&format!("vector-bulk-probe-bytes-{name}")).await;
+        let definition = definition(None);
+        put_sources(
+            &db,
+            (0..ROWS).map(|entity_id| (entity_id, no_vector.to_vec())),
+        )
+        .await;
+        let expected = seed(
+            &db,
+            (0..vectors).map(|vector| {
+                let entity_id = ROWS - 1 - vector;
+                (entity_id, vector_of(entity_id))
+            }),
+        )
+        .await;
+        let (build_id, _, _) = create_build(&db, SCOPE, &definition, ROWS - 1).await;
+        let mut driver = bulk_driver(2, BUDGET, MIN_VECTORS);
+        // One row spends the bytes of a run.
+        driver.bulk.read_run = ReadRun {
+            ids: READ_RUN_IDS,
+            bytes: 1,
+            retry_delay: READ_RUN_RETRY_DELAY,
+        };
+        // Another build holds the turn, so the first step ends once it has
+        // sized the source.
+        let other_build = Arc::clone(&driver.bulk.preparing)
+            .try_acquire_owned()
+            .expect("no build is preparing");
+        let mut claim_sequence = 1;
+        assert_eq!(
+            drive_one(&db, &driver, build_id, &mut claim_sequence, limits).await,
+            CommittedOperationStep::Progressed,
+            "{name}"
+        );
+        assert_eq!(
+            driver.bulk.faults.runs.load(Ordering::Relaxed),
+            1,
+            "{name}: the probe read one run"
+        );
+        assert!(
+            driver
+                .parked_until(&read_operation(&db, SCOPE, build_id).await)
+                .is_some(),
+            "{name}: the build goes on to wait for its turn"
+        );
+        assert_eq!(driver.build_reports().path(build_id), None, "{name}");
+        drop(other_build);
+        assert_eq!(
+            drive(&db, &driver, build_id, &mut claim_sequence, limits)
+                .await
+                .0,
+            CommittedOperationStep::Completed,
+            "{name}"
+        );
+        assert_eq!(driver.build_reports().path(build_id), Some(path), "{name}");
+        assert_index_holds(&db, &active_index(&db, &definition).await, &expected, &[]).await;
+        assert!(nothing_held(&driver), "{name}");
+        db.close().await.expect("vector test database closes");
+    }
+}
+
 /// A build that finds another build in passes 1 and 2 commits the unchanged
 /// serial stage once and parks: it stores nothing, reserves nothing, counts
 /// no attempt and says what it waits for. The worker gives it no step until
@@ -7057,7 +7145,7 @@ async fn a_read_run_takes_no_more_ids_than_its_bound() {
         },
         faults: Arc::default(),
     };
-    let mut rows = SourceRows::new(&source, source.members.clone(), usize::MAX, 0);
+    let mut rows = SourceRows::new(&source, source.members.clone(), usize::MAX, u64::MAX, 0);
     // The rows of the first run: the second is not read before they are
     // handed out.
     for entity_id in 0..RUN {
