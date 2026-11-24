@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use db::query_service::HelixQueryService;
-use db::{HelixDB, HelixDbMode, IndexRuntimeReadiness};
+use db::{HelixDB, HelixDbMode, IndexRuntimeReadiness, StorageState};
 use helix_metrics::query::transport::OssQueryMetrics;
 
 use crate::config::StorageConfig;
@@ -88,6 +88,29 @@ impl ServerState {
     /// Return whether all public index families have their runtime authorities.
     pub const fn index_readiness(&self) -> IndexRuntimeReadiness {
         self.index_readiness
+    }
+
+    /// Whether the database's storage still serves.
+    pub fn storage_state(&self) -> StorageState {
+        self.db.storage_state()
+    }
+
+    /// Whether this server should receive traffic: its storage is open and
+    /// every index family has its runtime authority. A fenced writer never
+    /// is again, so a load balancer moves its traffic to the newer writer.
+    pub fn is_ready(&self) -> bool {
+        self.storage_state() == StorageState::Open && self.index_readiness.is_ready()
+    }
+
+    /// Whether restarting the process could help, which liveness probes
+    /// report: not once storage failed or closed. A fenced writer stays live,
+    /// as a restarted one would reopen the store as writer and fence the
+    /// writer that replaced it, and the two would take turns.
+    pub fn is_live(&self) -> bool {
+        match self.storage_state() {
+            StorageState::Open | StorageState::Fenced => true,
+            StorageState::Failed | StorageState::Closed => false,
+        }
     }
 
     /// How many entities the writer's index worker holds back: each has a

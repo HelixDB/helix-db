@@ -55,12 +55,21 @@ pub(crate) fn router(state: ServerState) -> Router {
         .with_state(state)
 }
 
+/// Liveness: 503 once storage failed, when a restart may help. A fenced
+/// writer stays 200 ([`ServerState::is_live`]).
 async fn healthz(State(state): State<ServerState>) -> Response {
-    health_response(StatusCode::OK, state)
+    let status = if state.is_live() {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    health_response(status, state)
 }
 
+/// Readiness: 503 until indexes are ready and from when storage stops
+/// serving, fenced included ([`ServerState::is_ready`]).
 async fn readyz(State(state): State<ServerState>) -> Response {
-    let status = if state.index_readiness().is_ready() {
+    let status = if state.is_ready() {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
@@ -72,8 +81,9 @@ fn health_response(status: StatusCode, state: ServerState) -> Response {
     json_response(
         status,
         &serde_json::json!({
-            "ready": state.index_readiness().is_ready(),
+            "ready": state.is_ready(),
             "mode": state.db_mode().as_str(),
+            "storage": state.storage_state().as_str(),
             "index_runtime": state.index_readiness().code(),
             "blocked_index_entity_count": state.blocked_index_entity_count(),
         }),
