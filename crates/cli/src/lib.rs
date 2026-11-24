@@ -16,6 +16,8 @@ pub mod project;
 pub mod prompts;
 pub(crate) mod service_endpoints;
 pub mod setup;
+#[cfg(test)]
+mod test_isolation;
 pub mod ts_query;
 pub mod update;
 pub mod utils;
