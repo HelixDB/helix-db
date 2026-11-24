@@ -90,6 +90,8 @@ use crate::index_lifecycle::{
 use crate::transaction::Mutation;
 
 mod bulk;
+#[cfg(test)]
+pub(crate) use bulk::StatusGate;
 pub(crate) use bulk::{BulkBuildCommit, VectorBuildReports};
 
 /// Vector lifecycle driver sharing scope gates and the bounded SimHash owner.

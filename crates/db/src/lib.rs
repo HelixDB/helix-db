@@ -2357,9 +2357,12 @@ impl HelixDB {
         operation_id: index_lifecycle::IndexOperationId,
     ) -> Result<index_lifecycle::IndexOperationStatus> {
         // Read before the records: a step that finds the operation at the
-        // bulk stage after this is a sighting this call has not seen.
+        // bulk stage after this is a sighting this call has not seen, and
+        // must not forget.
         let reports = &self.inner.vector_build_reports;
-        let sightings = reports.bulk_stage_sightings(operation_id);
+        let seen_before = reports.bulk_stage_sightings(operation_id);
+        #[cfg(test)]
+        reports.before_status_records().await;
         let operation = match self.storage() {
             HelixStorage::Reader(reader) => {
                 index_lifecycle::outbox::read_operation(reader.as_ref(), scope, operation_id)
@@ -2385,9 +2388,17 @@ impl HelixDB {
         // stage without a step, in any process, so the durable record of an
         // aborting vector build is read every time. Every other status
         // costs no read.
+        //
+        // The sightings that decide are read again here, behind the applied
+        // record. A step counts itself before it commits, so the step that
+        // took this record off the bulk stage is counted by now, though it
+        // ran after this call began: decided on the first look, such a call
+        // would skip the durable record and say the stage is gone while a
+        // restart still finds it.
+        let seen = reports.bulk_stage_sightings(operation_id);
         let durable = match self.storage() {
             HelixStorage::Writer(writer)
-                if sightings.is_some() || index_lifecycle::is_aborting_vector_build(&operation) =>
+                if seen.is_some() || index_lifecycle::is_aborting_vector_build(&operation) =>
             {
                 let durable = index_lifecycle::outbox::read_durable_operation_record(
                     writer.db(),
@@ -2395,7 +2406,8 @@ impl HelixDB {
                     operation_id,
                 )
                 .await?;
-                match sightings {
+                // Only the sightings of before the records are forgotten.
+                match seen_before {
                     Some(sightings)
                         if durable.as_ref() == Some(&operation)
                             && !index_lifecycle::at_bulk_stage(&operation) =>

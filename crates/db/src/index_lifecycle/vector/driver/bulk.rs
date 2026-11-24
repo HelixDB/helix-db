@@ -614,9 +614,40 @@ pub(crate) struct VectorBuildReports {
     /// applied and the durable record equal off that stage, the durable one
     /// may still be at it.
     bulk_stage: parking_lot::Mutex<VecDeque<(IndexOperationId, u64)>>,
+    /// Where a test stops status reads ([`Self::before_status_records`]).
+    #[cfg(test)]
+    pub(crate) status_gate: parking_lot::Mutex<Option<Arc<StatusGate>>>,
+}
+
+/// A test's hold on status reads, between their first look at the sightings
+/// and their read of the operation's records.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct StatusGate {
+    /// One permit for each status read that has reached the gate.
+    pub(crate) arrived: tokio::sync::Semaphore,
+    /// One permit lets one status read through.
+    pub(crate) open: tokio::sync::Semaphore,
 }
 
 impl VectorBuildReports {
+    /// Stops a status read at the gate a test set, until the test lets it
+    /// through: steps the worker takes meanwhile happen between the two
+    /// looks at the sightings.
+    #[cfg(test)]
+    pub(crate) async fn before_status_records(&self) {
+        let gate = self.status_gate.lock().clone();
+        let Some(gate) = gate else {
+            return;
+        };
+        gate.arrived.add_permits(1);
+        gate.open
+            .acquire()
+            .await
+            .expect("the status gate stays open")
+            .forget();
+    }
+
     /// Path the latest scan of `operation_id` in this process took.
     pub(crate) fn path(&self, operation_id: IndexOperationId) -> Option<VectorBuildPath> {
         self.recent

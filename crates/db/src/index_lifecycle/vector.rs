@@ -34,6 +34,8 @@ pub(crate) use driver::publication_contract_tests::{
     hold_planning_sessions, planning_session_lock_holders,
 };
 pub(crate) mod publication;
+#[cfg(test)]
+pub(crate) use driver::StatusGate;
 pub(crate) use driver::{
     BulkBuildCommit, OfferedVectorBuild, PublicationBacklog, VectorBuildCache, VectorBuildReports,
     VectorIndexDriver, MAX_RETAINED_PUBLICATIONS,

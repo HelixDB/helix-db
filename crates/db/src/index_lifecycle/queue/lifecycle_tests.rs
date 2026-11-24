@@ -707,6 +707,106 @@ async fn a_status_reports_the_bulk_stage_until_leaving_it_is_durable() {
     db.close().await.unwrap();
 }
 
+/// A status that began before the worker's first step at the bulk stage, and
+/// reads the records after a step has taken the build off it, still reports
+/// the stage a restart would find. It counts the steps that found the build
+/// at the stage a second time, behind the applied record: decided on its
+/// first look, it would skip the durable record and say the stage is gone
+/// while storage holds it, which is when an operator would start an older
+/// release that cannot open the store.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_status_that_began_before_a_step_left_the_bulk_stage_reports_it() {
+    use crate::index_lifecycle::vector::StatusGate;
+    use crate::search::vector::gated_wal::{GatedWalStore, WalUploads};
+    const BOUND: Duration = Duration::from_secs(60);
+
+    let store = Arc::new(GatedWalStore::new());
+    let db = Arc::new(
+        open(
+            "bulk-build-status-began-early",
+            Arc::clone(&store) as Arc<dyn ObjectStore>,
+            bulk_config(),
+        )
+        .await,
+    );
+    seed_vectors(&db, 120).await;
+    let (operation, _, held) =
+        create_held(&db, unpartitioned_vector_spec(), QueueFamily::Vector, 1).await;
+    let paused = pause_when(&db, &operation, held, after_write_steps(10)).await;
+    tokio::time::timeout(BOUND, db.inner_db().flush())
+        .await
+        .expect("the paused build flushes")
+        .unwrap();
+    let id = typed_operation_id(&operation);
+    // As in a writer that has not stepped the build yet: nothing remembers
+    // that it stands at the bulk stage.
+    let reports = &db.inner.vector_build_reports;
+    let sightings = reports
+        .bulk_stage_sightings(id)
+        .expect("the build was stepped at the bulk stage");
+    reports.durably_left_bulk_stage(id, sightings);
+    assert_eq!(reports.bulk_stage_sightings(id), None);
+
+    // A status takes its first look at the sightings and stops there.
+    let gate = Arc::new(StatusGate {
+        arrived: tokio::sync::Semaphore::new(0),
+        open: tokio::sync::Semaphore::new(0),
+    });
+    *reports.status_gate.lock() = Some(Arc::clone(&gate));
+    let reported = tokio::spawn({
+        let (db, operation) = (Arc::clone(&db), operation.clone());
+        async move { status(&db, &operation).await }
+    });
+    tokio::time::timeout(BOUND, gate.arrived.acquire())
+        .await
+        .expect("the status reaches its first look")
+        .unwrap()
+        .forget();
+
+    // Meanwhile the build's steps leave the bulk stage, and none uploads.
+    store.uploads.send_replace(WalUploads::Held);
+    drop(paused);
+    let applied_left = async || {
+        let snapshot = db.inner_db().snapshot().await.unwrap();
+        let applied = crate::index_lifecycle::outbox::read_operation(
+            snapshot.as_ref(),
+            DataScope::LegacyUnscoped,
+            id,
+        )
+        .await
+        .unwrap()
+        .expect("the operation exists");
+        !crate::index_lifecycle::at_bulk_stage(&applied)
+    };
+    let deadline = Instant::now() + BOUND;
+    while !applied_left().await {
+        assert!(
+            Instant::now() < deadline,
+            "the write pass ends without its upload"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // The status reads the records now, and reports what is stored.
+    gate.open.add_permits(1);
+    let reported = tokio::time::timeout(BOUND, reported)
+        .await
+        .expect("the status ends")
+        .unwrap();
+    assert_eq!(reported["stage"], "scan", "{reported}");
+    assert_eq!(
+        reported["vector_build_path"],
+        serde_json::json!({"path": "bulk"})
+    );
+
+    *reports.status_gate.lock() = None;
+    store.uploads.send_replace(WalUploads::Open);
+    assert_eq!(wait_terminal(&db, &operation).await, "succeeded");
+    status(&db, &operation).await;
+    assert_eq!(reports.bulk_stage_sightings(id), None);
+    db.close().await.unwrap();
+}
+
 /// An abort takes a build off its bulk stage without a step of the process
 /// that runs it, so a writer that never stepped the build there can be ahead
 /// of storage too. While the abort is applied and its upload is held, every
