@@ -66,14 +66,17 @@ fn beside(entity_id: u64) -> [f32; 3] {
 
 /// A driver whose bulk builds share exactly `memory_budget_bytes`, or are off
 /// at zero.
+///
+/// Its steps unlink without a bound in time: [`UNLINK_STEP_TIME`] is a bound
+/// on the wall clock, which a slow or busy machine reaches after any number
+/// of unlinks, and the contracts here assert what a step unlinked. So a
+/// step of this driver unlinks by its counts alone, on every machine, and
+/// the contract of the time bound sets one itself.
 fn bulk_driver(threads: usize, memory_budget_bytes: u64, min_vectors: u64) -> VectorIndexDriver {
-    let memory = NonZeroU64::new(memory_budget_bytes)
-        .map_or(VectorBulkBuildMemory::Off, VectorBulkBuildMemory::Bytes);
-    driver().with_bulk_builds(
-        VectorBulkBuildTuning::try_new(threads, memory, min_vectors)
-            .expect("bulk build tuning validates"),
-        0,
-        WRITE_BUFFER,
+    bulk_driver_waking(
+        threads,
+        memory_budget_bytes,
+        min_vectors,
         IndexWorkerWakeHandle::default(),
     )
 }
@@ -87,13 +90,15 @@ fn bulk_driver_waking(
 ) -> VectorIndexDriver {
     let memory = NonZeroU64::new(memory_budget_bytes)
         .map_or(VectorBulkBuildMemory::Off, VectorBulkBuildMemory::Bytes);
-    driver().with_bulk_builds(
+    let mut driver = driver().with_bulk_builds(
         VectorBulkBuildTuning::try_new(threads, memory, min_vectors)
             .expect("bulk build tuning validates"),
         0,
         WRITE_BUFFER,
         worker,
-    )
+    );
+    driver.bulk.unlink.step_time = std::time::Duration::MAX;
+    driver
 }
 
 /// The memory of builds on a host with `ceiling`, whose resident anonymous
@@ -479,17 +484,34 @@ async fn step(
             return outcome;
         }
         assert_eq!(outcome, CommittedOperationStep::Progressed);
-        let record = read_operation(db, SCOPE, operation_id).await;
-        let waited = std::time::Instant::now();
-        while driver.parked_until(&record).is_some() {
-            assert!(
-                waited.elapsed() < PARK_LIMIT,
-                "nothing woke the parked build"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-        }
+        unparked(db, driver, operation_id).await;
     }
     panic!("the build parked without end")
+}
+
+/// How long a contract waits for a background task to end, and [`unparked`]
+/// for its wake, before it gives the build up for never woken. A bound on
+/// liveness and no more: the wait ends when the background task does, which
+/// no contract here times, so a slow or busy machine only waits longer. A
+/// source of a few thousand rows has taken more than the park limit of
+/// thirty seconds to read and link on two cores shared by sixty-four test
+/// processes.
+const WOKEN_WITHIN: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Waits until `driver` no longer parks `operation_id`: what its build
+/// waited for in the background, its read and link passes or a flush, has
+/// ended and woken it. Its next step then finds that done, however slowly
+/// the background task ran on this machine.
+async fn unparked(db: &Db, driver: &dyn IndexOperationDriver, operation_id: IndexOperationId) {
+    let record = read_operation(db, SCOPE, operation_id).await;
+    let waited = std::time::Instant::now();
+    while driver.parked_until(&record).is_some() {
+        assert!(
+            waited.elapsed() < WOKEN_WITHIN,
+            "nothing woke the parked build"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
 }
 
 /// Drives `operation_id` until a step does not progress, and returns that
@@ -577,7 +599,12 @@ async fn drive_steps(
 }
 
 /// Runs the step the outbox requeued after a commit conflict, once its delay
-/// has passed.
+/// has passed and its build is no longer parked.
+///
+/// The step whose commit was lost may have started the build's passes and
+/// parked the operation for them. The worker offers the retry only once they
+/// have woken it, and so does this: offered while they still run, the step
+/// would park again and commit nothing of what the caller expects of it.
 async fn retry_conflicted_step(
     db: &Db,
     driver: &dyn IndexOperationDriver,
@@ -585,6 +612,7 @@ async fn retry_conflicted_step(
     claim_sequence: &mut u64,
     limits: SearchIndexBatchLimits,
 ) -> CommittedOperationStep {
+    unparked(db, driver, operation_id).await;
     let writer_epoch = WriterEpoch::from_bytes([0x6B; 16]).expect("writer epoch is non-nil");
     let OperationPointerObservation::Delayed { delay_millis } =
         observe_operation_pointer(db, operation_id, writer_epoch, NOW_MILLIS)
@@ -2761,7 +2789,7 @@ async fn forgetting_a_preparing_build_frees_its_turn_and_memory() {
 
     builds.forget(build_id);
     assert!(cancelled.load(Ordering::Relaxed));
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(WOKEN_WITHIN, async {
         while builds.memory.reserved() != 0 {
             tokio::task::yield_now().await;
         }
@@ -3971,7 +3999,8 @@ async fn a_steps_unlinks_end_with_their_time_and_their_count() {
             16,
         ),
         // Sixteen nodes of deleted entities fill the step's count: the
-        // changed rows behind them wait for the next step.
+        // changed rows behind them wait for the next step. No time bounds
+        // the step's unlinks, as in every other contract of these drivers.
         ("count", None, 16..32, 32..48, 15),
     ] {
         let db = test_db(&format!("vector-bulk-unlink-bound-{name}")).await;
@@ -4345,7 +4374,7 @@ async fn rows_changed_between_two_read_runs_are_stored_only_as_read() {
         drive_one(&db, &driver, build_id, &mut claim_sequence, limits).await,
         CommittedOperationStep::Progressed
     );
-    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+    tokio::time::timeout(WOKEN_WITHIN, async {
         while driver.build_reports().phase(build_id)
             != Some(VectorBulkBuildPhase::Reading {
                 members_read: RUN,
