@@ -192,17 +192,21 @@ pub(crate) async fn process_background_step(
         Some(
             async {
                 let step = label_identity::copy_hash_label_rows_once(writer, labels).await?;
-                match step {
-                    // The open left the copying store below the version that
-                    // admits dropped-generation entries; a crash before this
-                    // commit leaves it to the next open.
-                    label_identity::LabelCopyStep::Published => {
+                // The open left the copying store below the version that
+                // admits dropped-generation entries, and the session that
+                // published the copy owes the move until it commits: a
+                // failure here backs the copy off, and the steps after it,
+                // which find the copy published, try the move again. A
+                // crash before the commit leaves it to the next open, and a
+                // session that only finds the copy published owes nothing.
+                match labels.admission() {
+                    label_identity::DroppedAdmission::Owed => {
+                        #[cfg(test)]
+                        labels.admission_fault()?;
                         crate::index_lifecycle::dropped::admit(writer.db()).await?;
+                        labels.admitted();
                     }
-                    label_identity::LabelCopyStep::NotStarted
-                    | label_identity::LabelCopyStep::Copied
-                    | label_identity::LabelCopyStep::Conflicted
-                    | label_identity::LabelCopyStep::AlreadyPublished => {}
+                    label_identity::DroppedAdmission::NotOwed => {}
                 }
                 Ok(step.advanced())
             }

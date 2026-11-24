@@ -101,7 +101,8 @@ A version-7 store is moved to version 8 in one commit that writes only the
 marker. The move is performed by: an embedded writer open and a managed
 controlled-migration open, each right after it has started, or found finished,
 the label identity copy; and the background migration worker of any writer, a
-managed failover writer included, right after its copy step publishes version 7.
+managed failover writer included, right after its copy step publishes version 7,
+and at each later copy step of that worker until the move commits.
 A pristine managed store is bootstrapped at version 8, and a new embedded
 database ends its first open there. So a managed failover writer that opens a
 store already at version 7 serves it as it is, and its drops delete their rows
