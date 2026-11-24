@@ -32,7 +32,7 @@ use super::outbox::{
 use super::queue::publication::{NextTarget, PublicationOutcome, QueuePublisher};
 use super::queue::QueueTarget;
 use super::{
-    ClaimContinuation, ClaimSequence, IndexOperationFamily, IndexOperationId, WriterEpoch,
+    dropped, ClaimContinuation, ClaimSequence, IndexOperationFamily, IndexOperationId, WriterEpoch,
 };
 
 const DEFAULT_OPERATION_PAGE_SIZE: usize = 64;
@@ -101,6 +101,9 @@ pub(crate) struct IndexFamilyCapabilities {
     vector: IndexFamilyCapability,
     text: IndexFamilyCapability,
     text_compactor: Arc<dyn ActiveTextCompactionDriver>,
+    /// The writer's dropped-generation registry, which every committed step
+    /// of every family is reported to.
+    dropped: Arc<dropped::Registry>,
 }
 
 /// Runtime-only Active text compaction service installed by the text driver.
@@ -111,18 +114,21 @@ pub(crate) trait ActiveTextCompactionDriver: Send + Sync {
 }
 
 impl IndexFamilyCapabilities {
-    /// Builds a registry from the three installed family drivers.
+    /// Builds a registry from the three installed family drivers and the
+    /// writer's dropped-generation registry.
     pub(crate) const fn new(
         secondary: IndexFamilyCapability,
         vector: IndexFamilyCapability,
         text: IndexFamilyCapability,
         text_compactor: Arc<dyn ActiveTextCompactionDriver>,
+        dropped: Arc<dropped::Registry>,
     ) -> Self {
         Self {
             secondary,
             vector,
             text,
             text_compactor,
+            dropped,
         }
     }
 
@@ -285,6 +291,8 @@ enum InFlightTask {
         claim: Box<PendingClaim>,
         driver: Arc<dyn IndexOperationDriver>,
         limits: SearchIndexBatchLimits,
+        /// Told of each step the task commits.
+        dropped: Arc<dropped::Registry>,
         /// Ends the claim slice early once shutdown is requested.
         shutdown: watch::Receiver<bool>,
         _permits: InFlightPermits,
@@ -318,6 +326,7 @@ impl InFlightTask {
                 claim,
                 driver,
                 limits,
+                dropped,
                 shutdown,
                 _permits,
                 #[cfg(feature = "index-lifecycle-testing")]
@@ -394,6 +403,7 @@ impl InFlightTask {
                         limits,
                         now_unix_millis(),
                         claim,
+                        &dropped,
                     )
                     .await?;
                     #[cfg(feature = "index-lifecycle-testing")]
@@ -629,8 +639,16 @@ pub(crate) async fn process_secondary_once(
             else {
                 continue;
             };
-            outbox::execute_claimed_step(db, &claimed, driver.as_ref(), limits, now_unix_millis())
-                .await?;
+            outbox::execute_claimed_step_with_evidence(
+                db,
+                &claimed,
+                driver.as_ref(),
+                limits,
+                now_unix_millis(),
+                ClaimContinuation::Release,
+                &capabilities.dropped,
+            )
+            .await?;
             return Ok(true);
         }
         if page.prefix_exhausted {
@@ -1116,6 +1134,7 @@ async fn schedule_operation_task(
                     }),
                     driver,
                     limits,
+                    dropped: Arc::clone(&capabilities.dropped),
                     shutdown: shutdown.clone(),
                     _permits: task_permits,
                     #[cfg(feature = "index-lifecycle-testing")]
@@ -1277,6 +1296,7 @@ mod tests {
             }),
             driver: Arc::new(NeverSteps),
             limits: SearchIndexBackfillLimits::default().batch(),
+            dropped: Arc::default(),
             shutdown: watch::channel(false).1,
             _permits: permits
                 .try_operation(IndexOperationFamily::Secondary)
@@ -1511,6 +1531,7 @@ mod tests {
             capability.clone(),
             capability,
             Arc::new(NoCompaction),
+            Arc::default(),
         )
     }
 
@@ -1647,6 +1668,7 @@ mod tests {
             }),
             driver: Arc::new(driver),
             limits: SearchIndexBackfillLimits::default().batch(),
+            dropped: Arc::default(),
             shutdown,
             _permits: permits
                 .try_operation(IndexOperationFamily::Secondary)
@@ -2125,6 +2147,7 @@ mod tests {
                 capability.clone(),
                 capability,
                 Arc::new(NoCompaction),
+                Arc::default(),
             ),
             None,
             Duration::from_secs(3_600),

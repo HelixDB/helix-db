@@ -41,6 +41,7 @@ pub(crate) enum GlobalKind {
     LegacyVectorPhysicalReservation = 0x0A,
     TextCompactionPointer = 0x0B,
     // 0x0C is retired (experimental membership activation); do not reuse it.
+    DroppedGeneration = 0x0D,
 }
 
 impl GlobalKind {
@@ -48,7 +49,7 @@ impl GlobalKind {
         self as u8
     }
 
-    fn try_from_u8(value: u8) -> Result<Self, EncodingError> {
+    pub(crate) fn try_from_u8(value: u8) -> Result<Self, EncodingError> {
         match value {
             0x01 => Ok(Self::StorageVersion),
             0x02 => Ok(Self::LogicalIndexIdWatermark),
@@ -56,6 +57,7 @@ impl GlobalKind {
             0x04 => Ok(Self::OperationPointer),
             0x0A => Ok(Self::LegacyVectorPhysicalReservation),
             0x0B => Ok(Self::TextCompactionPointer),
+            0x0D => Ok(Self::DroppedGeneration),
             unknown => Err(EncodingError::InvalidKey(format!(
                 "unknown global V2 key kind {unknown:#04x}"
             ))),
@@ -130,6 +132,12 @@ pub(crate) enum GlobalKey {
     OperationPointer(IndexOperationId),
     LegacyVectorPhysicalReservation(VectorPhysicalIndexId),
     TextCompactionPointer(TextCompactionTarget),
+    /// One dropped generation whose remaining rows compaction discards. Index
+    /// ids are allocated database-wide, so the key carries no scope.
+    DroppedGeneration {
+        index_id: IndexId,
+        generation: IndexGenerationId,
+    },
 }
 
 impl GlobalKey {
@@ -148,6 +156,7 @@ impl GlobalKey {
             Self::OperationPointer(_) => GlobalKind::OperationPointer,
             Self::LegacyVectorPhysicalReservation(_) => GlobalKind::LegacyVectorPhysicalReservation,
             Self::TextCompactionPointer(_) => GlobalKind::TextCompactionPointer,
+            Self::DroppedGeneration { .. } => GlobalKind::DroppedGeneration,
         }
     }
 
@@ -167,6 +176,7 @@ impl GlobalKey {
                     + HASH_LEN
                     + U32_LEN
             }
+            Self::DroppedGeneration { .. } => U64_LEN + U64_LEN,
         };
         GLOBAL_SENTINEL_LEN + KIND_LEN + suffix
     }
@@ -195,6 +205,13 @@ impl GlobalKey {
                 buffer.put_u64(target.generation.get());
                 buffer.put_slice(target.partition.as_bytes());
                 buffer.put_u32(target.page);
+            }
+            Self::DroppedGeneration {
+                index_id,
+                generation,
+            } => {
+                buffer.put_u64(index_id.get());
+                buffer.put_u64(generation.get());
             }
         }
     }
@@ -255,6 +272,10 @@ impl GlobalKey {
                     decoder.take_u32()?,
                 )?)
             }
+            GlobalKind::DroppedGeneration => Self::DroppedGeneration {
+                index_id: decode_index_id(&mut decoder)?,
+                generation: decode_generation(&mut decoder)?,
+            },
         };
         decoder.finish()?;
         Ok(key)

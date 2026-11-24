@@ -39,7 +39,7 @@ passes a busy node when it addresses that node by ID.
 
 ## Storage contract
 
-The current and maximum supported index storage version is **7**. Canonical
+The current and maximum supported index storage version is **8**. Canonical
 values and the existing `HLXRBM2` / `HLXADJ2` membership-delta codecs are unchanged.
 WAL replay, partial merging, and compaction must retain support for those operands.
 The membership deltas themselves need no index rebuild or storage migration.
@@ -97,10 +97,26 @@ most version 5 refuse a version-6 store, which they would not keep exact, so a
 rollback after the first open needs a backup taken before the upgrade. Labels
 longer than the label index bound are rejected as invalid queries.
 
-New databases initialize at version 7. Versions after 7 return the existing
-unsupported-version error on reader, embedded-writer, and managed-failover open;
-startup must not lower or remove their marker. Managed bootstrap still refuses
-any nonempty store before version dispatch. The
+A version-7 store is moved to version 8 in one commit that writes only the
+marker. The move is performed by: an embedded writer open and a managed
+controlled-migration open, each right after it has started, or found finished,
+the label identity copy; and the background migration worker of any writer, a
+managed failover writer included, right after its copy step publishes version 7,
+and at each later copy step of that worker until the move commits.
+A pristine managed store is bootstrapped at version 8, and a new embedded
+database ends its first open there. So a managed failover writer that opens a
+store already at version 7 serves it as it is, and its drops delete their rows
+one by one; one that opens a store at version 6 and publishes the copy moves it
+through 7 to 8. From version 8 a completed index drop or build abort leaves a
+dropped-generation entry and compactions discard the generation's rows. The
+move is one-way: binaries that support at most version 7 refuse a version-8
+store, whose entries they would neither decode nor honour. Every reader must
+therefore run an image that supports version 8 before any writer that performs
+the move opens the store, and a rollback after the move needs a backup taken
+before the upgrade. Versions
+after 8 return the existing unsupported-version error on reader, embedded-writer,
+and managed-failover open; startup must not lower or remove their marker. Managed
+bootstrap still refuses any nonempty store before version dispatch. The
 retired activation key tag `0x0C` and value tag `0x08` are not reused. Malformed
 metadata checks, managed-writer fencing, and existing version-2/3 equality
 migrations (which publish version 5, after which the same open starts the label

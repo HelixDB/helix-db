@@ -33,14 +33,14 @@ use crate::config::{
 };
 use crate::encoding::v2::keys::indexes::vector::VectorKey;
 use crate::encoding::v2::keys::scope::DataScope;
-use crate::encoding::v2::keys::{DataKey, DataKeyKind, IndexEntity};
+use crate::encoding::v2::keys::{self, DataKey, DataKeyKind, IndexEntity};
 use crate::encoding::v2::values::indexes::operation_queue::{QueueFamily, QueuedOperationId};
 use crate::index_lifecycle::outbox::step_pause::{self, StepPause};
 use crate::index_lifecycle::{
-    IndexElementKind, IndexEntityId, IndexGenerationPublicationPermit, IndexOperationId,
-    IndexOperationProgress, SourceScanProgress, TextBuildProgress, TextBuildStage,
-    ValidatedDynamicIndexDefinition, VectorBuildPath, VectorBuildProgress, VectorBuildStage,
-    VectorSerialBuildReason,
+    DroppedGenerationRows, IndexElementKind, IndexEntityId, IndexGenerationPublicationPermit,
+    IndexOperationId, IndexOperationProgress, SourceScanProgress, TextBuildProgress,
+    TextBuildStage, ValidatedDynamicIndexDefinition, VectorBuildPath, VectorBuildProgress,
+    VectorBuildStage, VectorCleanupProgress, VectorSerialBuildReason,
 };
 use crate::HelixDB;
 
@@ -1869,6 +1869,363 @@ async fn dropping_an_index_discards_its_queued_operations_even_after_restart() {
     db.close().await.unwrap();
 }
 
+/// Rows one cleanup batch of [`narrow_cleanup_config`] deletes.
+const CLEANUP_ROWS: usize = 16;
+
+/// [`config`] with cleanup batches of [`CLEANUP_ROWS`] rows, so the drop of a
+/// small index takes many delete steps. Builds need wider batches: open with
+/// it only to drop.
+fn narrow_cleanup_config() -> DbConfig {
+    let defaults = SearchIndexBackfillLimits::default();
+    let batch = defaults.batch();
+    queued(IndexOperationQueueTuning::default()).with_search_index_backfill_limits(
+        SearchIndexBackfillLimits::try_new(
+            SearchIndexBatchLimits::try_new(
+                batch.max_entities(),
+                batch.max_input_bytes(),
+                NonZeroU64::new(CLEANUP_ROWS as u64).unwrap(),
+                batch.max_output_bytes(),
+                batch.max_single_vector_output_bytes(),
+            )
+            .unwrap(),
+            defaults.edge_property_read_batch(),
+            defaults.text_artifacts(),
+            defaults.text_compaction(),
+        )
+        .unwrap(),
+    )
+}
+
+/// Reclaims the storage of every dropped generation, then asserts no physical
+/// vector row and no mapping, applied-state, or build-delta row is left in
+/// the default scope.
+async fn assert_no_vector_generation_rows(db: &HelixDB) {
+    crate::index_lifecycle::dropped::reclaim_fixture(db).await;
+    // The writer stops reading the discarded rows at its next manifest poll.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !rows(db, is_vector_row).await.is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "the reclaim left physical vector rows"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    for kind in [
+        keys::RecordKind::VectorPartitionMapping,
+        keys::RecordKind::AppliedState,
+        keys::RecordKind::BuildDelta,
+    ] {
+        let prefix = keys::ManagedIndexKey::data_prefix(
+            DataScope::LegacyUnscoped,
+            keys::ScopedKey::logical_prefix(kind),
+        );
+        let mut generation_rows = db.inner_db().scan_prefix(&prefix, ..).await.unwrap();
+        assert!(
+            generation_rows.next().await.unwrap().is_none(),
+            "the drop left a {kind:?} row"
+        );
+    }
+}
+
+/// Whether `key` is a physical row of any vector index.
+fn is_vector_row(key: &[u8]) -> bool {
+    matches!(
+        DataKey::parse_from_slice(DataScope::LegacyUnscoped, key),
+        Ok(DataKey::Data {
+            kind: DataKeyKind::Vector(_),
+            ..
+        })
+    )
+}
+
+/// Graph writes run through a vector drop: its delete steps hold no scope
+/// gate, and nothing routes to the Dropping generation.
+///
+/// The first delete step is held after staging, with every permit it took.
+/// Writes to indexed documents then commit without waiting for it and stage
+/// nothing for the retired generation. More writes run while the remaining
+/// steps finish the drop, one delete step for each partition however many
+/// rows it holds: the rows are left to compactions. A reclaim then leaves no
+/// row of the generation, and a rebuilt index serves the final documents.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn graph_writes_run_through_a_vector_drop_and_never_reach_its_generation() {
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let name = "drop-concurrent-writes";
+    let db = open(name, Arc::clone(&store), config()).await;
+    let (ids, mut state) = seed_vectors(&db, 80).await;
+    let operation = create(&db, vector_spec()).await;
+    assert_eq!(wait_terminal(&db, &operation).await, "succeeded");
+    let dropped = target(&db, QueueFamily::Vector).await;
+    drain(&db, dropped).await;
+    let physical_rows = rows(&db, is_vector_row).await.len();
+    db.close().await.unwrap();
+
+    assert!(
+        physical_rows > 8 * CLEANUP_ROWS,
+        "deleting the rows one by one would take many steps"
+    );
+    let db = open(name, Arc::clone(&store), narrow_cleanup_config()).await;
+    let pause = StepPause::arm(db.inner_db().as_ref(), |progress| {
+        matches!(
+            progress,
+            IndexOperationProgress::VectorCleanup(VectorCleanupProgress::DeletePhysical(_))
+        )
+    });
+    let drop_operation = drop_index(&db, vector_spec()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(60), pause.reached())
+        .await
+        .expect("the first delete step stages");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        concurrent_vector_writes(&db, &ids, &mut state, 0),
+    )
+    .await
+    .expect("graph writes do not wait for a held drop step");
+    pause.release();
+    for round in 1..=4 {
+        concurrent_vector_writes(&db, &ids, &mut state, round).await;
+    }
+    assert_eq!(wait_terminal(&db, &drop_operation).await, "succeeded");
+    // Tenants "a" and "b" were indexed; a step whose commit lost a conflict
+    // stages again.
+    assert!(
+        (2..8).contains(&pause.stagings()),
+        "each partition took one delete step, not one for every batch of rows: {}",
+        pause.stagings()
+    );
+    assert!(
+        rows(&db, is_vector_row).await.len() > 8 * CLEANUP_ROWS,
+        "the drop left its rows to compactions"
+    );
+
+    assert_no_vector_generation_rows(&db).await;
+    // No write made during the drop was queued for the retired generation.
+    assert!(db.inner_db().get(dropped.key()).await.unwrap().is_none());
+    assert!(db
+        .index_operation_backlog()
+        .outstanding_targets()
+        .is_empty());
+    db.close().await.unwrap();
+
+    let db = open(name, Arc::clone(&store), config()).await;
+    let rebuild = create(&db, vector_spec()).await;
+    assert_eq!(wait_terminal(&db, &rebuild).await, "succeeded");
+    let rebuilt = target(&db, QueueFamily::Vector).await;
+    assert_ne!(rebuilt, dropped, "the rebuilt index is a new generation");
+    drain(&db, rebuilt).await;
+    assert_exact_vectors(&db, &state, SearchConsistency::Strong).await;
+    assert_exact_vectors(&db, &state, SearchConsistency::Eventual).await;
+    db.close().await.unwrap();
+}
+
+/// A drop whose writer dies in any cleanup stage finishes after the restart,
+/// and a reclaim then leaves no row.
+///
+/// The store admits dropped-generation entries, so the drop has no stage
+/// that deletes build deltas; the stages of a row-by-row cleanup resume in
+/// the vector driver contracts.
+///
+/// The drop is held at a step of each stage in turn. Everything before that
+/// step is made durable, and nothing after it ever uploads: the steps that
+/// run on are lost with the WAL tail, and so is every position the driver
+/// held, as after a kill. The restarted drop redoes them from its last
+/// durable checkpoint, scanning from the start, while graph writes run, and
+/// a rebuilt index serves the final documents.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drops_finish_after_losing_their_wal_tail_in_every_cleanup_stage() {
+    use crate::search::vector::gated_wal::{GatedWalStore, WalUploads};
+    const BOUND: Duration = Duration::from_secs(60);
+
+    let crashes: [(&str, step_pause::StepMatcher); 3] = [
+        ("retire-cache", |progress| {
+            matches!(
+                progress,
+                IndexOperationProgress::VectorCleanup(VectorCleanupProgress::RetireCache(_))
+            )
+        }),
+        // Mid-stage: the first partition's delete step is already durable.
+        ("delete-physical", |progress| {
+            matches!(
+                progress,
+                IndexOperationProgress::VectorCleanup(VectorCleanupProgress::DeletePhysical(scan))
+                    if scan.cursor.is_some()
+            )
+        }),
+        ("finalize", |progress| {
+            matches!(
+                progress,
+                IndexOperationProgress::VectorCleanup(VectorCleanupProgress::Finalize(_))
+            )
+        }),
+    ];
+    for (stage, crash_step) in crashes {
+        let name = format!("drop-lost-wal-tail-{stage}");
+        let store = Arc::new(GatedWalStore::new());
+        let db = open(&name, Arc::clone(&store) as Arc<dyn ObjectStore>, config()).await;
+        let (ids, mut state) = seed_vectors(&db, 80).await;
+        let operation = create(&db, vector_spec()).await;
+        assert_eq!(wait_terminal(&db, &operation).await, "succeeded");
+        drain(&db, target(&db, QueueFamily::Vector).await).await;
+        db.close().await.unwrap();
+
+        let db = open(
+            &name,
+            Arc::clone(&store) as Arc<dyn ObjectStore>,
+            narrow_cleanup_config(),
+        )
+        .await;
+        let pause = StepPause::arm(db.inner_db().as_ref(), crash_step);
+        let drop_operation = drop_index(&db, vector_spec()).await.unwrap();
+        tokio::time::timeout(BOUND, pause.reached())
+            .await
+            .unwrap_or_else(|_| panic!("the drop reaches {stage}"));
+        // Everything so far is durable, and nothing after it ever uploads.
+        tokio::time::timeout(BOUND, db.inner_db().flush())
+            .await
+            .unwrap_or_else(|_| panic!("the drop held at {stage} flushes"))
+            .unwrap();
+        let id = crate::index_lifecycle::IndexOperationId::new(
+            uuid::Uuid::parse_str(&drop_operation).unwrap(),
+        )
+        .unwrap();
+        let durable = db
+            .get_index_operation(DataScope::LegacyUnscoped, id)
+            .await
+            .unwrap();
+        store.uploads.send_replace(WalUploads::Held);
+        pause.release();
+        let deadline = Instant::now() + BOUND;
+        while db
+            .get_index_operation(DataScope::LegacyUnscoped, id)
+            .await
+            .unwrap()
+            == durable
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the drop held at {stage} did not run on: {durable:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // The crash: the old writer never uploads again.
+        drop(pause);
+        drop(db);
+
+        let restarted = Arc::new(store.restarted());
+        let db = tokio::time::timeout(
+            BOUND,
+            open(
+                &name,
+                Arc::clone(&restarted) as Arc<dyn ObjectStore>,
+                narrow_cleanup_config(),
+            ),
+        )
+        .await
+        .expect("a new writer opens over the crashed one");
+        // Graph writes run while the recovered drop redoes its lost steps.
+        concurrent_vector_writes(&db, &ids, &mut state, 0).await;
+        assert_eq!(
+            wait_terminal(&db, &drop_operation).await,
+            "succeeded",
+            "the drop that crashed in {stage} finishes"
+        );
+        assert_no_vector_generation_rows(&db).await;
+        db.close().await.unwrap();
+
+        let db = open(&name, restarted as Arc<dyn ObjectStore>, config()).await;
+        let rebuild = create(&db, vector_spec()).await;
+        assert_eq!(wait_terminal(&db, &rebuild).await, "succeeded");
+        drain(&db, target(&db, QueueFamily::Vector).await).await;
+        assert_exact_vectors(&db, &state, SearchConsistency::Strong).await;
+        assert_exact_vectors(&db, &state, SearchConsistency::Eventual).await;
+        db.close().await.unwrap();
+    }
+}
+
+/// Proves a refresh arms no entry whose commit is not durable.
+///
+/// The drop's last step, which writes the `Dropped` record and the entry,
+/// commits while no WAL upload can land. A refresh that reads the entry does
+/// not arm it: its flush waits for that WAL tail, so no compaction discards
+/// rows on the strength of a commit a crash takes back. The writer is then
+/// abandoned, and the one that restarts without the tail finishes the drop
+/// and writes the same entry again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_entry_whose_commit_is_not_durable_is_not_armed() {
+    use crate::index_lifecycle::dropped;
+    use crate::search::vector::gated_wal::{GatedWalStore, WalUploads};
+    const BOUND: Duration = Duration::from_secs(60);
+
+    let name = "unarmed-entry-lost-wal-tail";
+    let store = Arc::new(GatedWalStore::new());
+    let db = open(name, Arc::clone(&store) as Arc<dyn ObjectStore>, config()).await;
+    seed_vectors(&db, 16).await;
+    let operation = create(&db, vector_spec()).await;
+    assert_eq!(wait_terminal(&db, &operation).await, "succeeded");
+    drain(&db, target(&db, QueueFamily::Vector).await).await;
+
+    let pause = StepPause::arm(db.inner_db().as_ref(), |progress| {
+        matches!(
+            progress,
+            IndexOperationProgress::VectorCleanup(VectorCleanupProgress::Finalize(_))
+        )
+    });
+    let drop_operation = drop_index(&db, vector_spec()).await.unwrap();
+    tokio::time::timeout(BOUND, pause.reached())
+        .await
+        .expect("the drop reaches its last step");
+    // Everything before the last step is durable; nothing after it uploads.
+    tokio::time::timeout(BOUND, db.inner_db().flush())
+        .await
+        .expect("the held drop flushes")
+        .unwrap();
+    store.uploads.send_replace(WalUploads::Held);
+    pause.release();
+    let entries = tokio::time::timeout(BOUND, async {
+        loop {
+            let entries = dropped::load_entries(db.inner_db().as_ref()).await.unwrap();
+            if !entries.is_empty() {
+                break entries;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the last step commits its entry");
+    assert_eq!(entries.len(), 1);
+
+    let crate::HelixStorage::Writer(writer) = db.storage() else {
+        panic!("the contract opens a writer");
+    };
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            writer.dropped().refresh(writer.db())
+        )
+        .await
+        .is_err(),
+        "a refresh returned while the entry it read was not durable"
+    );
+    assert_eq!(writer.dropped().armed(), vec![]);
+    // The crash: the old writer never uploads again.
+    drop(pause);
+    drop(db);
+
+    let restarted = Arc::new(store.restarted());
+    let db = tokio::time::timeout(
+        BOUND,
+        open(name, restarted as Arc<dyn ObjectStore>, config()),
+    )
+    .await
+    .expect("a new writer opens over the crashed one");
+    assert_eq!(wait_terminal(&db, &drop_operation).await, "succeeded");
+    assert_eq!(
+        dropped::load_entries(db.inner_db().as_ref()).await.unwrap(),
+        entries
+    );
+    db.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn a_queue_retained_before_its_index_drops_is_discarded_and_never_published() {
     let db = open("drop-retained", Arc::new(InMemory::new()), config()).await;
@@ -1985,6 +2342,114 @@ async fn aborting_a_build_discards_operations_written_during_it() {
         .index_operation_backlog()
         .outstanding_targets()
         .is_empty());
+    db.close().await.unwrap();
+}
+
+/// Proves an aborted build leaves the rows it wrote to compactions under one
+/// entry, and that a reclaim discards exactly those rows, the aborted
+/// generation's partition mappings and the entry. Every other row, the
+/// generation rebuilt while the entry waited included, is identical, and the
+/// rebuilt index answers as exact search does.
+#[tokio::test]
+async fn a_reclaim_discards_exactly_an_aborted_generation() {
+    let db = open("abort-reclaim", Arc::new(InMemory::new()), config()).await;
+    let (_, mut state) = seed_vectors(&db, 60).await;
+    let (operation, target, held) = create_held(&db, vector_spec(), QueueFamily::Vector, 1).await;
+    let paused = pause_when(&db, &operation, held, |status| scanned(status) >= 8).await;
+    let abort = drop_index(&db, vector_spec())
+        .await
+        .unwrap_or_else(|| operation.clone());
+    drop(paused);
+    assert_eq!(wait_terminal(&db, &operation).await, "aborted");
+    if abort != operation {
+        assert_eq!(wait_terminal(&db, &abort).await, "succeeded");
+    }
+
+    let crate::HelixStorage::Writer(writer) = db.storage() else {
+        panic!("the fixture opens a writer");
+    };
+    writer
+        .dropped()
+        .refresh(writer.db())
+        .await
+        .expect("the abort's entry arms");
+    let armed = writer.dropped().armed();
+    let [(entry, armed)] = &armed[..] else {
+        panic!("one abort leaves one entry: {armed:?}");
+    };
+    assert_eq!(
+        (entry.index_id, entry.generation),
+        (target.index_id, target.generation)
+    );
+    assert_eq!(armed.value.rows, DroppedGenerationRows::PartitionedVector);
+    assert!(
+        armed.owners.len() > 1,
+        "the build mapped a partition before it was aborted"
+    );
+    // Everything a reclaim removes: the rows the entry gives up, then the
+    // mappings that list its physical ids, then the entry.
+    let gone = armed
+        .owners
+        .iter()
+        .flat_map(|owner| owner.prefixes())
+        .chain([
+            keys::ManagedIndexKey::data_prefix(
+                target.scope,
+                keys::ScopedKey::generation_prefix(
+                    keys::RecordKind::VectorPartitionMapping,
+                    target.index_id,
+                    target.generation,
+                ),
+            ),
+            keys::ManagedIndexKey::Global {
+                kind: keys::GlobalKey::DroppedGeneration {
+                    index_id: target.index_id,
+                    generation: target.generation,
+                },
+            }
+            .to_bytes(),
+        ])
+        .collect::<Vec<_>>();
+
+    let rebuilt = create(&db, vector_spec()).await;
+    assert_eq!(wait_terminal(&db, &rebuilt).await, "succeeded");
+    // SlateDB publishes its oldest open reader when it flushes a memtable, so
+    // the reclaim's flush needs a row to carry.
+    state.insert(
+        add(&db, [7.0, 7.0], "doc", Some("a")).await,
+        ("a", [7.0, 7.0]),
+    );
+    let before = rows(&db, |_| true).await;
+    assert!(
+        before
+            .keys()
+            .filter(|key| gone.iter().any(|prefix| key.starts_with(prefix)))
+            .count()
+            > armed.owners.len(),
+        "the abort left rows of its generation to compactions"
+    );
+    let deadline = Instant::now() + Duration::from_secs(60);
+    crate::index_lifecycle::dropped::reclaim_fixture(&db).await;
+    let expected = before
+        .into_iter()
+        .filter(|(key, _)| !gone.iter().any(|prefix| key.starts_with(prefix)))
+        .collect::<BTreeMap<_, _>>();
+    // The writer stops reading the discarded rows at its next manifest poll.
+    while rows(&db, |_| true).await != expected {
+        assert!(
+            Instant::now() < deadline,
+            "the reclaim left or removed other rows than the aborted generation's"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_exact_vectors(&db, &state, SearchConsistency::Strong).await;
+    assert_eq!(
+        db.reclaim_dropped_index_storage(Duration::from_secs(60))
+            .await
+            .unwrap(),
+        crate::DroppedStorageReclaim::Idle
+    );
+    assert_eq!(db.dropped_index_storage().entries(), 0);
     db.close().await.unwrap();
 }
 

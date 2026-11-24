@@ -190,9 +190,27 @@ pub(crate) async fn process_background_step(
     let admitted = matches!(pacing, Some(Ok(true)));
     let copy = if admitted && copy_due {
         Some(
-            label_identity::copy_hash_label_rows_once(writer, labels)
-                .await
-                .map(label_identity::LabelCopyStep::advanced),
+            async {
+                let step = label_identity::copy_hash_label_rows_once(writer, labels).await?;
+                // The open left the copying store below the version that
+                // admits dropped-generation entries, and the session that
+                // published the copy owes the move until it commits: a
+                // failure here backs the copy off, and the steps after it,
+                // which find the copy published, try the move again. A
+                // crash before the commit leaves it to the next open, and a
+                // session that only finds the copy published owes nothing.
+                match labels.admission() {
+                    label_identity::DroppedAdmission::Owed => {
+                        #[cfg(test)]
+                        labels.admission_fault()?;
+                        crate::index_lifecycle::dropped::admit(writer.db()).await?;
+                        labels.admitted();
+                    }
+                    label_identity::DroppedAdmission::NotOwed => {}
+                }
+                Ok(step.advanced())
+            }
+            .await,
         )
     } else {
         None
@@ -367,7 +385,7 @@ mod tests {
                 .await
                 .expect("migration worker test database opens"),
         );
-        let writer = Arc::new(HelixWriter::new(Arc::clone(&db), 64, 32));
+        let writer = Arc::new(HelixWriter::new(Arc::clone(&db), 64, 32, Arc::default()));
         (db, writer)
     }
 

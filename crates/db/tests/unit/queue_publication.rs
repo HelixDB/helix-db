@@ -2016,11 +2016,23 @@ async fn wal_only_queue_work_contract() {
             if let Some(dropped) = dropped {
                 Box::pin(drive(&db, dropped)).await;
             }
+            if retired {
+                // The drop left the generation's rows to compactions; a
+                // reclaim discards them, and the writer stops reading them
+                // at its next manifest poll.
+                crate::index_lifecycle::dropped::reclaim_fixture(&db).await;
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while !vector_placements(&db).await.is_empty()
+                    && std::time::Instant::now() < deadline
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
             let placements = vector_placements(&db).await;
             if retired {
                 assert!(
                     placements.is_empty(),
-                    "{case}: cleanup reclaimed the dropped generation: {placements:?}"
+                    "{case}: a reclaim discarded the dropped generation: {placements:?}"
                 );
             } else {
                 assert_eq!(

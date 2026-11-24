@@ -306,12 +306,21 @@ async fn create_index_operation_in_transaction_with_physical(
                     }
                 };
             }
+            // A recreated index builds the first generation after its last
+            // that no dropped-generation entry names. No entry names a
+            // generation of a fresh index id: its allocation skipped every
+            // id an entry names.
             IndexStateV2::Dropped {
                 last_generation, ..
             } => (
                 ExpectedCanonicalRevision::Exact(index.revision()),
                 index.index_id(),
-                last_generation.checked_next()?,
+                super::dropped::unclaimed_generation(
+                    &transaction,
+                    index.index_id(),
+                    last_generation.checked_next()?,
+                )
+                .await?,
                 index.revision().checked_next()?,
             ),
         },
@@ -614,7 +623,8 @@ async fn linked_operation(
             | IndexV2MetadataValue::LogicalIndexIdWatermark(_)
             | IndexV2MetadataValue::VectorPhysicalIdWatermark(_)
             | IndexV2MetadataValue::LegacyVectorPhysicalReservation(_)
-            | IndexV2MetadataValue::TextCompactionPointer(_) => Err(corruption(
+            | IndexV2MetadataValue::TextCompactionPointer(_)
+            | IndexV2MetadataValue::DroppedGeneration(_) => Err(corruption(
                 "operation pointer key contains the wrong value kind",
             )),
         })

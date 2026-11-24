@@ -1752,7 +1752,7 @@ async fn row_contracts() {
         .unwrap();
 
     let mut cleanup_scan = VectorRows::new(&measured, &keyspace)
-        .cleanup_scan(None)
+        .cleanup_scan(VectorCleanupFrom::Start)
         .await
         .unwrap();
     let mut cleanup_rows = Vec::new();
@@ -1778,34 +1778,46 @@ async fn row_contracts() {
         let position = |lane| VectorStorageLane::ALL.iter().position(|all| *all == lane);
         position(pair[0]) <= position(pair[1])
     }));
-    // A scan resumed after any row yields exactly the rows behind it: the
-    // rest of that row's lane, then every later lane from its start.
-    for (position, after) in cleanup_rows.iter().enumerate() {
-        let mut resumed = VectorRows::new(&measured, &keyspace)
-            .cleanup_scan(Some(after))
-            .await
-            .unwrap();
-        let mut keys = Vec::new();
-        while let Some(row) = resumed.next().await.unwrap() {
-            keys.push(row.physical_key);
+    // A scan from any row yields exactly the rows from it on, with or
+    // without the row itself: the rest of that row's lane, then every later
+    // lane from its start.
+    for (position, row) in cleanup_rows.iter().enumerate() {
+        for (from, first) in [
+            (VectorCleanupFrom::After(row), position + 1),
+            (VectorCleanupFrom::At(row), position),
+        ] {
+            let mut resumed = VectorRows::new(&measured, &keyspace)
+                .cleanup_scan(from)
+                .await
+                .unwrap();
+            let mut keys = Vec::new();
+            while let Some(row) = resumed.next().await.unwrap() {
+                keys.push(row.physical_key);
+            }
+            assert_eq!(
+                keys,
+                cleanup_rows[first..]
+                    .iter()
+                    .map(|row| row.physical_key.clone())
+                    .collect::<Vec<_>>(),
+                "scan {from:?}"
+            );
         }
-        assert_eq!(
-            keys,
-            cleanup_rows[position + 1..]
-                .iter()
-                .map(|row| row.physical_key.clone())
-                .collect::<Vec<_>>()
-        );
     }
     // A token is a position only in the keyspace that issued it.
     assert!(cleanup_rows[0].belongs_to(&keyspace));
     assert!(!cleanup_rows[0].belongs_to(&foreign));
-    assert!(matches!(
-        VectorRows::new(&measured, &foreign)
-            .cleanup_scan(Some(&cleanup_rows[0]))
-            .await,
-        Err(HelixDbError::InvariantViolation(_))
-    ));
+    for from in [
+        VectorCleanupFrom::After(&cleanup_rows[0]),
+        VectorCleanupFrom::At(&cleanup_rows[0]),
+    ] {
+        assert!(matches!(
+            VectorRows::new(&measured, &foreign)
+                .cleanup_scan(from)
+                .await,
+            Err(HelixDbError::InvariantViolation(_))
+        ));
+    }
     // A token whose key lies outside its lane's prefix for this index is
     // rejected instead of being read as a position.
     let escaped = VectorCleanupRow {
@@ -1818,7 +1830,7 @@ async fn row_contracts() {
     };
     assert!(matches!(
         VectorRows::new(&measured, &keyspace)
-            .cleanup_scan(Some(&escaped))
+            .cleanup_scan(VectorCleanupFrom::After(&escaped))
             .await,
         Err(HelixDbError::InvariantViolation(_))
     ));

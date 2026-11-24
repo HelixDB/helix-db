@@ -300,6 +300,7 @@ async fn run_inner(entity_count: u64) -> Result<VectorMigrationScaleReport> {
         Arc::clone(&db),
         config.id_lease_size(),
         config.id_lease_refill_threshold(),
+        Arc::default(),
     );
     let scope = DataScope::LegacyUnscoped;
     let definition: ValidatedDynamicIndexDefinition = config::VectorIndexDefinition::new_node(

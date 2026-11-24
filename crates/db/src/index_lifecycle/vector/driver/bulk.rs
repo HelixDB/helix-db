@@ -303,7 +303,9 @@
 //!   however many attempts were counted; the build goes on serially, here or
 //!   under the older binary.
 //! - Abort the build. An abort stores the cleanup progress every binary
-//!   reads, and cleanup deletes the partly written graph like any other.
+//!   reads, and cleanup removes the partly written graph like any other
+//!   generation: row by row on a store that admits no dropped-generation
+//!   entry, which is the only store such a binary can still open.
 //!
 //! A build that finished its bulk stage needs neither: `ValidateDescriptor`
 //! and everything after it are stages every binary reads.
@@ -427,9 +429,11 @@
 //!   its reads, and a scan that finds no row has no position to hand on. A
 //!   process restarted while it deletes pays that scan once more, over the
 //!   tombstones written so far.
-//!   Aborting a partly written build deletes through the cleanup every build
-//!   shares, which was slower still: 46 to 60 minutes for a fifth of a
-//!   million-vector graph.
+//!   Aborting a partly written build goes through the cleanup every build
+//!   shares. On a store that admits dropped-generation entries it leaves the
+//!   graph to compactions. On one that does not it deletes row by row, which
+//!   was slower still: 46 to 60 minutes for a fifth of a million-vector
+//!   graph.
 //! - A build whose operation never runs another step in this process keeps
 //!   its reservation, and builds waiting for it keep waiting. Every way an
 //!   operation leaves its scan (completion, a blocker, an abort) runs a step
@@ -447,7 +451,8 @@ use super::{
     corruption, delete_delta_and_applied_rows, delete_physical_namespace, deterministic_layer,
     lifecycle_write_measurement, measurement_error, operation_error, progressed_build,
     stage_applied, AppliedStateTransition, CleanupWorkOutcome, IndexStateVectorPhysical,
-    PhysicalCleanupOutcome, VectorBatchAccounting, VectorPlanTarget, VectorStepResult,
+    PhysicalCleanupOutcome, PhysicalRows, VectorBatchAccounting, VectorCleanupResume,
+    VectorPlanTarget, VectorStepResult,
 };
 use crate::config::{
     self, IndexLifecycleScanTuning, SearchIndexBatchLimits, VectorBulkBuildMemory,
@@ -2957,8 +2962,12 @@ async fn discard<D: Distance>(
     let nothing = OperationCounters::default();
     let (applied_resume, physical_resume) = match resume {
         None => (None, None),
-        Some(DiscardResume::AppliedState(key)) => (Some(key), None),
-        Some(DiscardResume::Physical(row)) => (None, Some(row)),
+        Some(DiscardResume::AppliedState(key)) => {
+            (Some(VectorCleanupResume::Work(key.clone())), None)
+        }
+        Some(DiscardResume::Physical(row)) => {
+            (None, Some(VectorCleanupResume::Physical(row.clone())))
+        }
     };
     // A physical position follows a scan of the applied state from its start
     // that found nothing, and no later step writes applied state.
@@ -2968,7 +2977,7 @@ async fn discard<D: Distance>(
             step.scope,
             step.operation,
             &[RecordKind::AppliedState],
-            applied_resume,
+            applied_resume.as_ref(),
             nothing,
             step.limits,
         )
@@ -2995,7 +3004,10 @@ async fn discard<D: Distance>(
         step.transaction,
         handle.generation(),
         None,
-        physical_resume,
+        physical_resume.as_ref(),
+        // No dropped-generation entry names a generation that is still
+        // building, so no compaction discards any of these rows.
+        PhysicalRows::All,
         step.definition.element_kind(),
         nothing,
         step.limits,

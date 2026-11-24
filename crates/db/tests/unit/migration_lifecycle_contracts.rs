@@ -2241,6 +2241,9 @@ pub(crate) async fn run_migration_contracts() {
     )
     .await
     .expect("all persisted legacy definitions migrate");
+    // The current format is reached once the background worker has published
+    // the label copy and admitted dropped-generation entries.
+    migrated.wait_for_background_migrations().await;
     assert_storage_version(migrated.inner_db().as_ref(), IndexStorageVersion::CURRENT).await;
     assert_legacy_catalog_empty(&migrated).await;
     crate::index_lifecycle::repository::require_reader_bootstrap_or_legacy(
@@ -2764,6 +2767,7 @@ async fn advance_vector_recovery_job(
         Arc::clone(&raw),
         config.id_lease_size(),
         config.id_lease_refill_threshold(),
+        Arc::default(),
     );
     let target = recovery_stage.migration_stage();
     let target_rank = recovery_stage

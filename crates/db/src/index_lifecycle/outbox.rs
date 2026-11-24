@@ -37,12 +37,12 @@ pub(crate) mod step_pause;
 
 use super::failpoints::{self, IndexOutboxFailpoint};
 use super::{
-    BuildOperationOutcome, ClaimContinuation, ClaimSequence, IndexOperationBlocker,
-    IndexOperationExecutionState, IndexOperationFamily, IndexOperationId, IndexOperationOutcome,
-    IndexOperationProgress, IndexOperationPublicProgress, IndexOperationRecord,
-    IndexOperationRevision, IndexOperationStage, IndexOperationStatus, IndexRecordV2,
-    IndexRevision, IndexStateTransition, IndexStateV2, IndexV2MetadataValue, OperationClaim,
-    OperationQueuePointerValue, WriterEpoch,
+    dropped, BuildOperationOutcome, ClaimContinuation, ClaimSequence, DroppedGenerationRows,
+    DroppedGenerationValue, IndexOperationBlocker, IndexOperationExecutionState,
+    IndexOperationFamily, IndexOperationId, IndexOperationOutcome, IndexOperationProgress,
+    IndexOperationPublicProgress, IndexOperationRecord, IndexOperationRevision,
+    IndexOperationStage, IndexOperationStatus, IndexRecordV2, IndexRevision, IndexStateTransition,
+    IndexStateV2, IndexV2MetadataValue, OperationClaim, OperationQueuePointerValue, WriterEpoch,
 };
 
 /// Maximum scheduling delay used for one observation of a persisted deadline.
@@ -158,6 +158,51 @@ pub(crate) enum IndexOperationStepResult {
     /// The canonical lifecycle state and terminal operation commit together,
     /// durably.
     Completed(IndexOperationOutcome),
+    /// The cleanup `ends` as [`Self::Completed`] does, and the same commit
+    /// stores the generation's dropped-generation entry for `rows`: what is
+    /// left of the generation is for compactions to discard (see
+    /// [`dropped`]).
+    ///
+    /// This is the only way an entry is written, and the function that
+    /// commits it, [`execute_claimed_step_with_evidence`], is the one that
+    /// tells the writer's registry: no path that ends a drop can store an
+    /// entry and leave the registry untold.
+    LeftToCompactions {
+        ends: CleanupEnd,
+        rows: DroppedGenerationRows,
+    },
+}
+
+/// Which operation a cleanup that leaves its rows to compactions ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CleanupEnd {
+    /// The drop of an index.
+    Drop,
+    /// The abort of a build.
+    BuildAbort,
+}
+
+impl CleanupEnd {
+    /// Every end a cleanup has.
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 2] = [Self::Drop, Self::BuildAbort];
+
+    /// The end of a cleanup that runs for a drop, or with `aborting` for the
+    /// abort of a build, as the drivers' cleanup steps are told.
+    pub(crate) const fn of(aborting: bool) -> Self {
+        match aborting {
+            true => Self::BuildAbort,
+            false => Self::Drop,
+        }
+    }
+
+    /// The outcome the operation completes with.
+    pub(crate) const fn outcome(self) -> IndexOperationOutcome {
+        match self {
+            Self::Drop => IndexOperationOutcome::DropSucceeded,
+            Self::BuildAbort => IndexOperationOutcome::Build(BuildOperationOutcome::Aborted),
+        }
+    }
 }
 
 /// Non-persisted vector planner/cache measurements from one bounded step.
@@ -277,12 +322,19 @@ impl StepResourceUsage {
 /// when the repository transaction that staged the step committed. Every
 /// failure, conflict, or transient release drops it with the step, so a driver
 /// can never observe state derived from uncommitted writes.
+#[allow(
+    clippy::enum_variant_names,
+    reason = "a variant names the family whose driver keeps the state, and only the vector driver keeps any so far"
+)]
 pub(crate) enum CommittedStepState {
     /// Vector planning cache that mirrors the physical rows this step commits.
     VectorBuild(Box<super::vector::OfferedVectorBuild>),
     /// Progress of an in-memory bulk vector graph that this step's commit
     /// makes true of the stored rows.
     VectorBulkBuild(super::vector::BulkBuildCommit),
+    /// Where a vector cleanup resumes once the deletes this step staged are
+    /// committed.
+    VectorCleanup(super::vector::VectorCleanupResume),
 }
 
 impl core::fmt::Debug for CommittedStepState {
@@ -290,6 +342,7 @@ impl core::fmt::Debug for CommittedStepState {
         match self {
             Self::VectorBuild(_) => formatter.write_str("CommittedStepState::VectorBuild"),
             Self::VectorBulkBuild(_) => formatter.write_str("CommittedStepState::VectorBulkBuild"),
+            Self::VectorCleanup(_) => formatter.write_str("CommittedStepState::VectorCleanup"),
         }
     }
 }
@@ -1110,6 +1163,7 @@ pub(crate) async fn claim_operation(
         reason = "feature builds use the evidence-returning wrapper in automatic and explicit harnesses"
     )
 )]
+#[cfg(test)]
 pub(crate) async fn execute_claimed_step(
     db: &Db,
     claimed: &ClaimedOperation,
@@ -1124,6 +1178,8 @@ pub(crate) async fn execute_claimed_step(
         limits,
         now_unix_millis,
         ClaimContinuation::Release,
+        // A fixture that steps by hand has no retirer to tell.
+        &dropped::Registry::default(),
     )
     .await?
     .evidence
@@ -1162,6 +1218,7 @@ pub(crate) async fn execute_claimed_step_with_evidence(
     limits: SearchIndexBatchLimits,
     now_unix_millis: u64,
     claim: ClaimContinuation,
+    dropped: &dropped::Registry,
 ) -> Result<ExecutedOperationStep> {
     let started = Instant::now();
     if driver.family() != claimed.record.family() {
@@ -1259,9 +1316,18 @@ pub(crate) async fn execute_claimed_step_with_evidence(
             counters,
             committed_state,
         } = execution;
-        if matches!(step, IndexOperationStepResult::TransientFailure) {
-            return Ok(None);
-        }
+        // A step that leaves rows to compactions completes as any other
+        // does; its commit also stores the generation's entry.
+        let (step, left) = match step {
+            IndexOperationStepResult::TransientFailure => return Ok(None),
+            IndexOperationStepResult::LeftToCompactions { ends, rows } => (
+                IndexOperationStepResult::Completed(ends.outcome()),
+                Some(rows),
+            ),
+            step @ (IndexOperationStepResult::Progressed(_)
+            | IndexOperationStepResult::Blocked(_)
+            | IndexOperationStepResult::Completed(_)) => (step, None),
+        };
 
         failpoints::trip(IndexOutboxFailpoint::CheckpointStagingBefore)?;
         // A step that parked its operation releases the claim with its own
@@ -1328,6 +1394,14 @@ pub(crate) async fn execute_claimed_step_with_evidence(
                     }
                     IndexOperationOutcome::DropSucceeded => IndexStateTransition::CompleteDrop,
                 };
+                // Staged here, the entry commits in the transaction that
+                // moves the record to `Dropped`, or neither does: a failure
+                // is the step's, and blocks the operation like any other.
+                stage_dropped_entry(&transaction, claimed.scope, &operation, left)
+                    .await
+                    .inspect_err(|_| {
+                        driver_failed = true;
+                    })?;
                 let next_index = index.transition(transition)?;
                 let next = operation
                     .complete(outcome, next_index.revision())
@@ -1358,7 +1432,12 @@ pub(crate) async fn execute_claimed_step_with_evidence(
                     None,
                 )
             }
-            IndexOperationStepResult::TransientFailure => return Ok(None),
+            IndexOperationStepResult::TransientFailure
+            | IndexOperationStepResult::LeftToCompactions { .. } => {
+                return Err(corruption(
+                    "a step result reached its checkpoint in a form resolved before it",
+                ));
+            }
         };
         failpoints::trip(IndexOutboxFailpoint::CheckpointStagingAfter)?;
         failpoints::trip_for_operation(
@@ -1463,6 +1542,13 @@ pub(crate) async fn execute_claimed_step_with_evidence(
         // A failed upload closes the database, like a failed durable commit.
         db.flush().await?;
     }
+    // Every step commits here and nowhere else. One that completed an
+    // operation may have stored a dropped-generation entry, or moved the
+    // catalog a quarantined entry is checked against: the writer's registry
+    // is told, whichever family, driver or caller the step came from.
+    if committed == CommittedOperationStep::Completed {
+        dropped.operation_committed();
+    }
     prepared.after_commit().await;
     driver
         .after_commit(
@@ -1537,6 +1623,36 @@ impl DriverFailure {
         }
         Self::Blocks
     }
+}
+
+/// Stages the dropped-generation entry of the generation `operation` gives
+/// up, whose rows its cleanup `left` to compactions; nothing when it left
+/// none.
+///
+/// This is the only place an entry is written, and its one caller is the
+/// function that commits the step and then tells the writer's registry.
+async fn stage_dropped_entry(
+    transaction: &DbTransaction,
+    scope: DataScope,
+    operation: &IndexOperationRecord,
+    left: Option<DroppedGenerationRows>,
+) -> Result<()> {
+    let Some(rows) = left else {
+        return Ok(());
+    };
+    if !dropped::admitted(transaction).await? {
+        return Err(corruption(
+            "a step left rows to compactions on a store that admits no dropped-generation entry",
+        ));
+    }
+    dropped::stage_entry(
+        transaction,
+        dropped::DroppedGeneration {
+            index_id: operation.index_id(),
+            generation: operation.generation(),
+        },
+        DroppedGenerationValue { scope, rows },
+    )
 }
 
 /// Records failures only after failed preparation and staging have been discarded.
@@ -4228,6 +4344,7 @@ mod tests {
             SearchIndexBackfillLimits::default().batch(),
             0,
             claim,
+            &dropped::Registry::default(),
         )
         .await
         .unwrap()
@@ -4315,7 +4432,10 @@ mod tests {
             assert_eq!(
                 decided.evidence.outcome,
                 match fate {
-                    IndexOperationStepResult::Completed(_) => CommittedOperationStep::Completed,
+                    IndexOperationStepResult::Completed(_)
+                    | IndexOperationStepResult::LeftToCompactions { .. } => {
+                        CommittedOperationStep::Completed
+                    }
                     IndexOperationStepResult::Progressed(_)
                     | IndexOperationStepResult::TransientFailure
                     | IndexOperationStepResult::Blocked(_) => CommittedOperationStep::Blocked,
@@ -4323,6 +4443,186 @@ mod tests {
             );
             db.close().await.unwrap();
         }
+    }
+
+    /// A cleanup ends a drop or, when its driver is told it is aborting, the
+    /// abort of a build, and the operation completes with the outcome of
+    /// that end.
+    #[test]
+    fn a_cleanup_ends_a_drop_or_the_abort_of_a_build() {
+        assert_eq!(
+            [false, true].map(CleanupEnd::of),
+            [CleanupEnd::Drop, CleanupEnd::BuildAbort]
+        );
+        assert_eq!(
+            CleanupEnd::ALL.map(CleanupEnd::outcome),
+            [
+                IndexOperationOutcome::DropSucceeded,
+                IndexOperationOutcome::Build(BuildOperationOutcome::Aborted),
+            ]
+        );
+    }
+
+    /// A step that leaves a generation's rows to compactions has the
+    /// generation's entry stored by the commit that ends the operation, and
+    /// that commit tells the writer's registry: this function is the one
+    /// place either happens, whatever driver or caller the step came from.
+    /// A step that ends an operation without an entry tells the registry
+    /// too, since the catalog moved; one that ends none tells it nothing;
+    /// and a store that admits no entry is given none.
+    #[tokio::test]
+    async fn the_commit_that_ends_an_operation_stores_its_entry_and_tells_the_registry() {
+        use crate::index_lifecycle::IndexStorageVersion;
+
+        async fn told(registry: &dropped::Registry) -> bool {
+            tokio::time::timeout(std::time::Duration::ZERO, registry.changed())
+                .await
+                .is_ok()
+        }
+        let scope = DataScope::LegacyUnscoped;
+        let limits = SearchIndexBackfillLimits::default().batch();
+        let left = IndexOperationStepResult::LeftToCompactions {
+            ends: CleanupEnd::BuildAbort,
+            rows: DroppedGenerationRows::Secondary,
+        };
+        let marker = |version| {
+            (
+                ManagedIndexKey::Global {
+                    kind: GlobalKey::StorageVersion,
+                }
+                .to_bytes(),
+                encode_metadata_value(&IndexV2MetadataValue::StorageVersion(version)),
+            )
+        };
+
+        // A store that admits entries.
+        let db = db("outbox-dropped-entry").await;
+        let (key, value) = marker(IndexStorageVersion::DROPPED_GENERATIONS);
+        db.put(key, value).await.unwrap();
+        let (index, operation) = fixture(97);
+        enqueue_operation(
+            &db,
+            scope,
+            ExpectedCanonicalRevision::Absent,
+            &index,
+            &operation,
+        )
+        .await
+        .unwrap();
+        let epoch = WriterEpoch::from_bytes([97; 16]).unwrap();
+        let registry = dropped::Registry::default();
+        let claimed = claim(&db, &operation, epoch, 1).await;
+        let progressed = execute_claimed_step_with_evidence(
+            &db,
+            &claimed,
+            &StaticDriver(IndexOperationStepResult::Progressed(activate_progress(1))),
+            limits,
+            0,
+            ClaimContinuation::Release,
+            &registry,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            progressed.evidence.outcome,
+            CommittedOperationStep::Progressed
+        );
+        assert!(!told(&registry).await);
+        assert_eq!(dropped::load_entries(&db).await.unwrap(), vec![]);
+
+        abort_operation(&db, scope, operation.operation_id())
+            .await
+            .unwrap();
+        let claimed = claim(&db, &operation, epoch, 2).await;
+        let ended = execute_claimed_step_with_evidence(
+            &db,
+            &claimed,
+            &StaticDriver(left.clone()),
+            limits,
+            0,
+            ClaimContinuation::Release,
+            &registry,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ended.evidence.outcome, CommittedOperationStep::Completed);
+        assert_eq!(
+            dropped::load_entries(&db).await.unwrap(),
+            vec![(
+                dropped::DroppedGeneration {
+                    index_id: operation.index_id(),
+                    generation: operation.generation(),
+                },
+                DroppedGenerationValue {
+                    scope,
+                    rows: DroppedGenerationRows::Secondary,
+                },
+            )]
+        );
+        assert!(told(&registry).await);
+        assert!(!told(&registry).await);
+        db.close().await.unwrap();
+
+        // A store that admits none: the step fails whole and blocks the
+        // operation, which then ends without an entry.
+        let unadmitted = Db::builder("outbox-dropped-entry-unadmitted", Arc::new(InMemory::new()))
+            .build()
+            .await
+            .unwrap();
+        let db = unadmitted;
+        let (key, value) = marker(IndexStorageVersion::LABEL_IDENTITY);
+        db.put(key, value).await.unwrap();
+        let (index, operation) = fixture(98);
+        enqueue_operation(
+            &db,
+            scope,
+            ExpectedCanonicalRevision::Absent,
+            &index,
+            &operation,
+        )
+        .await
+        .unwrap();
+        abort_operation(&db, scope, operation.operation_id())
+            .await
+            .unwrap();
+        let epoch = WriterEpoch::from_bytes([98; 16]).unwrap();
+        let registry = dropped::Registry::default();
+        let claimed = claim(&db, &operation, epoch, 1).await;
+        let refused = execute_claimed_step_with_evidence(
+            &db,
+            &claimed,
+            &StaticDriver(left),
+            limits,
+            0,
+            ClaimContinuation::Release,
+            &registry,
+        )
+        .await
+        .unwrap();
+        assert_eq!(refused.evidence.outcome, CommittedOperationStep::Blocked);
+        assert_eq!(dropped::load_entries(&db).await.unwrap(), vec![]);
+        assert!(!told(&registry).await);
+        retry_operation(&db, scope, operation.operation_id())
+            .await
+            .unwrap();
+        let claimed = claim(&db, &operation, epoch, 2).await;
+        let ended = execute_claimed_step_with_evidence(
+            &db,
+            &claimed,
+            &StaticDriver(IndexOperationStepResult::Completed(
+                IndexOperationOutcome::Build(BuildOperationOutcome::Aborted),
+            )),
+            limits,
+            0,
+            ClaimContinuation::Release,
+            &registry,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ended.evidence.outcome, CommittedOperationStep::Completed);
+        assert_eq!(dropped::load_entries(&db).await.unwrap(), vec![]);
+        assert!(told(&registry).await);
+        db.close().await.unwrap();
     }
 
     /// A crash loses exactly the steps after the last durable commit, and a
@@ -4487,6 +4787,7 @@ mod tests {
             SearchIndexBackfillLimits::default().batch(),
             0,
             ClaimContinuation::Retain,
+            &dropped::Registry::default(),
         )
         .await
         .unwrap();
@@ -4523,6 +4824,7 @@ mod tests {
             SearchIndexBackfillLimits::default().batch(),
             0,
             ClaimContinuation::Retain,
+            &dropped::Registry::default(),
         )
         .await
         .unwrap();
@@ -4606,6 +4908,7 @@ mod tests {
             SearchIndexBackfillLimits::default().batch(),
             0,
             ClaimContinuation::Retain,
+            &dropped::Registry::default(),
         )
         .await
         .unwrap();

@@ -223,10 +223,16 @@ back, do one of:
   deletes what the build wrote, at about 2,600 entities a second, and continues it
   serially, which the earlier image can take over.
 - Abort it (`abort_index_operation`), wait until it reports `aborted`, and create the
-  index again afterwards. An earlier image can finish the abort itself. Under either
-  image an abort deletes what the build wrote far more slowly than the way above: 46 to
-  60 minutes for a fifth of a million-vector index, and more than in proportion for
-  more.
+  index again afterwards. On a database below index storage version 8 the abort deletes
+  what the build wrote row by row, far more slowly than the way above: 46 to 60 minutes
+  for a fifth of a million-vector index, and more than in proportion for more; an
+  earlier image can finish that abort itself. From version 8 the abort ends within
+  seconds and leaves those rows to compactions, which discard them.
+
+These steps make a database readable by an earlier image only while its index storage
+version is below 8. This image moves a database it opens as the writer to version 8,
+which images from before in-memory builds refuse whatever its builds report: going back
+past that needs a backup taken before the upgrade.
 
 A `blocked` build needs none of these: it left the in-memory path before it blocked.
 The one exception still reports `bulk` while blocked, a build whose written rows could

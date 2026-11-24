@@ -1286,19 +1286,38 @@ async fn budgets_lowered_mid_build_block_later_stages_typed_contract() {
     }
 }
 
-/// A partition scan reads each partition's manifest root before it admits a
+/// Every tenant partition and every unpartitioned index owns one manifest root
 /// document, so an input budget smaller than one root blocks the scan with a
 /// typed manifest limit: for a tenant partition whose budget was lowered
 /// after the source scan, and for the lone root of an empty unpartitioned
-/// index. Abort cleanup under that budget cannot admit one of the tenant
-/// generation's rows either, so it blocks until the budget is restored and
-/// the abort retried; the empty generation has no rows and aborts at once.
+/// index.
+///
+/// On a store that admits dropped-generation entries, abort cleanup under
+/// that budget completes at once all the same, for the tenant generation as
+/// for the empty one: it reads none of the generation's rows, which it
+/// leaves to compactions. The index is gone from the catalog with the abort,
+/// and a reclaim then leaves no dropped generation behind.
+///
+/// On a store that admits none, the cleanup deletes the rows itself and
+/// cannot admit one of the tenant generation's under that budget: it blocks
+/// until the budget is restored and the abort retried, and leaves no entry.
 #[test]
 fn input_budgets_below_one_manifest_root_block_partition_scans() {
     run_contract(
         "input_budgets_below_one_manifest_root_block_partition_scans",
         input_budgets_below_one_manifest_root_block_partition_scans_contract,
     );
+}
+
+/// Which store a root-budget fixture runs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootBudgetStore {
+    /// Admits dropped-generation entries, as every store a current writer
+    /// has opened with leave to migrate does.
+    Admits,
+    /// Is put back, after each open, at the version before the entries: a
+    /// store only a failover writer has served.
+    Refuses,
 }
 
 async fn input_budgets_below_one_manifest_root_block_partition_scans_contract() {
@@ -1309,9 +1328,24 @@ async fn input_budgets_below_one_manifest_root_block_partition_scans_contract() 
         })
         .expect("a one-byte input budget validates"),
     );
-    for tenant in [true, false] {
-        let name = format!("queue-text-root-budget-{tenant}");
+    for (tenant, store) in [
+        (true, RootBudgetStore::Admits),
+        (true, RootBudgetStore::Refuses),
+        (false, RootBudgetStore::Admits),
+    ] {
+        let name = format!("queue-text-root-budget-{tenant}-{store:?}");
         let controller = LifecycleTestController::new();
+        // The store holds no entry whenever this is called.
+        let settle = |db: db::HelixDB| async move {
+            match store {
+                RootBudgetStore::Admits => {}
+                RootBudgetStore::Refuses => db
+                    .lifecycle_test_refuse_dropped_generation_entries()
+                    .await
+                    .expect("the fixture store refuses entries"),
+            }
+            db
+        };
         let (token, db, operation_id) = if tenant {
             let (token, db) = open(&name, DbConfig::new(), LifecycleTestScheduling::Explicit).await;
             insert(
@@ -1330,10 +1364,11 @@ async fn input_budgets_below_one_manifest_root_block_partition_scans_contract() 
             .await;
             db.close().await.expect("scanned fixture closes");
             let db = reopen(&token, one_byte.clone(), LifecycleTestScheduling::Explicit).await;
-            (token, db, operation_id)
+            (token, settle(db).await, operation_id)
         } else {
             let (token, db) =
                 open(&name, one_byte.clone(), LifecycleTestScheduling::Explicit).await;
+            let db = settle(db).await;
             let operation_id = create(&db, &controller, text_definition(false)).await;
             (token, db, operation_id)
         };
@@ -1341,40 +1376,86 @@ async fn input_budgets_below_one_manifest_root_block_partition_scans_contract() 
         assert_eq!(
             blocker(&terminal),
             Some(IndexOperationBlockerCode::ManifestLimit),
-            "tenant {tenant}: {terminal:?}"
+            "tenant {tenant} {store:?}: {terminal:?}"
         );
         assert_eq!(
             terminal.common().stage,
             IndexOperationStage::ScanPartitions,
-            "tenant {tenant}: {terminal:?}"
+            "tenant {tenant} {store:?}: {terminal:?}"
         );
 
         db.abort_index_operation(DataScope::LegacyUnscoped, operation_id)
             .await
             .expect("a blocked build accepts abort");
         let aborting = drive_to_terminal(&db, &controller, operation_id).await;
-        if !tenant {
-            assert!(
-                matches!(aborting, IndexOperationStatus::Aborted { .. }),
-                "an empty generation aborts at once: {aborting:?}"
-            );
-            db.close().await.expect("empty fixture closes");
-            continue;
-        }
+        let db = match store {
+            RootBudgetStore::Admits => {
+                assert!(
+                    matches!(aborting, IndexOperationStatus::Aborted { .. }),
+                    "an abort reads no row of its generation, so no budget blocks it: \
+                     tenant {tenant}: {aborting:?}"
+                );
+                db
+            }
+            // The cleanup deletes the rows itself, and one row is more
+            // than the budget admits.
+            RootBudgetStore::Refuses => {
+                assert_eq!(
+                    blocker(&aborting),
+                    Some(IndexOperationBlockerCode::InvariantViolation),
+                    "cleanup cannot admit one row: {aborting:?}"
+                );
+                db.close().await.expect("blocked cleanup fixture closes");
+                let db = settle(
+                    reopen(&token, DbConfig::new(), LifecycleTestScheduling::Explicit).await,
+                )
+                .await;
+                db.retry_index_operation(DataScope::LegacyUnscoped, operation_id)
+                    .await
+                    .expect("a blocked abort accepts retry");
+                let aborted = drive_to_terminal(&db, &controller, operation_id).await;
+                assert!(
+                    matches!(aborted, IndexOperationStatus::Aborted { .. }),
+                    "restored budget completes the abort: {aborted:?}"
+                );
+                // It deleted every row and left no entry: nothing to reclaim.
+                assert_eq!(
+                    db.reclaim_dropped_index_storage(Duration::from_secs(30))
+                        .await
+                        .expect("the reclaim runs"),
+                    db::DroppedStorageReclaim::Idle
+                );
+                db
+            }
+        };
+        // On an admitting store the abort left one dropped generation, rows
+        // or none. Nothing reads it, and a reclaim discards whatever it had:
+        // none is left waiting.
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                match db
+                    .reclaim_dropped_index_storage(Duration::from_secs(30))
+                    .await
+                    .expect("the reclaim runs")
+                {
+                    db::DroppedStorageReclaim::Idle => break,
+                    // A flushed write moves the store's oldest reader on.
+                    db::DroppedStorageReclaim::Retained { .. } => {
+                        insert(&db, TENANT_DOC, vec![document("charlie", None, Some("b"))]).await;
+                    }
+                    db::DroppedStorageReclaim::Compacted { .. }
+                    | db::DroppedStorageReclaim::Declined { .. }
+                    | db::DroppedStorageReclaim::Incomplete { .. } => {}
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the aborted generation is reclaimed in time");
         assert_eq!(
-            blocker(&aborting),
-            Some(IndexOperationBlockerCode::InvariantViolation),
-            "cleanup cannot admit one row: {aborting:?}"
-        );
-        db.close().await.expect("blocked cleanup fixture closes");
-        let db = reopen(&token, DbConfig::new(), LifecycleTestScheduling::Explicit).await;
-        db.retry_index_operation(DataScope::LegacyUnscoped, operation_id)
-            .await
-            .expect("a blocked abort accepts retry");
-        let aborted = drive_to_terminal(&db, &controller, operation_id).await;
-        assert!(
-            matches!(aborted, IndexOperationStatus::Aborted { .. }),
-            "restored budget completes the abort: {aborted:?}"
+            db.dropped_index_storage().entries(),
+            0,
+            "tenant {tenant} {store:?}"
         );
         db.close().await.expect("aborted fixture closes");
     }

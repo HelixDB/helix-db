@@ -380,7 +380,7 @@ async fn one_worker_finishes_the_label_copy_and_the_datetime_conversion() {
     // The label copy published and its cleanup removed every hash row.
     assert_eq!(
         startup::storage_version(inner.as_ref()).await.unwrap(),
-        IndexStorageVersion::LABEL_IDENTITY
+        IndexStorageVersion::DROPPED_GENERATIONS
     );
     assert_eq!(legacy_label_rows(inner.as_ref()).await, 0);
 
@@ -826,6 +826,119 @@ async fn a_failure_backs_off_from_the_end_of_its_step() {
     db.close().await.unwrap();
 }
 
+/// The session that publishes the label copy owes its store the move to the
+/// version that admits dropped-generation entries until that move commits.
+/// One that fails leaves the store at the published version and backs the
+/// copy off; the step at its retry time finds the copy published, makes the
+/// move and clears the backoff. A session that only ever finds the copy
+/// published, as a writer that opened the store already published has, owes
+/// nothing: it finishes every migration and leaves the version where it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_admission_that_fails_after_the_copy_publishes_is_retried_by_its_session_alone() {
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let db = HelixDB::open_with_object_store_and_config(
+        DB_PATH,
+        Arc::clone(&store),
+        tuned(config::MigrationWorkerMode::Disabled),
+    )
+    .await
+    .unwrap();
+    write_graph(&db, DataScope::LegacyUnscoped).await;
+    label_identity::make_legacy_label_fixture(&db.inner_db())
+        .await
+        .unwrap();
+    db.close().await.unwrap();
+
+    let db = HelixDB::open_with_object_store_and_config(
+        DB_PATH,
+        Arc::clone(&store),
+        tuned(config::MigrationWorkerMode::Disabled),
+    )
+    .await
+    .unwrap();
+    let inner = db.inner_db();
+    let version = || async { startup::storage_version(inner.as_ref()).await.unwrap() };
+    assert_eq!(version().await, IndexStorageVersion::LABEL_COPY);
+    let initial = initial_backoff(&db);
+    let start = Instant::now();
+
+    // The session that copies: its first move after publishing fails.
+    let mut publishing = label_identity::LabelCopySession::new();
+    publishing.fail_admissions(1);
+    let mut retries = MigrationRetries::default();
+    let mut steps = 0;
+    let failed = loop {
+        let step = step(&db, &mut publishing, &mut retries, start).await;
+        if !matches!(step, BackgroundStep::Active { failure: None }) {
+            break step;
+        }
+        steps += 1;
+        assert!(steps < 1_000, "the label copy stalled");
+    };
+    assert!(
+        matches!(
+            &failed,
+            BackgroundStep::Active { failure: Some(_) }
+                | BackgroundStep::RetryAt {
+                    failure: Some(_),
+                    ..
+                }
+        ),
+        "the step that published reports the failed move: {failed:?}"
+    );
+    assert_eq!(version().await, IndexStorageVersion::LABEL_IDENTITY);
+    assert_eq!(
+        publishing.admission(),
+        label_identity::DroppedAdmission::Owed
+    );
+    let backing_off = Retry::At {
+        at: start + initial,
+        delay: initial,
+    };
+    assert_eq!(retries.label_copy, backing_off);
+
+    // A session that finds the copy published finishes everything else and
+    // does not make the move.
+    let mut late = label_identity::LabelCopySession::new();
+    let mut late_retries = MigrationRetries::default();
+    let mut steps = 0;
+    while !matches!(
+        step(&db, &mut late, &mut late_retries, start).await,
+        BackgroundStep::Finished
+    ) {
+        steps += 1;
+        assert!(steps < 1_000, "the late session's migrations stalled");
+    }
+    assert_eq!(late.admission(), label_identity::DroppedAdmission::NotOwed);
+    assert_eq!(version().await, IndexStorageVersion::LABEL_IDENTITY);
+
+    // Before its retry time the publishing session still waits, and has not
+    // finished.
+    let waiting = step(&db, &mut publishing, &mut retries, start).await;
+    assert!(
+        matches!(
+            waiting,
+            BackgroundStep::RetryAt { at, failure: None } if at == start + initial
+        ),
+        "the owed move is still pending: {waiting:?}"
+    );
+    assert_eq!(version().await, IndexStorageVersion::LABEL_IDENTITY);
+
+    // At its retry time the copy is found published and the move commits.
+    let moved = step(&db, &mut publishing, &mut retries, start + initial).await;
+    assert!(
+        matches!(moved, BackgroundStep::Finished),
+        "nothing is left once the move commits: {moved:?}"
+    );
+    assert_eq!(version().await, IndexStorageVersion::DROPPED_GENERATIONS);
+    assert_eq!(
+        publishing.admission(),
+        label_identity::DroppedAdmission::NotOwed
+    );
+    assert_eq!(retries.label_copy, Retry::Ready);
+    db.close().await.unwrap();
+}
+
 /// A migration job that fails on every attempt backs off alone: the label
 /// cleanup, one row a step, finishes while it waits. It still holds the
 /// datetime conversion back, which never rewrites rows an unfinished job
@@ -882,7 +995,7 @@ async fn a_failing_migration_job_backs_off_alone_and_blocks_the_datetime_convers
     let inner = db.inner_db();
     assert_eq!(
         startup::storage_version(inner.as_ref()).await.unwrap(),
-        IndexStorageVersion::LABEL_IDENTITY
+        IndexStorageVersion::DROPPED_GENERATIONS
     );
     assert_eq!(legacy_label_rows(inner.as_ref()).await, 0);
 
@@ -1117,7 +1230,7 @@ async fn the_worker_paces_each_migration_on_its_own_backoff_and_exits_once_all_f
     .expect("the worker exits once the copy finishes");
     assert_eq!(
         startup::storage_version(inner.as_ref()).await.unwrap(),
-        IndexStorageVersion::LABEL_IDENTITY
+        IndexStorageVersion::DROPPED_GENERATIONS
     );
     assert_eq!(legacy_label_rows(inner.as_ref()).await, 0);
     worker.stop().await;

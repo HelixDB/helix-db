@@ -37,6 +37,7 @@ mod acceptance_tests;
 mod catalog;
 #[cfg(test)]
 mod cursor_contracts;
+pub(crate) mod dropped;
 pub(crate) mod failpoints;
 pub(crate) mod graph_mutation;
 pub(crate) mod label_audit;

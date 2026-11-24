@@ -214,8 +214,10 @@ impl LabelIdentityMigration {
 /// holds steps back while the writer's flush backlog is high, the step limits
 /// conflicts and slow commits narrow, the exact edge labels of the scope the
 /// copy is in, and running totals for the progress log. Nothing in it is
-/// needed to resume: a fresh session, of this writer or another, picks up from
-/// the stored progress.
+/// needed to resume the copy: a fresh session, of this writer or another,
+/// picks up from the stored progress. What the session that published the
+/// copy still owes its store ([`DroppedAdmission`]) is lost with it, and left
+/// to the next open with leave to migrate.
 pub(crate) struct LabelCopySession {
     max_rows: usize,
     max_members: u64,
@@ -240,10 +242,31 @@ pub(crate) struct LabelCopySession {
     /// elapsed time count from here, not from the copy.
     cleanup_started: Option<Instant>,
     reported: Instant,
+    admission: DroppedAdmission,
     /// Runs before the next batch commits, so a test can write between a
     /// batch's reads and its commit.
     #[cfg(test)]
     before_commit: Option<tests::CommitPause>,
+    /// Moves to the version that admits dropped-generation entries that
+    /// fail before they read the store.
+    #[cfg(test)]
+    admission_faults: u8,
+}
+
+/// Whether a session still owes its store the move to the version that
+/// admits dropped-generation entries.
+///
+/// Only the session that published the copy owes it: the open that started
+/// the copy left the store below that version for it. A session that finds
+/// the copy published owes nothing, so a writer that opened a store already
+/// published, as a managed failover writer does, serves it as it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DroppedAdmission {
+    /// This session has not published the copy, or the move it owed is done.
+    NotOwed,
+    /// This session published the copy and the move has not committed: every
+    /// copy step tries it again until it does.
+    Owed,
 }
 
 impl LabelCopySession {
@@ -268,9 +291,42 @@ impl LabelCopySession {
             started: Instant::now(),
             cleanup_started: None,
             reported: Instant::now(),
+            admission: DroppedAdmission::NotOwed,
             #[cfg(test)]
             before_commit: None,
+            #[cfg(test)]
+            admission_faults: 0,
         }
+    }
+
+    /// Whether this session still owes its store the move that follows the
+    /// copy it published.
+    pub(crate) const fn admission(&self) -> DroppedAdmission {
+        self.admission
+    }
+
+    /// Records that the move this session owed has committed.
+    pub(crate) fn admitted(&mut self) {
+        self.admission = DroppedAdmission::NotOwed;
+    }
+
+    /// Makes the next `count` moves this session owes fail before they read
+    /// the store.
+    #[cfg(test)]
+    pub(crate) fn fail_admissions(&mut self, count: u8) {
+        self.admission_faults = count;
+    }
+
+    /// The failure of the next owed move, if one is set.
+    #[cfg(test)]
+    pub(crate) fn admission_fault(&mut self) -> Result<()> {
+        let Some(left) = self.admission_faults.checked_sub(1) else {
+            return Ok(());
+        };
+        self.admission_faults = left;
+        Err(HelixDbError::TransactionConflict(
+            "injected admission fault".to_string(),
+        ))
     }
 
     /// A session whose cleanup deletes at most `rows` hash rows a step.
@@ -670,7 +726,10 @@ pub(crate) async fn copy_hash_label_rows_once(
 /// Publishes the finished copy: flushes its batches, then moves the store to
 /// [`IndexStorageVersion::LABEL_IDENTITY`] and deletes the progress in one
 /// durable commit.
-async fn publish(writer: &crate::HelixWriter, session: &LabelCopySession) -> Result<LabelCopyStep> {
+async fn publish(
+    writer: &crate::HelixWriter,
+    session: &mut LabelCopySession,
+) -> Result<LabelCopyStep> {
     let db = writer.db();
     db.flush().await?;
     let progress_key =
@@ -683,6 +742,7 @@ async fn publish(writer: &crate::HelixWriter, session: &LabelCopySession) -> Res
     )
     .await?;
     writer.observe_storage_version(Some(IndexStorageVersion::LABEL_IDENTITY));
+    session.admission = DroppedAdmission::Owed;
     let totals = session.totals;
     tracing::info!(
         copied = totals.copied,
@@ -1561,7 +1621,12 @@ impl LabelStage {
         let version = match self {
             Self::BeforeCopy => IndexStorageVersion::OPERATION_QUEUES,
             Self::Copying => {
-                let writer = crate::HelixWriter::new(std::sync::Arc::new(db.clone()), 4, 2);
+                let writer = crate::HelixWriter::new(
+                    std::sync::Arc::new(db.clone()),
+                    4,
+                    2,
+                    std::sync::Arc::default(),
+                );
                 start_label_identity_copy(db)
                     .await
                     .expect("the copy starts");
@@ -1589,7 +1654,12 @@ impl LabelStage {
     /// to [`Self::Published`]: starts the copy unless it runs, copies what
     /// is left, publishes, and deletes every hash row.
     pub(crate) async fn publish(db: &Db) {
-        let writer = crate::HelixWriter::new(std::sync::Arc::new(db.clone()), 4, 2);
+        let writer = crate::HelixWriter::new(
+            std::sync::Arc::new(db.clone()),
+            4,
+            2,
+            std::sync::Arc::default(),
+        );
         start_label_identity_copy(db)
             .await
             .expect("the copy starts");

@@ -22,14 +22,21 @@ use super::{
 /// Version 7 marks stores whose label index rows are keyed by the exact label
 /// rather than its 64-bit hash: the copy published, and readers switched to
 /// the exact rows at once.
-pub(crate) const CURRENT_INDEX_STORAGE_VERSION: u16 = 0x0007;
+///
+/// Version 8 marks stores that may hold dropped-generation entries (global
+/// key kind `0x0D`), whose rows compaction discards instead of the drop
+/// deleting them. It re-encodes nothing: a version-7 store is upgraded by
+/// rewriting only this marker. Binaries that support at most version 7 fail
+/// on the unknown global key kind, and would also leave a dropped
+/// generation's rows behind, so they refuse it.
+pub(crate) const CURRENT_INDEX_STORAGE_VERSION: u16 = 0x0008;
 
 /// Decoded non-zero index storage format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct IndexStorageVersion(u16);
 
 impl IndexStorageVersion {
-    pub(crate) const CURRENT: Self = Self::LABEL_IDENTITY;
+    pub(crate) const CURRENT: Self = Self::DROPPED_GENERATIONS;
     pub(crate) const MAX_SUPPORTED: Self = Self::CURRENT;
     /// First version with equality bitmaps and the V4 cleanup marker. Older
     /// stores need the equality-bitmap migration; this and later versions
@@ -42,7 +49,10 @@ impl IndexStorageVersion {
     /// hash keys and written under both their hash and exact keys.
     pub(crate) const LABEL_COPY: Self = Self(0x0006);
     /// First version whose label index rows are read under the exact label.
-    pub(crate) const LABEL_IDENTITY: Self = Self(CURRENT_INDEX_STORAGE_VERSION);
+    pub(crate) const LABEL_IDENTITY: Self = Self(0x0007);
+    /// First version that may hold dropped-generation entries. Below it a
+    /// drop deletes its rows itself and writes no entry.
+    pub(crate) const DROPPED_GENERATIONS: Self = Self(CURRENT_INDEX_STORAGE_VERSION);
 
     pub(crate) fn new(value: u16) -> Result<Self, crate::encoding::error::EncodingError> {
         if value == 0 {
@@ -218,6 +228,39 @@ pub(crate) struct TextCompactionPointerValue {
     pub(crate) revision: super::TextManifestRevision,
 }
 
+/// Family and physical layout of a dropped generation: together with the
+/// key's index id and generation they name every row compaction may discard.
+///
+/// Stored as a family byte ([`super::IndexDefinitionFamily`]) followed by a
+/// layout byte; the enum admits only the pairs that exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum DroppedGenerationRows {
+    /// Unpartitioned vector generation: the hot and layer-0 rows of one
+    /// physical id, plus the rows keyed by the generation.
+    UnpartitionedVector {
+        physical_index_id: VectorPhysicalIndexId,
+    },
+    /// Partitioned vector generation: its partition-mapping rows, which stay
+    /// until the entry is deleted, list the physical ids.
+    PartitionedVector,
+    /// Secondary generation: every row is keyed by the generation.
+    Secondary,
+    /// Text generation: every row is keyed by the generation.
+    Text,
+}
+
+/// Value of one dropped-generation entry.
+///
+/// The value holds no sequence. A writer that arms the entry reads it through
+/// a snapshot and takes that snapshot's sequence, at or after the entry's
+/// commit, as the entry's gate: a compaction may discard the generation's
+/// rows only once no snapshot older than the gate can still read them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct DroppedGenerationValue {
+    pub(crate) scope: DataScope,
+    pub(crate) rows: DroppedGenerationRows,
+}
+
 /// Values used only under the global V2 keyspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum IndexV2MetadataValue {
@@ -227,6 +270,7 @@ pub(crate) enum IndexV2MetadataValue {
     OperationQueuePointer(OperationQueuePointerValue),
     LegacyVectorPhysicalReservation(LegacyVectorPhysicalReservation),
     TextCompactionPointer(TextCompactionPointerValue),
+    DroppedGeneration(DroppedGenerationValue),
 }
 
 #[cfg(test)]

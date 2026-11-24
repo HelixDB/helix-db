@@ -212,7 +212,8 @@ pub async fn run_deterministic_lifecycle_reopen_contracts() {
 }
 
 /// Returns every stable process-abort boundary from the production failpoint ADT.
-pub fn index_outbox_failpoint_names() -> [&'static str; 16] {
+pub fn index_outbox_failpoint_names(
+) -> [&'static str; crate::index_lifecycle::failpoints::IndexOutboxFailpoint::ALL.len()] {
     crate::index_lifecycle::failpoints::IndexOutboxFailpoint::ALL
         .map(|failpoint| failpoint.as_str())
 }
@@ -1772,6 +1773,7 @@ impl HelixDB {
             limits,
             now_unix_millis,
             crate::index_lifecycle::ClaimContinuation::Release,
+            self.lifecycle_test_writer()?.dropped(),
         )
         .await?
         .evidence;
@@ -1796,13 +1798,31 @@ impl HelixDB {
         ))
     }
 
-    fn lifecycle_test_writer_db(&self) -> Result<&slatedb::Db> {
+    /// Puts the store back at the storage version before dropped-generation
+    /// entries, as a store that has only been served by writers that do not
+    /// move it: its drops and aborts then delete their rows one by one. An
+    /// open with leave to migrate admits the store again, so a fixture
+    /// calls this after each open.
+    ///
+    /// # Errors
+    ///
+    /// A read-only handle, a store that already holds an entry, or a failed
+    /// read or write.
+    pub async fn lifecycle_test_refuse_dropped_generation_entries(&self) -> Result<()> {
+        crate::index_lifecycle::dropped::unadmit_fixture(self.lifecycle_test_writer_db()?).await
+    }
+
+    fn lifecycle_test_writer(&self) -> Result<&crate::HelixWriter> {
         let HelixStorage::Writer(writer) = self.storage() else {
             return Err(HelixDbError::WriterModeRequired {
                 actual: self.mode().as_str(),
             });
         };
-        Ok(writer.db())
+        Ok(writer)
+    }
+
+    fn lifecycle_test_writer_db(&self) -> Result<&slatedb::Db> {
+        Ok(self.lifecycle_test_writer()?.db())
     }
 
     async fn lifecycle_test_writer_epoch(&self) -> Result<crate::index_lifecycle::WriterEpoch> {

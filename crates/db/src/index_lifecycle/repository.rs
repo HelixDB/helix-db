@@ -1035,12 +1035,40 @@ fn stale_generation(handle: &ActiveIndexHandle) -> HelixDbError {
     }
 }
 
-/// Reserves the current logical ID and advances its watermark in `transaction`.
+/// Reserves the first logical ID at or after the watermark that no
+/// dropped-generation entry names, and advances the watermark past it in
+/// `transaction`.
+///
+/// An entry names only ids below the watermark unless the store is damaged;
+/// such an entry is quarantined, and the ids it names are skipped here
+/// rather than handed to an index whose rows it could then claim.
 pub(crate) async fn allocate_index_id(
     transaction: &impl crate::transaction::Mutation,
 ) -> Result<IndexId> {
     let key = global_key(GlobalKey::LogicalIndexIdWatermark);
-    let Some(value) = transaction.get(&key).await? else {
+    let watermark = load_logical_index_watermark(transaction).await?;
+    let allocated = super::dropped::unclaimed_index_id(transaction, watermark.next_id).await?;
+    if allocated.get() == u64::MAX {
+        return Err(HelixDbError::IdentifierExhausted("logical index ID"));
+    }
+    let next_id = allocated.checked_next()?;
+    transaction.put(
+        key,
+        encode_metadata_value(&IndexV2MetadataValue::LogicalIndexIdWatermark(
+            LogicalIndexIdWatermark { next_id },
+        )),
+    )?;
+    Ok(allocated)
+}
+
+/// Loads the logical index ID watermark: no ID at or above it was ever
+/// allocated, and [`allocate_index_id`] reserves the first of them that no
+/// dropped-generation entry names.
+pub(crate) async fn load_logical_index_watermark(
+    read: &(impl DbReadOps + Sync),
+) -> Result<LogicalIndexIdWatermark> {
+    let key = global_key(GlobalKey::LogicalIndexIdWatermark);
+    let Some(value) = read.get(key).await? else {
         return Err(HelixDbError::MigrationRequired {
             reason: "V2 logical index watermark is missing".to_string(),
         });
@@ -1052,18 +1080,7 @@ pub(crate) async fn allocate_index_id(
             reason: "V2 logical index watermark contains the wrong value kind".to_string(),
         });
     };
-    if watermark.next_id.get() == u64::MAX {
-        return Err(HelixDbError::IdentifierExhausted("logical index ID"));
-    }
-    let allocated = watermark.next_id;
-    let next_id = allocated.checked_next()?;
-    transaction.put(
-        key,
-        encode_metadata_value(&IndexV2MetadataValue::LogicalIndexIdWatermark(
-            LogicalIndexIdWatermark { next_id },
-        )),
-    )?;
-    Ok(allocated)
+    Ok(watermark)
 }
 
 /// Reserves the current vector physical ID and advances its watermark.
@@ -1344,6 +1361,7 @@ mod tests {
         }
         assert_eq!(writes(0x0006), LabelRowWrites::HashAndExact);
         assert_eq!(writes(0x0007), LabelRowWrites::Exact);
+        assert_eq!(writes(0x0008), LabelRowWrites::Exact);
         for (writes, hash, exact, reads) in [
             (
                 LabelRowWrites::Hash,
@@ -1372,7 +1390,7 @@ mod tests {
 
     #[test]
     fn storage_versions_map_to_their_reader_compatibility() {
-        assert_eq!(IndexStorageVersion::CURRENT.get(), 0x0007);
+        assert_eq!(IndexStorageVersion::CURRENT.get(), 0x0008);
         assert_eq!(IndexStorageVersion::LABEL_IDENTITY.get(), 0x0007);
         assert_eq!(IndexStorageVersion::LABEL_COPY.get(), 0x0006);
         assert_eq!(IndexStorageVersion::OPERATION_QUEUES.get(), 0x0005);
@@ -1498,8 +1516,8 @@ mod tests {
         assert!(matches!(
             validate_bootstrap_values(&marker, None, None),
             Err(HelixDbError::UnsupportedIndexStorageVersion {
-                found: 0x0008,
-                supported: 0x0007,
+                found: 0x0009,
+                supported: 0x0008,
             })
         ));
     }
@@ -1544,7 +1562,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejected_writer_preflight_preserves_every_byte() {
-        for rejected_state in ["malformed", "partial", "v1", "v8"] {
+        for rejected_state in ["malformed", "partial", "v1", "future"] {
             let db = Db::builder(
                 format!("writer-preflight-preserves-{rejected_state}"),
                 Arc::new(InMemory::new()),
@@ -1586,8 +1604,13 @@ mod tests {
                 "v1" => {
                     put_bootstrap_tuple(&db, IndexStorageVersion::new(0x0001).unwrap()).await;
                 }
-                "v8" => {
-                    put_bootstrap_tuple(&db, IndexStorageVersion::new(0x0008).unwrap()).await;
+                "future" => {
+                    put_bootstrap_tuple(
+                        &db,
+                        IndexStorageVersion::new(IndexStorageVersion::MAX_SUPPORTED.get() + 1)
+                            .unwrap(),
+                    )
+                    .await;
                 }
                 _ => unreachable!(),
             }

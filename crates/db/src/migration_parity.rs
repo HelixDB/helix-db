@@ -1270,6 +1270,7 @@ async fn scan_v2_state(
                 }
             }
             GlobalKey::TextCompactionPointer(_)
+            | GlobalKey::DroppedGeneration { .. }
             | GlobalKey::LogicalIndexIdWatermark
             | GlobalKey::VectorPhysicalIdWatermark => {}
         }

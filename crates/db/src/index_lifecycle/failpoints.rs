@@ -48,12 +48,24 @@ pub enum IndexOutboxFailpoint {
     QueueRemovalBefore,
     /// Immediately after pointer removal is staged.
     QueueRemovalAfter,
+    /// After a drop deleted the rows no compaction filter may match, before
+    /// its dropped-generation entry is staged beside the `Dropped` record.
+    DroppedEntryStagingBefore,
+    /// After a dropped-generation entry committed, before this process
+    /// flushes and arms it.
+    DroppedEntryArmBefore,
+    /// After a retirement pass proved the rows of some entries gone, before
+    /// it deletes anything.
+    DroppedEntryDeleteBefore,
+    /// After a retirement pass deleted the partition mappings of the entries
+    /// it retires, before it deletes the entries.
+    DroppedEntryDeleteAfterMappings,
 }
 
 impl IndexOutboxFailpoint {
     /// Complete set used by crash-matrix tests and external harnesses.
     #[cfg(any(test, feature = "index-lifecycle-testing"))]
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 20] = [
         Self::DdlEnqueueBefore,
         Self::DdlEnqueueAfterStaging,
         Self::ClaimBefore,
@@ -70,6 +82,10 @@ impl IndexOutboxFailpoint {
         Self::ActivationAfter,
         Self::QueueRemovalBefore,
         Self::QueueRemovalAfter,
+        Self::DroppedEntryStagingBefore,
+        Self::DroppedEntryArmBefore,
+        Self::DroppedEntryDeleteBefore,
+        Self::DroppedEntryDeleteAfterMappings,
     ];
 
     /// Stable snake-case environment value.
@@ -91,6 +107,10 @@ impl IndexOutboxFailpoint {
             Self::ActivationAfter => "activation_after",
             Self::QueueRemovalBefore => "queue_removal_before",
             Self::QueueRemovalAfter => "queue_removal_after",
+            Self::DroppedEntryStagingBefore => "dropped_entry_staging_before",
+            Self::DroppedEntryArmBefore => "dropped_entry_arm_before",
+            Self::DroppedEntryDeleteBefore => "dropped_entry_delete_before",
+            Self::DroppedEntryDeleteAfterMappings => "dropped_entry_delete_after_mappings",
         }
     }
 

@@ -43,6 +43,7 @@ use crate::encoding::v2::values::indexes::vector::{
 };
 use crate::encoding::NodeId;
 use crate::error::HelixDbError;
+use crate::index_lifecycle::dropped::ownership::RowOwner;
 use crate::index_lifecycle::{ValidatedVectorIndexDefinition, VectorPhysicalIndexId};
 
 // Legacy item validation delegates metric semantics to the central decoder.
@@ -297,9 +298,8 @@ pub(crate) struct VectorRows<'a, R: ?Sized> {
 ///
 /// The physical key never leaves this module. Input/output measurements are
 /// exposed so the lifecycle driver can admit a complete batch before passing
-/// the token back to [`VectorWriteRows::delete_cleanup_row`]. The token of a
-/// deleted row is also a position: [`VectorRows::cleanup_scan`] resumes just
-/// past it.
+/// the token back to [`VectorWriteRows::delete_cleanup_row`]. A token is also
+/// a position [`VectorRows::cleanup_scan`] can start from.
 #[derive(Debug, Clone)]
 pub(crate) struct VectorCleanupRow {
     keyspace: VectorRowKeyspace,
@@ -355,7 +355,18 @@ impl VectorCleanupRow {
     }
 }
 
-/// Exhaustive typed scan over the three current vector storage lanes.
+/// Where a cleanup scan of one keyspace starts.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum VectorCleanupFrom<'a> {
+    /// The first lane's prefix: the scan is exhaustive.
+    Start,
+    /// Just past this row, in its lane: the rows before it are not visited.
+    After(&'a VectorCleanupRow),
+    /// This row itself, in its lane: the rows before it are not visited.
+    At(&'a VectorCleanupRow),
+}
+
+/// Typed scan over the current vector storage lanes, from one start.
 pub(crate) struct VectorCleanupScan {
     keyspace: VectorRowKeyspace,
     lanes: VecDeque<(VectorStorageLane, slatedb::DbIterator)>,
@@ -580,6 +591,18 @@ fn validate_legacy_row<D: Distance>(
 }
 
 impl VectorCleanupScan {
+    /// Narrows the scan to the lanes whose rows no compaction filter may
+    /// discard: the ones a drop that leaves a dropped-generation entry still
+    /// deletes itself.
+    pub(crate) fn never_filtered(mut self) -> Self {
+        self.lanes
+            .retain(|(lane, _)| match RowOwner::of_vector_lane(*lane) {
+                RowOwner::Never => true,
+                RowOwner::PhysicalIndex | RowOwner::Generation => false,
+            });
+        self
+    }
+
     /// Returns the next exact row while rejecting cross-lane or cross-index data.
     pub(crate) async fn next(&mut self) -> Result<Option<VectorCleanupRow>, HelixDbError> {
         loop {
@@ -1780,21 +1803,19 @@ where
     }
 
     /// Opens a cleanup scan over the current physical lanes, in
-    /// [`VectorStorageLane::ALL`] order.
+    /// [`VectorStorageLane::ALL`] order, from `from`.
     ///
-    /// Without `after` the scan is exhaustive: it starts at the first lane's
-    /// prefix. With `after`, the token of a row this keyspace issued, it
-    /// starts just past that row in the row's lane and continues through the
-    /// later lanes. A resumed scan seeks past the deleted rows before `after`
-    /// instead of reading their tombstones, but it does not visit earlier
-    /// keys, so only a scan without `after` proves the namespace empty.
+    /// A scan from a row of this keyspace starts in that row's lane and
+    /// continues through the later lanes. It seeks to the row instead of
+    /// reading the tombstones of the rows deleted before it, and it does not
+    /// visit earlier keys, so only a scan from the start is exhaustive.
     pub(crate) async fn cleanup_scan(
         &self,
-        after: Option<&VectorCleanupRow>,
+        from: VectorCleanupFrom<'_>,
     ) -> Result<VectorCleanupScan, HelixDbError> {
-        let resume = match after {
-            None => None,
-            Some(row) => {
+        let resume = match from {
+            VectorCleanupFrom::Start => None,
+            VectorCleanupFrom::After(row) | VectorCleanupFrom::At(row) => {
                 if !row.belongs_to(self.keyspace) {
                     return Err(HelixDbError::InvariantViolation(
                         "vector cleanup row belongs to another physical keyspace".to_string(),
@@ -1820,7 +1841,13 @@ where
                             "vector cleanup row escaped its physical lane".to_string(),
                         ));
                     };
-                    Bound::Excluded(Bytes::copy_from_slice(suffix))
+                    let suffix = Bytes::copy_from_slice(suffix);
+                    match from {
+                        VectorCleanupFrom::At(_) => Bound::Included(suffix),
+                        VectorCleanupFrom::After(_) | VectorCleanupFrom::Start => {
+                            Bound::Excluded(suffix)
+                        }
+                    }
                 }
                 Some(_) | None => Bound::Unbounded,
             };
@@ -3451,7 +3478,7 @@ mod tests {
 
         let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
         let row = VectorRows::new(&transaction, &concurrent)
-            .cleanup_scan(None)
+            .cleanup_scan(VectorCleanupFrom::Start)
             .await
             .unwrap()
             .next()
@@ -3469,7 +3496,7 @@ mod tests {
         transaction.commit().await.unwrap();
 
         assert!(VectorRows::new(&db, &single)
-            .cleanup_scan(None)
+            .cleanup_scan(VectorCleanupFrom::Start)
             .await
             .unwrap()
             .next()

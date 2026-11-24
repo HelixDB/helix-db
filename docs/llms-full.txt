@@ -8083,8 +8083,15 @@ deletes what it wrote and builds the index serially at once
   or restart the current release with `HELIX_VECTOR_BULK_BUILD_MEMORY_BYTES` unset and
   wait until the build no longer reports path `bulk` (it deletes what it wrote, at about
   2,600 entities a second, and continues serially under either release), or abort it and
-  wait until it reports `aborted`, which deletes the same rows far more slowly. A status
-  reports `bulk` for as long as that is what a restart would find.
+  wait until it reports `aborted`. A status reports `bulk` for as long as that is what a
+  restart would find.
+
+  That makes a database readable by such a release only while its index storage version
+  is below 8, where an abort deletes the same rows far more slowly. The current release
+  moves a database it opens as the writer to version 8: an abort then ends within
+  seconds and leaves the rows to compactions, and no release from before in-memory
+  builds opens the database, so going back past it needs a backup taken before the
+  upgrade.
 
 ## Next steps
 
@@ -16594,6 +16601,7 @@ failures print a fix.
 | `cache.warm` | S3 storage warms the disk cache after a restart. |
 | `resources.memory` | Cache budgets take at most 70% of the memory the server may use. |
 | `indexes.publication` | Vector and text index publication is caught up and holds back no entries. |
+| `indexes.dropped_storage` | How many dropped indexes still wait for compactions to discard their rows, an estimate of the bytes that wait, for how long, and how long the one that has gone longest without progress has stood still. The server rewrites the sorted runs that hold the rows itself once its compactor has had nothing to do for a few minutes, when the rows are a large enough part of a run to be worth its rewrite; a server that is never idle that long keeps them until its ordinary compactions rewrite those runs, and rows left in a run not worth rewriting are reported with the size of the run. A server whose compactor runs one compaction at a time never rewrites a run for them, and a server that runs no compaction worker of its own does nothing with dropped indexes but record them: the check says so in each case. It warns when an entry is quarantined (it keeps its rows and is listed with what contradicts it), when the server's background pass over dropped indexes is failing (with the error), and when a dropped index has not been matched to the tables that hold its rows for a quarter of an hour, and reports every one of these that holds. When none waits, that says only that the server holds no entry, not that storage has come back. |
 | `queries.missing_indexes` | Recent queries filtered without the secondary index the planner recommends. The fix is the `helix query` command that creates each index. |
 | `queries.unbounded_scans` | Recent queries read every element of a label that no index would bound. |
 

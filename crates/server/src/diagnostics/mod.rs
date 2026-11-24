@@ -70,6 +70,12 @@ const CACHE_INDEX_BYTES_PER_KIB: u64 = 9;
 const PUBLICATION_LAG_WARNING: Duration = Duration::from_secs(60);
 /// Most insights one query check lists.
 const LISTED_INSIGHTS: usize = 10;
+/// Most quarantined dropped-index entries the storage check lists.
+const LISTED_QUARANTINED: usize = 10;
+/// How long a dropped generation may wait to be matched to the tables that
+/// hold its rows before the storage check warns. A healthy wait is a pass
+/// and the compactions in flight at the drop: seconds to a few minutes.
+const DROPPED_STALLED_AFTER: Duration = Duration::from_secs(15 * 60);
 /// Docs page on index operations the server holds back.
 const INDEX_TROUBLESHOOTING: &str =
     "https://docs.helix-db.com/database/helix-db/query-guides/troubleshooting";
@@ -141,6 +147,8 @@ pub(crate) enum CheckId {
     IndexPublication,
     #[serde(rename = "indexes.label_bitmaps")]
     LabelBitmaps,
+    #[serde(rename = "indexes.dropped_storage")]
+    DroppedIndexStorage,
     #[serde(rename = "queries.missing_indexes")]
     MissingIndexes,
     #[serde(rename = "queries.unbounded_scans")]
@@ -155,7 +163,9 @@ impl CheckId {
             }
             Self::CacheDevice | Self::CacheSpace | Self::CacheWarm => Category::Cache,
             Self::Memory => Category::Resources,
-            Self::IndexPublication | Self::LabelBitmaps => Category::Indexes,
+            Self::IndexPublication | Self::LabelBitmaps | Self::DroppedIndexStorage => {
+                Category::Indexes
+            }
             Self::MissingIndexes | Self::UnboundedScans => Category::Queries,
         }
     }
@@ -350,6 +360,8 @@ pub(crate) async fn report(state: &ServerState, audit: Option<Audit>) -> Report 
         )),
         db.is_writer_mode()
             .then(|| index_publication(&db.index_operation_queue_stats())),
+        db.is_writer_mode()
+            .then(|| dropped_index_storage(&db.dropped_index_storage())),
         Some(missing_indexes(&insights)),
         Some(unbounded_scans(&insights)),
         match audit {
@@ -1044,6 +1056,234 @@ fn index_publication(stats: &db::IndexOperationQueueStats) -> Check {
                 ),
             },
         },
+    )
+}
+
+fn dropped_index_storage(storage: &db::DroppedIndexStorage) -> Check {
+    // A writer that runs no compaction worker in its process never looks:
+    // nothing else it reports means anything.
+    let (db::DroppedStorageCompactor::Reclaims | db::DroppedStorageCompactor::SingleSlot) =
+        storage.compactor
+    else {
+        return Check::new(
+            CheckId::DroppedIndexStorage,
+            "This writer compacts nothing in its process, so dropped index rows wait for one \
+             that does",
+            Outcome::Pass {
+                detail: "The server runs no compaction worker of its own. It leaves an entry \
+                         for each index it drops, and does nothing more with it: it arms none, \
+                         its compactions discard no dropped row, and it does not count the \
+                         entries the store holds. They wait for a writer that compacts in its \
+                         own process."
+                    .into(),
+            },
+        );
+    };
+    let waiting = storage.unproven + storage.draining + storage.tracking;
+    // How long the generation that has gone longest without progress has
+    // stood still, whichever state it is in.
+    let still = [storage.stalled_since, storage.tracking_since]
+        .into_iter()
+        .flatten()
+        .min();
+    let progress = format!(
+        "{waiting} dropped index {} compaction{}{}: {} not yet tracked ({} kept by a compaction \
+         whose retention sequence was behind the drop), {} waiting for compactions in flight, {} \
+         with about {} of rows in {} {}.",
+        plural(waiting as u64, "generation awaits", "generations await"),
+        storage
+            .waiting_since
+            .map(|since| format!(", the oldest for {}", elapsed(since.elapsed())))
+            .unwrap_or_default(),
+        still
+            .map(|since| format!(
+                ", the longest without progress for {}",
+                elapsed(since.elapsed())
+            ))
+            .unwrap_or_default(),
+        storage.unproven,
+        storage.retained,
+        storage.draining,
+        storage.tracking,
+        bytes(storage.tracked_bytes),
+        storage.tracked_tables,
+        plural(storage.tracked_tables as u64, "table", "tables"),
+    );
+    // Each thing that is wrong, by itself: a failing pass, quarantined
+    // entries and a stalled proof are independent, and all are reported.
+    struct Problem {
+        summary: String,
+        detail: String,
+        fix: &'static str,
+    }
+    let failing = match &storage.last_pass {
+        Some(db::DroppedStoragePass::Failed { at, since, error }) => Some(Problem {
+            summary: "The background pass over dropped index storage is failing".into(),
+            detail: format!(
+                "The last pass failed {} ago, and passes have failed for {}: {error}. What \
+                 this check reports is as far as passes have got: an entry a failed pass did \
+                 not reach is neither armed nor counted, and one it did reach stays as that \
+                 pass left it.",
+                elapsed(at.elapsed()),
+                elapsed(since.elapsed()),
+            ),
+            fix: "The server tries a failed pass again by itself, at intervals that grow to \
+                  ten minutes. Check that object storage is reachable, and the server log for \
+                  `dropped-generation retirement pass failed`.",
+        }),
+        Some(db::DroppedStoragePass::Completed { .. }) | None => None,
+    };
+    let quarantined = (!storage.quarantined.is_empty()).then(|| {
+        let listed = storage
+            .quarantined
+            .iter()
+            .take(LISTED_QUARANTINED)
+            .map(|entry| {
+                format!(
+                    "index {} generation {} ({}, {}) {}, quarantined for {}",
+                    entry.index_id,
+                    entry.generation,
+                    entry.rows,
+                    match entry.scope {
+                        db::encoding::v2::keys::scope::DataScope::LegacyUnscoped =>
+                            "no tenant".to_string(),
+                        db::encoding::v2::keys::scope::DataScope::Tenant(tenant) =>
+                            format!("tenant {:032x}", tenant.as_u128()),
+                    },
+                    entry.contradiction,
+                    elapsed(entry.since.elapsed()),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        Problem {
+            summary: format!(
+                "{} dropped index {} quarantined",
+                storage.quarantined.len(),
+                plural(storage.quarantined.len() as u64, "entry is", "entries are")
+            ),
+            detail: format!(
+                "The catalog contradicts {}: {listed}{}. Compactions keep their rows, so no \
+                 index loses data and the storage is not reclaimed.",
+                plural(
+                    storage.quarantined.len() as u64,
+                    "this entry",
+                    "these entries"
+                ),
+                match storage.quarantined.len().saturating_sub(LISTED_QUARANTINED) {
+                    0 => String::new(),
+                    more => format!("; and {more} more"),
+                }
+            ),
+            fix: "An entry is quarantined when it names an index generation that is still in \
+                  use or was never built. It costs nothing while it stays: its rows are kept, \
+                  and no index is refused an id it names. It is armed again by itself once \
+                  the catalog agrees with it, for instance after that index is dropped. The \
+                  server has no way to delete one. Report an entry you cannot explain, with \
+                  the server log line that quarantined it.",
+        }
+    });
+    // A proof that has not been matched to its tables for this long is held
+    // up by something; one that tracks tables only waits for a compaction.
+    let stalled = storage
+        .stalled_since
+        .map(|since| since.elapsed())
+        .filter(|stood| *stood >= DROPPED_STALLED_AFTER)
+        .map(|stood| Problem {
+            summary: "Dropped index generations are not making progress".into(),
+            detail: format!(
+                "A dropped generation has waited {} to be matched to the tables that hold its \
+                 rows, which takes seconds once nothing holds it up.",
+                elapsed(stood),
+            ),
+            fix: "Rows are kept while a read transaction or snapshot opened before the drop \
+                  is still open, and until a compaction that was running at the drop has \
+                  ended: look for a long-running request. Report it with the server log if \
+                  neither is the case.",
+        });
+    let problems = [failing, quarantined, stalled]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    if !problems.is_empty() {
+        let each = |part: fn(&Problem) -> &str, between: &str| {
+            problems.iter().map(part).collect::<Vec<_>>().join(between)
+        };
+        return Check::new(
+            CheckId::DroppedIndexStorage,
+            each(|problem| &problem.summary, "; "),
+            Outcome::Warn {
+                detail: format!("{} {progress}", each(|problem| &problem.detail, " ")),
+                fix: each(|problem| problem.fix, " "),
+            },
+        );
+    }
+    let looked = match &storage.last_pass {
+        Some(db::DroppedStoragePass::Completed { at }) => format!(
+            "As of the last background pass, {} ago",
+            elapsed(at.elapsed())
+        ),
+        // Reported above as a problem; said here for completeness.
+        Some(db::DroppedStoragePass::Failed { at, .. }) => format!(
+            "As of the last background pass, which failed {} ago",
+            elapsed(at.elapsed())
+        ),
+        None => "The first background pass has not run yet, so as far as it knows".to_string(),
+    };
+    let (summary, detail) = match (waiting, storage.compactor, storage.left_in_place) {
+        (0, _, _) => (
+            "No dropped index generation is waiting on this writer",
+            format!(
+                "{looked}, this writer holds no dropped-generation entry. That says nothing \
+                 of storage still to come back: an index dropped since is counted by the next \
+                 pass, which the drop starts; a store below storage version 8 deletes dropped \
+                 rows itself and never has an entry; and the split files of a dropped text \
+                 index stay in object storage."
+            ),
+        ),
+        // A rewrite would take the compactor's only slot, so none is made.
+        (_, db::DroppedStorageCompactor::SingleSlot, _) => (
+            "Dropped index rows wait for this server's ordinary compactions",
+            format!(
+                "{progress} Compactions discard the rows as they reach them. This server's \
+                 compactor runs one compaction at a time, so it never rewrites a sorted run \
+                 for dropped rows itself: the rows stay until its ordinary compactions rewrite \
+                 the runs they are in."
+            ),
+        ),
+        (_, db::DroppedStorageCompactor::Reclaims | db::DroppedStorageCompactor::None, None) => (
+            "Dropped index rows wait for compaction",
+            format!(
+                "{progress} Compactions discard the rows as they reach them, and the server \
+                 rewrites the sorted runs that hold them itself once its compactor has had \
+                 nothing to do for a few minutes. A server that is never idle that long keeps \
+                 the rows until its ordinary compactions rewrite those runs."
+            ),
+        ),
+        (
+            _,
+            db::DroppedStorageCompactor::Reclaims | db::DroppedStorageCompactor::None,
+            Some(left),
+        ) => (
+            "Dropped index rows are left in sorted runs not worth rewriting",
+            format!(
+                "{progress} About {} of them are in {} sorted {} of {} in all, which the server \
+                 does not rewrite for them: it rewrites a sorted run by itself only when the \
+                 run is no larger than 1.0 GiB or at least an eighth of it is dropped rows. \
+                 They cost their storage and nothing else, and wait for ordinary compaction to \
+                 rewrite {}, or for more dropped rows to make the rewrite worth it.",
+                bytes(left.dropped_bytes),
+                left.runs,
+                plural(left.runs as u64, "run", "runs"),
+                bytes(left.run_bytes),
+                plural(left.runs as u64, "that run", "those runs"),
+            ),
+        ),
+    };
+    Check::new(
+        CheckId::DroppedIndexStorage,
+        summary,
+        Outcome::Pass { detail },
     )
 }
 

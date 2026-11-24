@@ -84,6 +84,11 @@ async fn assert_populated_text_fixture(
     database: &crate::HelixDB,
     fixture: &super::legacy_text_fixtures::PopulatedLegacyTextFixture,
 ) -> (BTreeSet<[u8; 32]>, Option<u16>) {
+    // A store with label rows to copy reaches the current format in the
+    // background: the copy publishes, then a second commit admits
+    // dropped-generation entries. The version is read once the worker is
+    // done, not while it runs.
+    database.wait_for_background_migrations().await;
     let state = database
         .migration_parity_v2_state()
         .await
@@ -686,6 +691,9 @@ fn invalid_legacy_text_sources_fail_closed_and_retry_after_correction() {
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{kind:?} tenant must remain supported: {error}"));
+                // The current format is reached once the background worker
+                // is done; see `assert_populated_text_fixture`.
+                migrated.wait_for_background_migrations().await;
                 let state = migrated
                     .migration_parity_v2_state()
                     .await
