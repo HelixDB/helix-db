@@ -1817,6 +1817,102 @@ async fn a_long_run_of_deleted_entities_is_unlinked_over_several_steps() {
     }
 }
 
+/// An entity that was gone when the write pass passed its node, and is a
+/// member of the label again before the pass has read past its id, is one
+/// more source change. A step can end behind such a node with its cursor
+/// still before the node's id: it unlinked as many nodes of absent entities
+/// as it may, or met a changed row it had no room to unlink. The row that
+/// comes back is then read by the next step, behind the graph position. Its
+/// node is unlinked and stays so: the row is counted, stores nothing, and
+/// reaches the index through its queued operation, like any entity that
+/// appeared after the read pass. The build finishes in bulk.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_entity_back_behind_the_write_position_is_left_to_its_operation() {
+    let limits = entity_limits(16);
+    for (name, deleted, changed, back) in [
+        // Sixteen of twenty-four absent nodes fill the step's unlinks: the
+        // step ends at node 32 with its cursor at 15.
+        ("absent-run", 16..40, None, 20),
+        // Sixteen absent nodes, then a changed row the step has no room to
+        // unlink: it ends at node 32, before that row, with its cursor at 15.
+        ("changed-row", 16..32, Some(32), 24),
+    ] {
+        let db = test_db(&format!("vector-bulk-back-behind-{name}")).await;
+        let definition = definition(None);
+        let mut expected = seed_standard(&db).await;
+        let (build_id, _, _) = create_build(&db, SCOPE, &definition, SOURCE - 1).await;
+        let driver = bulk_driver(2, BUDGET, 16);
+        let mut claim_sequence = 1;
+        drive_steps(
+            &db,
+            &driver,
+            build_id,
+            &mut claim_sequence,
+            limits,
+            COUNT + 1,
+        )
+        .await;
+        delete_sources(&db, deleted.clone()).await;
+        match changed {
+            None => {}
+            Some(entity_id) => {
+                put_source(
+                    &db,
+                    SCOPE,
+                    entity_id,
+                    &properties(vector_of(1_000 + entity_id), None),
+                )
+                .await;
+            }
+        }
+        drive_steps(&db, &driver, build_id, &mut claim_sequence, limits, 1).await;
+        assert_eq!(
+            scan_progress(&db, build_id).await.unwrap().cursor,
+            Some(source_cursor(SCOPE, 15)),
+            "{name}: the scan has not passed the absent entities"
+        );
+        {
+            let slot = Arc::clone(&driver.bulk.builds.lock()[&build_id]);
+            let BuildState::Writing(writing) = &*slot.lock().await else {
+                panic!("{name}: the build is in its write pass");
+            };
+            assert_eq!(writing.position, 32, "{name}: the graph position has");
+        }
+        // One of the entities whose node the step unlinked is back.
+        put_source(&db, SCOPE, back, &properties(vector_of(back), None)).await;
+        // No step fails on the way: this is no defect of the build.
+        assert_eq!(
+            drive(&db, &driver, build_id, &mut claim_sequence, limits)
+                .await
+                .0,
+            CommittedOperationStep::Completed,
+            "{name}"
+        );
+        assert_eq!(
+            driver.build_reports().path(build_id),
+            Some(VectorBuildPath::Bulk),
+            "{name}"
+        );
+        // The row that came back is counted, as a serial scan counts it.
+        assert_eq!(
+            reported_entities(&db, build_id).await,
+            SOURCE - (deleted.end - deleted.start) + 1,
+            "{name}"
+        );
+        let absent = deleted.chain(changed).collect::<Vec<u64>>();
+        expected.retain(|entity_id, _| !absent.contains(entity_id));
+        assert_index_holds(
+            &db,
+            &active_index(&db, &definition).await,
+            &expected,
+            &absent,
+        )
+        .await;
+        assert!(nothing_held(&driver), "{name}");
+        db.close().await.expect("vector test database closes");
+    }
+}
+
 /// A source emptied after the graph was linked and before any of it was
 /// stored leaves nothing to write: every node is unlinked over bounded steps,
 /// no vector, link or metadata row is staged for them, and validation

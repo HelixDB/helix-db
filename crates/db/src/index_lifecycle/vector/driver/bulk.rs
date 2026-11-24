@@ -3892,12 +3892,27 @@ impl<D: Distance> WriteBatch<'_, D> {
             if !self.unlink_absent(&mut read.position, Some(entity_id.get()))? {
                 return Ok(read);
             }
-            let node = self.graph.position(entity_id.get()).ok();
-            if node.is_some_and(|node| node != read.position) {
-                return Err(Halt::Failed(HelixDbError::InvariantViolation(
-                    "bulk vector write position passed a source entity".to_string(),
-                )));
-            }
+            // The row's node, unless the pass has passed it already. Every
+            // node behind the position is stored or unlinked, and a stored
+            // one's row is behind the cursor, so this one was unlinked: its
+            // entity was gone when the pass got there. A step can end behind
+            // such nodes with its cursor still before their ids, when its
+            // unlinks run out among them or at the row after them, and the
+            // entity can be a member again before the next step reads on.
+            // It is then a row with no node to store, as one that appeared
+            // after pass 1: the write that brought it back queued its
+            // operation.
+            let node = match self.graph.position(entity_id.get()).ok() {
+                Some(node) if node < read.position => {
+                    if !self.graph.is_unlinked(node) {
+                        return Err(Halt::Failed(HelixDbError::InvariantViolation(
+                            "bulk vector write position passed a linked source entity".to_string(),
+                        )));
+                    }
+                    None
+                }
+                node => node,
+            };
             // An entity that appeared or changed after pass 1 read the source
             // has a queued operation that indexes it after activation.
             let current = node.zip(document).filter(|(node, document)| {
