@@ -164,7 +164,7 @@ Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickst
 - [helix workspace](https://docs.helix-db.com/cli/command-reference/workspace): Discover WorkOS workspace memberships — Page type: Reference
 
 ## Learning center
-- [Learning center](https://docs.helix-db.com/learn/index): Plain-language answers about graph databases, vector search, full-text search, AI agent memory, and modern database architecture. — Page type: Concept
+- [Learning center](https://docs.helix-db.com/learn/index): Plain-language answers about graph databases, vector search, full-text search, AI agent memory, ontologies, and modern database architecture. — Page type: Concept
 
 ## Graph databases
 - [What is a graph database?](https://docs.helix-db.com/learn/graph-databases/what-is-a-graph-database): A graph database stores things as nodes and the connections between them as edges, and answers questions by following those connections. — Page type: Concept
@@ -195,3 +195,8 @@ Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickst
 ## Database architecture
 - [Why build a database on object storage?](https://docs.helix-db.com/learn/database-architecture/object-storage-databases): A database on object storage keeps its data in a durable object store and uses server memory and disks as cache, so storage and compute scale separately. — Page type: Concept
 - [Do you need separate graph, vector, and text databases?](https://docs.helix-db.com/learn/database-architecture/one-database-for-graph-vector-and-text): Often not. One database that stores relationships and indexes the same records for vector and keyword search avoids sync pipelines and stale copies. — Page type: Concept
+
+## Ontologies and company data
+- [What is an ontology?](https://docs.helix-db.com/learn/ontologies/what-is-an-ontology): An ontology is a shared definition of the things a business cares about, how they connect, and the rules they follow, so data from many systems means one thing. — Page type: Concept
+- [What is data provenance?](https://docs.helix-db.com/learn/ontologies/what-is-data-provenance): Data provenance is the record of where each piece of data came from and how it was produced, so people and AI answers can cite and check it. — Page type: Concept
+- [What is entity resolution?](https://docs.helix-db.com/learn/ontologies/what-is-entity-resolution): Entity resolution decides when different records or mentions refer to the same real-world thing, so its facts are joined into one entity instead of scattered. — Page type: Concept

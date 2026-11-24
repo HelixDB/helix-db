@@ -69,8 +69,9 @@ Under the hood, common patterns include:
   language-processing pipeline reads each chunk and lists its entities, such as people,
   products, services, and contracts, plus typed relationships between them. Each chunk
   links to the entities it mentions.
-- **Entity resolution.** Mentions that refer to the same thing, such as "the billing
-  service" and "billing-svc", are merged into one node so the facts about it connect.
+- **[Entity resolution](/learn/ontologies/what-is-entity-resolution).** Mentions that
+  refer to the same thing, such as "the billing service" and "billing-svc", are merged
+  into one node so the facts about it connect.
 - **Graph expansion from retrieved nodes.** Vector or
   [keyword search](/learn/full-text-search/what-is-full-text-search) finds entry points,
   and a bounded traversal (a walk along edges with a depth limit) collects neighboring

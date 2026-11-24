@@ -61,6 +61,7 @@ const DATABASE_GROUP_PREFIXES = new Map([
   ["Learn/Full-text search", "learn/full-text-search/"],
   ["Learn/AI memory and RAG", "learn/ai-memory/"],
   ["Learn/Database architecture", "learn/database-architecture/"],
+  ["Learn/Ontologies and company data", "learn/ontologies/"],
 ]);
 const CLIENT_SETUP_MARKER = "{/* client-setup: no JSON representation */}";
 const PACKAGE_INSTALL_MARKER =

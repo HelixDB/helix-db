@@ -397,6 +397,14 @@
               "learn/database-architecture/object-storage-databases",
               "learn/database-architecture/one-database-for-graph-vector-and-text"
             ]
+          },
+          {
+            "group": "Ontologies and company data",
+            "pages": [
+              "learn/ontologies/what-is-an-ontology",
+              "learn/ontologies/what-is-data-provenance",
+              "learn/ontologies/what-is-entity-resolution"
+            ]
           }
         ]
       }
@@ -1435,6 +1443,42 @@
     {
       "source": "/knowledge-graphs",
       "destination": "/learn/graph-databases/what-is-a-knowledge-graph"
+    },
+    {
+      "source": "/ontology",
+      "destination": "/learn/ontologies/what-is-an-ontology"
+    },
+    {
+      "source": "/ontologies",
+      "destination": "/learn/ontologies/what-is-an-ontology"
+    },
+    {
+      "source": "/what-is-an-ontology",
+      "destination": "/learn/ontologies/what-is-an-ontology"
+    },
+    {
+      "source": "/data-provenance",
+      "destination": "/learn/ontologies/what-is-data-provenance"
+    },
+    {
+      "source": "/provenance",
+      "destination": "/learn/ontologies/what-is-data-provenance"
+    },
+    {
+      "source": "/data-lineage",
+      "destination": "/learn/ontologies/what-is-data-provenance"
+    },
+    {
+      "source": "/entity-resolution",
+      "destination": "/learn/ontologies/what-is-entity-resolution"
+    },
+    {
+      "source": "/record-linkage",
+      "destination": "/learn/ontologies/what-is-entity-resolution"
+    },
+    {
+      "source": "/entity-matching",
+      "destination": "/learn/ontologies/what-is-entity-resolution"
     },
     {
       "source": "/property-graph",
