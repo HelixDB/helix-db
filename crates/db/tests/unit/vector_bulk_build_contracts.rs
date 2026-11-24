@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 
 use super::super::driver_contracts::{
-    create_build, definition, drive_one, driver, properties, put_source, read_index,
-    read_operation, source_cursor, source_key, test_db, NOW_MILLIS,
+    create_build, definition, drive_one, driver, properties, put_build_delta, put_source,
+    read_index, read_operation, source_cursor, source_key, test_db, NOW_MILLIS,
 };
 use super::super::*;
 use super::*;
@@ -2302,6 +2302,125 @@ async fn a_row_behind_the_resume_position_is_deleted_before_the_build_starts() {
     let index = active_index(&db, &definition).await;
     assert!(index.stored_rows(&db).await.unwrap() == uninterrupted);
     assert_index_holds(&db, &index, &expected, &[7]).await;
+    db.close().await.expect("vector test database closes");
+}
+
+/// The same holds for the applied state, which is deleted first: a row
+/// stored behind the position a deleting step handed on is deleted before
+/// the deletion ends, though the step that resumes there finds nothing left.
+/// A build delta of the generation is none of the attempt's rows: the
+/// deletion leaves it for the catch-up of the build that goes on.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_applied_state_row_behind_the_resume_position_is_deleted_before_the_build_starts() {
+    let db = test_db("vector-bulk-applied-row-behind-resume").await;
+    let definition = definition(None);
+    seed_standard(&db).await;
+    let (build_id, index_id, generation) = create_build(&db, SCOPE, &definition, SOURCE - 1).await;
+    let mut claim_sequence = 1;
+    die(&db, build_id, &mut claim_sequence, Death::Writing(3)).await;
+    let prefix = generation_prefix(SCOPE, RecordKind::AppliedState, index_id, generation);
+    let applied = || async {
+        let mut rows = db
+            .scan_prefix(prefix.clone(), ..)
+            .await
+            .expect("applied-state prefix is readable");
+        let mut stored = BTreeMap::new();
+        while let Some(row) = rows.next().await.expect("applied-state row is readable") {
+            stored.insert(row.key, row.value);
+        }
+        stored
+    };
+    let written = applied().await;
+    assert_eq!(written.len(), 48);
+    put_build_delta(
+        &db,
+        dropped::DroppedGeneration {
+            index_id,
+            generation,
+        },
+    )
+    .await;
+    let deltas = || async {
+        let mut rows = db
+            .scan_prefix(
+                generation_prefix(SCOPE, RecordKind::BuildDelta, index_id, generation),
+                ..,
+            )
+            .await
+            .expect("build-delta prefix is readable");
+        let mut stored = 0;
+        while rows
+            .next()
+            .await
+            .expect("build-delta row is readable")
+            .is_some()
+        {
+            stored += 1;
+        }
+        stored
+    };
+    assert_eq!(deltas().await, 1);
+
+    // Eight rows go, and the step hands on the last of them.
+    let driver = bulk_driver(1, BUDGET, 16);
+    drive_steps(
+        &db,
+        &driver,
+        build_id,
+        &mut claim_sequence,
+        operation_limits(8),
+        1,
+    )
+    .await;
+    let left = applied().await;
+    assert_eq!(left.len(), 40);
+    let state = driver.bulk.builds.lock().get(&build_id).cloned().unwrap();
+    let discarding = state.lock().await;
+    let BuildState::Discarding {
+        resume: Some(DiscardResume::AppliedState(position)),
+        ..
+    } = &*discarding
+    else {
+        panic!("the step handed on an applied-state position");
+    };
+    let position = position.clone();
+    drop(discarding);
+    // The first row deleted comes back behind the position, and every row
+    // after the position goes: the resumed scan reads nothing.
+    let (first, value) = written
+        .iter()
+        .next()
+        .expect("the attempt stored applied state");
+    assert!(!left.contains_key(first) && *first < position);
+    db.put(first.clone(), value.clone())
+        .await
+        .expect("the deleted row is restored");
+    for key in left.keys() {
+        db.delete(key.clone())
+            .await
+            .expect("a row after the position is deleted");
+    }
+    assert_eq!(applied().await.len(), 1);
+
+    // The deletion ends only once a scan from the start has found nothing:
+    // when the next attempt is counted the restored row is gone.
+    let mut steps = 0;
+    while attempts(&db, build_id).await == Some(1) {
+        assert!(steps < 400, "the deletion does not end");
+        drive_steps(
+            &db,
+            &driver,
+            build_id,
+            &mut claim_sequence,
+            operation_limits(256),
+            1,
+        )
+        .await;
+        steps += 1;
+    }
+    assert_eq!(attempts(&db, build_id).await, Some(2));
+    assert_eq!(applied().await.len(), 0);
+    assert_eq!(deltas().await, 1);
     db.close().await.expect("vector test database closes");
 }
 

@@ -3942,7 +3942,7 @@ async fn dropping_generation(db: &Db) -> dropped::DroppedGeneration {
 
 /// Writes one build delta of `entry`'s generation, as a build leaves behind
 /// for a write it has not applied.
-async fn put_build_delta(db: &Db, entry: dropped::DroppedGeneration) {
+pub(super) async fn put_build_delta(db: &Db, entry: dropped::DroppedGeneration) {
     let entity = IndexEntity {
         kind: IndexElementKind::Node,
         id: IndexEntityId::new(2),
