@@ -7189,6 +7189,7 @@ mod tests {
             db,
             driver,
             operation_id,
+            WriterEpoch::from_bytes([0x5A; 16]).expect("writer epoch is non-nil"),
             claim_sequence,
             limits,
             now_unix_millis,
@@ -7196,15 +7197,17 @@ mod tests {
         .await
     }
 
+    /// Observes, claims and runs one step as `writer_epoch`, which must not
+    /// hold the claim already: a process that holds it is running that step.
     async fn drive_one_at(
         db: &Db,
         driver: &SecondaryIndexDriver,
         operation_id: IndexOperationId,
+        writer_epoch: WriterEpoch,
         claim_sequence: &mut u64,
         limits: SearchIndexBatchLimits,
         mut now_unix_millis: u64,
     ) -> CommittedOperationStep {
-        let writer_epoch = WriterEpoch::from_bytes([0x5A; 16]).expect("writer epoch is non-nil");
         let eligible = loop {
             let observation =
                 observe_operation_pointer(db, operation_id, writer_epoch, now_unix_millis)
