@@ -1367,6 +1367,39 @@ impl<D: Distance> VectorIndex<D> {
         ))
     }
 
+    /// The links stored for `entity_id` on each layer and the sources its
+    /// reverse locators name there, both ascending: every layer up to
+    /// `max_layer`, and any above it that a locator names.
+    pub(crate) async fn stored_links(
+        &self,
+        reader: &(impl slatedb::DbReadOps + Send + Sync),
+        entity_id: NodeId,
+        max_layer: u16,
+    ) -> Result<std::collections::BTreeMap<u16, (Vec<NodeId>, Vec<NodeId>)>, HelixDbError> {
+        let rows = crate::search::vector::storage::VectorRows::new(reader, self.row_keyspace());
+        let sources = rows.reverse_sources_for_target(entity_id).await?;
+        let layers = sources
+            .sources_by_layer()
+            .keys()
+            .copied()
+            .fold(max_layer, u16::max);
+        let mut stored = std::collections::BTreeMap::new();
+        for layer in 0..=layers {
+            let mut links = match layer {
+                0 => rows.layer0_neighbors(entity_id).await?,
+                layer => rows
+                    .upper_neighbors(layer, entity_id)
+                    .await?
+                    .unwrap_or_default(),
+            };
+            links.sort_unstable();
+            let mut named = sources.sources_at(layer).to_vec();
+            named.sort_unstable();
+            stored.insert(layer, (links, named));
+        }
+        Ok(stored)
+    }
+
     /// Every stored row of this index's physical namespace.
     pub(crate) async fn stored_rows(
         &self,

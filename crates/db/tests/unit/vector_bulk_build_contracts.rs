@@ -780,8 +780,9 @@ async fn applied_rows(db: &Db, index_id: IndexId, generation: IndexGenerationId)
 
 /// Asserts `index` is a complete graph of exactly `expected`: every entity
 /// holds its vector and is found by an exhaustive search, every stored link
-/// is symmetric with a reverse locator and ends at an indexed entity, and no
-/// row of an `absent` entity remains.
+/// on every layer is symmetric with a reverse locator and ends at an indexed
+/// entity, no link or locator is stored above the graph's top layer, and no
+/// row of an `absent` entity remains on any layer.
 async fn assert_index_holds(
     db: &Db,
     index: &VectorIndex<Euclidean>,
@@ -808,15 +809,27 @@ async fn assert_index_holds(
             .unwrap()
             .unwrap_or_else(|| panic!("entity {entity_id} is indexed"));
         assert_eq!(item.vector.to_vec(), vector, "entity {entity_id}");
-        let (links, sources) = index.stored_layer0_links(db, *entity_id).await.unwrap();
-        assert_eq!(links, sources, "entity {entity_id} links are symmetric");
+        let stored = index
+            .stored_links(db, *entity_id, metadata.max_layer)
+            .await
+            .unwrap();
         assert!(
-            !links.is_empty() || expected.len() == 1,
-            "entity {entity_id} is linked"
+            stored.keys().all(|layer| *layer <= metadata.max_layer),
+            "entity {entity_id} has no locator above the top layer"
         );
+        for (layer, (links, sources)) in &stored {
+            assert_eq!(
+                links, sources,
+                "entity {entity_id} links are symmetric on layer {layer}"
+            );
+            assert!(
+                links.iter().all(|link| expected.contains_key(link)),
+                "entity {entity_id} links only indexed entities on layer {layer}: {links:?}"
+            );
+        }
         assert!(
-            links.iter().all(|link| expected.contains_key(link)),
-            "entity {entity_id} links only indexed entities: {links:?}"
+            !stored[&0].0.is_empty() || expected.len() == 1,
+            "entity {entity_id} is linked"
         );
         let found = index.search(db, vector, &params).await.unwrap();
         assert_eq!(
@@ -830,10 +843,15 @@ async fn assert_index_holds(
             index.get_item(db, *entity_id).await.unwrap().is_none(),
             "entity {entity_id} is not indexed"
         );
-        assert_eq!(
-            index.stored_layer0_links(db, *entity_id).await.unwrap(),
-            (Vec::new(), Vec::new()),
-            "entity {entity_id} has no link rows"
+        let stored = index
+            .stored_links(db, *entity_id, metadata.max_layer)
+            .await
+            .unwrap();
+        assert!(
+            stored
+                .values()
+                .all(|(links, sources)| links.is_empty() && sources.is_empty()),
+            "entity {entity_id} has no link rows: {stored:?}"
         );
     }
 }
@@ -973,7 +991,11 @@ async fn a_bulk_build_stores_its_source_in_bounded_steps_and_activates() {
             .0,
         CommittedOperationStep::Completed
     );
-    assert_index_holds(&db, &active_index(&db, &definition).await, &expected, &[]).await;
+    let active = active_index(&db, &definition).await;
+    // The standard source has nodes above layer 0, so the links the
+    // contracts check on every layer are checked on more than one.
+    assert!(active.get_metadata(&db).await.unwrap().unwrap().max_layer >= 1);
+    assert_index_holds(&db, &active, &expected, &[]).await;
     db.close().await.expect("vector test database closes");
 }
 
