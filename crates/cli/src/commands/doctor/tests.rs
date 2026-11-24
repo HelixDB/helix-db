@@ -473,6 +473,31 @@ async fn an_unready_server_warns_and_an_old_one_skips_its_checks() {
 }
 
 #[tokio::test]
+async fn a_fenced_server_fails_with_how_to_recover() {
+    let server = MockServer::start().await;
+    health(
+        &server,
+        serde_json::json!({"ready": false, "mode": "writer", "storage": "fenced"}),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/diagnostics"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+
+    let mut checks = Vec::new();
+    server_checks(&server.uri(), None, &mut checks).await;
+    assert_eq!(checks[0].id, "server.reachable");
+    assert_eq!(checks[0].status, Status::Fail);
+    assert!(checks[0].summary.contains("fenced by another writer"));
+    assert_eq!(
+        checks[0].fix.as_deref(),
+        Some("Stop it, or restart it once the other writer is gone.")
+    );
+}
+
+#[tokio::test]
 async fn diagnostics_errors_and_bad_reports_are_skipped_with_their_cause() {
     for (response, expected) in [
         (ResponseTemplate::new(500), "answered HTTP 500"),

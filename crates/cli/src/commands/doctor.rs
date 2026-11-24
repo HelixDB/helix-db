@@ -477,7 +477,9 @@ async fn server_checks(url: &str, instance: Option<&str>, checks: &mut Vec<Check
                 "server.reachable",
                 format!("The server at {url} answered HTTP {}", response.status()),
                 Verdict::Fail {
-                    detail: Some("GET /healthz should always answer 200.".into()),
+                    detail: Some(
+                        "GET /healthz answers 503 only once the server's storage failed.".into(),
+                    ),
                     fix: unreachable_fix,
                 },
             ));
@@ -495,8 +497,16 @@ async fn server_checks(url: &str, instance: Option<&str>, checks: &mut Vec<Check
             return None;
         }
     };
-    checks.push(match health["ready"].as_bool() {
-        Some(false) => Check::new(
+    let reachable = match (health["ready"].as_bool(), health["storage"].as_str()) {
+        (Some(false), Some("fenced")) => Check::new(
+            "server.reachable",
+            format!("The server at {url} was fenced by another writer"),
+            Verdict::Fail {
+                detail: Some("Another server opened its storage as writer.".into()),
+                fix: "Stop it, or restart it once the other writer is gone.".into(),
+            },
+        ),
+        (Some(false), _) => Check::new(
             "server.reachable",
             format!("The server at {url} is not ready"),
             Verdict::Warn {
@@ -507,7 +517,7 @@ async fn server_checks(url: &str, instance: Option<&str>, checks: &mut Vec<Check
                 fix: "Wait for startup to finish; GET /readyz answers 200 once it has.".into(),
             },
         ),
-        Some(true) | None => Check::new(
+        (Some(true) | None, _) => Check::new(
             "server.reachable",
             format!("The server answers at {url}"),
             Verdict::Pass(
@@ -516,7 +526,8 @@ async fn server_checks(url: &str, instance: Option<&str>, checks: &mut Vec<Check
                     .map(|mode| format!("Running as a {mode}.")),
             ),
         ),
-    });
+    };
+    checks.push(reachable);
     let response = client
         .get(format!("{url}/v2/diagnostics"))
         .timeout(DIAGNOSTICS_TIMEOUT)
