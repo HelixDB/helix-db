@@ -2477,10 +2477,12 @@ impl HelixDB {
     /// such an entry and wants it gone; `index_id` and `generation` are the
     /// ones the listing gives.
     ///
-    /// The entry is cross-checked once more first. Only an entry that is
-    /// still quarantined is deleted; one that has become consistent is armed
-    /// and retires by itself. The call waits no longer than `wait` for a
-    /// background pass under way, which reads the store and can take a
+    /// The entry is cross-checked once more first, in the transaction that
+    /// deletes it. Only an entry that is still quarantined is deleted; one
+    /// that has become consistent, for instance because the drop of its
+    /// generation completed meanwhile and stored the generation's own entry,
+    /// is armed and retires by itself. The call waits no longer than `wait`
+    /// for a background pass under way, which reads the store and can take a
     /// while on a large one, and returns
     /// [`QuarantinedEntryRemoval::Busy`] with nothing done if it must.
     ///

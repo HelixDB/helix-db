@@ -139,7 +139,7 @@ use std::time::Instant;
 use bytes::Bytes;
 use slatedb::config::{FlushOptions, FlushType};
 use slatedb::object_store::ObjectStore;
-use slatedb::{CompactionJobContext, Db, DbReadOps};
+use slatedb::{CompactionJobContext, Db, DbReadOps, DbTransaction};
 
 use crate::encoding::v2::keys::indexes::vector::{VectorIndexMetadataKey, VectorKey};
 use crate::encoding::v2::keys::scope::DataScope;
@@ -836,6 +836,49 @@ async fn cross_check(
         checked.push((entry, value, verdict));
     }
     Ok(checked)
+}
+
+/// What a transaction reads of the entry stored under one key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoredEntry {
+    /// No entry is stored under the key.
+    Absent,
+    /// The catalog agrees with the entry.
+    Consistent,
+    /// The catalog contradicts the entry.
+    Contradicted,
+}
+
+/// Reads the entry stored for `entry` through `transaction` and cross-checks
+/// it against the catalog as the same transaction reads it.
+///
+/// The step that completes a drop or an abort writes the generation's entry
+/// under this key and moves the index record this reads, in one commit and
+/// under no lock a retirer holds. So a serializable transaction that deletes
+/// the entry after [`StoredEntry::Contradicted`] commits only if no such step
+/// has committed since it began: it never deletes an entry it did not read.
+pub(crate) async fn stored_entry(
+    transaction: &DbTransaction,
+    entry: DroppedGeneration,
+) -> Result<StoredEntry> {
+    let Some(stored) = transaction.get(entry.key()).await? else {
+        return Ok(StoredEntry::Absent);
+    };
+    let IndexV2MetadataValue::DroppedGeneration(value) = decode_metadata_value(&stored)? else {
+        return Err(HelixDbError::IndexCatalogCorruption(
+            "dropped-generation key contains another value kind".to_string(),
+        ));
+    };
+    let checked = cross_check(transaction, vec![(entry, value)]).await?;
+    let [(_, _, verdict)] = &checked[..] else {
+        return Err(HelixDbError::InvariantViolation(
+            "the cross-check of one entry returned another number of verdicts".to_string(),
+        ));
+    };
+    Ok(match verdict {
+        Ok(_) => StoredEntry::Consistent,
+        Err(_) => StoredEntry::Contradicted,
+    })
 }
 
 /// The physical ids of a dropped partitioned vector generation, from the

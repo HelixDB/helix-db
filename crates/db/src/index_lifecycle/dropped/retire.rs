@@ -93,7 +93,7 @@ use slatedb::admin::Admin;
 use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
 use slatedb::manifest::{SsTableHandle, VersionedManifest};
 use slatedb::object_store::ObjectStore;
-use slatedb::{SstReader, WriteBatch};
+use slatedb::{IsolationLevel, SstReader, WriteBatch};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -106,8 +106,8 @@ use crate::HelixWriter;
 
 use super::reclaim::{Reclaimer, Worth};
 use super::{
-    CompactionActivity, CompactionId, DroppedGeneration, DroppedIndexStorage, Proof, TableId,
-    Tracked, Unquarantined, Waiting,
+    CompactionActivity, CompactionId, DroppedGeneration, DroppedIndexStorage, Proof, StoredEntry,
+    TableId, Tracked, Unquarantined, Waiting,
 };
 
 /// Shortest time between two background passes, so that a burst of changes
@@ -308,8 +308,43 @@ pub enum QuarantinedEntryRemoval {
     /// No such entry is stored.
     Absent,
     /// A background pass, or a reclaim looking at the store, was under way
-    /// for the whole wait. Nothing was looked at and nothing deleted.
+    /// for the whole wait, or commits to the index catalog kept overtaking
+    /// the removal until the wait was over. Nothing was deleted.
     Busy,
+}
+
+/// Test pause of a removal between staging its delete and committing it.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct RemovalPause {
+    armed: std::sync::atomic::AtomicBool,
+    staged: tokio::sync::Notify,
+    released: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl RemovalPause {
+    /// Holds the next removal once it has staged its delete.
+    pub(crate) fn arm(&self) {
+        self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Waits until the armed removal has staged its delete and is held.
+    pub(crate) async fn staged(&self) {
+        self.staged.notified().await;
+    }
+
+    /// Lets the held removal go on to commit.
+    pub(crate) fn release(&self) {
+        self.released.notify_one();
+    }
+
+    async fn hold(&self) {
+        if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.staged.notify_one();
+            self.released.notified().await;
+        }
+    }
 }
 
 /// What a retirer's passes last logged.
@@ -341,6 +376,10 @@ pub(crate) struct Retirer {
     /// retirer by hand, so under test it waits to be told.
     #[cfg(test)]
     background: watch::Sender<Option<Pace>>,
+    /// Holds a removal before its commit, for the contract that commits a
+    /// drop in between.
+    #[cfg(test)]
+    pub(crate) removal: RemovalPause,
 }
 
 impl Retirer {
@@ -373,6 +412,8 @@ impl Retirer {
             closed: watch::channel(false).0,
             #[cfg(test)]
             background: watch::channel(None).0,
+            #[cfg(test)]
+            removal: RemovalPause::default(),
         }
     }
 
@@ -386,6 +427,14 @@ impl Retirer {
     /// as it stands now: the entry is cross-checked again first, and one
     /// that has become consistent is armed and stays. Waits no later than
     /// `deadline` for a pass under way, and does nothing if it must.
+    ///
+    /// The entry is read, cross-checked and deleted in one serializable
+    /// transaction ([`super::stored_entry`]). The step that completes a drop
+    /// or an abort stores the generation's real entry under the same key
+    /// without the pass lock: one that commits first is either read here as
+    /// consistent, or makes this transaction conflict, and the removal looks
+    /// again until `deadline`. The delete therefore never lands on an entry
+    /// the removal did not find contradicted.
     ///
     /// Nothing else is deleted. The rows the entry named stay stored, no
     /// compaction discards them, and no later entry can name them: see
@@ -403,22 +452,51 @@ impl Retirer {
         registry.refresh(db).await?;
         // Out of the registry first, as a retirement is: a delete that fails
         // leaves the entry stored, and the next refresh quarantines it again.
-        Ok(match registry.remove_quarantined(entry) {
-            Unquarantined::Removed => {
-                db.delete(entry.key())
-                    .await
-                    .map_err(HelixDbError::from_storage_commit)?;
-                tracing::warn!(
-                    index_id = entry.index_id.get(),
-                    generation = entry.generation.get(),
-                    "removed a quarantined dropped-generation entry on request: its rows stay \
-                     stored"
-                );
-                QuarantinedEntryRemoval::Removed
+        match registry.remove_quarantined(entry) {
+            Unquarantined::Removed => {}
+            Unquarantined::Armed => return Ok(QuarantinedEntryRemoval::Armed),
+            Unquarantined::Absent => return Ok(QuarantinedEntryRemoval::Absent),
+        }
+        // Imperative: each turn is one transaction, and a conflict starts
+        // the next.
+        loop {
+            let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
+            match super::stored_entry(&transaction, entry).await? {
+                StoredEntry::Contradicted => {}
+                // A drop or an abort stored the generation's entry since the
+                // refresh: it is armed, and stays.
+                StoredEntry::Consistent => {
+                    drop(transaction);
+                    registry.refresh(db).await?;
+                    return Ok(QuarantinedEntryRemoval::Armed);
+                }
+                StoredEntry::Absent => return Ok(QuarantinedEntryRemoval::Absent),
             }
-            Unquarantined::Armed => QuarantinedEntryRemoval::Armed,
-            Unquarantined::Absent => QuarantinedEntryRemoval::Absent,
-        })
+            transaction.delete(entry.key())?;
+            #[cfg(test)]
+            self.removal.hold().await;
+            match transaction
+                .commit()
+                .await
+                .map_err(HelixDbError::from_storage_commit)
+            {
+                Ok(_) => break,
+                Err(error) if error.is_transaction_conflict() => {
+                    if Instant::now() >= deadline {
+                        // Still stored: quarantined again, or armed.
+                        registry.refresh(db).await?;
+                        return Ok(QuarantinedEntryRemoval::Busy);
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        tracing::warn!(
+            index_id = entry.index_id.get(),
+            generation = entry.generation.get(),
+            "removed a quarantined dropped-generation entry on request: its rows stay stored"
+        );
+        Ok(QuarantinedEntryRemoval::Removed)
     }
 
     /// The writer whose entries this retires.

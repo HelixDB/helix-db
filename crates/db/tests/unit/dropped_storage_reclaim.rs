@@ -4174,6 +4174,97 @@ async fn a_quarantined_entry_fails_no_creation_and_is_removed_only_on_request() 
     reader.close().await.expect("the reader closes");
 }
 
+/// Proves a removal on request never deletes an entry it did not find
+/// contradicted. A forged entry names a live generation, so it is
+/// quarantined. The removal reads it, finds it contradicted and stages its
+/// delete; before that commits, the drop of the index completes and stores
+/// the generation's own entry under the same key. The removal's transaction
+/// conflicts, looks again, finds an entry the catalog agrees with and leaves
+/// it: the entry is armed, and a reclaim discards the generation's rows.
+/// Deleted unconditionally, the entry would be gone and the rows stored for
+/// good, with nothing to name them.
+#[tokio::test]
+async fn a_removal_overtaken_by_the_drop_of_its_generation_leaves_the_drops_entry() {
+    let db = open_quiet(ProcessLocalDatabaseToken::new("dropped-removal-raced").unwrap()).await;
+    db.wait_for_background_migrations().await;
+    let scope = DataScope::LegacyUnscoped;
+    for seed in 0..48 {
+        add(&db, "Gone", seed).await;
+    }
+    create_index(&db, "Gone").await;
+    // The first index of a store is index 1 at generation 1, which the
+    // contradiction below confirms; its rows name its physical id.
+    let entry = generation_entry(1);
+    let owners = settled_rows(&db)
+        .await
+        .keys()
+        .filter_map(|key| dropped::ownership::owned_row(key))
+        .map(|row| row.owner)
+        .collect::<HashSet<_>>();
+    let [OwnerKey::PhysicalIndex {
+        physical_index_id, ..
+    }] = owners.iter().collect::<Vec<_>>()[..]
+    else {
+        panic!("the active index stores rows of one physical id: {owners:?}");
+    };
+    writer(&db)
+        .db()
+        .put(
+            entry.key(),
+            encode_metadata_value(&IndexV2MetadataValue::DroppedGeneration(
+                DroppedGenerationValue {
+                    scope,
+                    rows: DroppedGenerationRows::UnpartitionedVector {
+                        physical_index_id: VectorPhysicalIndexId::new(*physical_index_id).unwrap(),
+                    },
+                },
+            )),
+        )
+        .await
+        .expect("the fixture entry is written");
+    let quarantined = pass(&db).await.quarantined;
+    let [quarantined] = &quarantined[..] else {
+        panic!("the forged entry is quarantined: {quarantined:?}");
+    };
+    assert_eq!(
+        quarantined.contradiction,
+        dropped::DroppedEntryContradiction::GenerationStillOwned
+    );
+
+    let retirer = retirer(&db).await;
+    retirer.removal.arm();
+    let removal = db.remove_quarantined_dropped_index_entry(
+        entry.index_id.get(),
+        entry.generation.get(),
+        WAIT,
+    );
+    tokio::pin!(removal);
+    tokio::select! {
+        ended = &mut removal => panic!("the removal is held before its commit: {ended:?}"),
+        () = retirer.removal.staged() => {}
+    }
+    // The drop completes while the removal's delete is staged.
+    drop_index(&db, "Gone").await;
+    assert_eq!(stored_entries(&db).await, vec![entry]);
+    retirer.removal.release();
+    assert_eq!(
+        tokio::time::timeout(WAIT, removal)
+            .await
+            .expect("the removal ends in time")
+            .expect("the removal runs"),
+        crate::QuarantinedEntryRemoval::Armed
+    );
+
+    assert_eq!(stored_entries(&db).await, vec![entry]);
+    assert_eq!(pass(&db).await.quarantined, vec![]);
+    let prefixes = armed_prefixes(&db).await;
+    assert!(!prefixes.is_empty());
+    reclaim_every_entry(&db).await;
+    assert_discarded(&db, &prefixes).await;
+    assert_eq!(owned_rows(&db).await, 0);
+    db.close().await.expect("the writer closes");
+}
+
 /// Source vectors of a contract's bulk build: more than the fewest
 /// [`open_bulk`] builds in bulk, and several write steps' worth.
 const BULK_SOURCE: usize = 96;
