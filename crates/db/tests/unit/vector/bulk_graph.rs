@@ -977,6 +977,113 @@ fn neighbors_orphaned_together_are_linked_once() {
     );
 }
 
+/// A graph at an upper degree of two with a node per point on a line, each
+/// at its position and reaching its layer, holding `links` (layer and both
+/// ends) both ways, with its entry point by rule.
+fn line_graph(points: &[(f32, u8)], links: &[(u8, u32, u32)]) -> BulkGraph<Euclidean> {
+    let source = points
+        .iter()
+        .enumerate()
+        .map(|(node, (position, layer))| (node as NodeId + 1, vec![*position], u16::from(*layer)))
+        .collect::<Vec<_>>();
+    let parameters = BulkParameters::try_from_config(&config(1, 2)).unwrap();
+    let upper_slots = points
+        .iter()
+        .scan(0_u32, |next, (_, layer)| {
+            let slot = *next;
+            *next += u32::from(*layer);
+            Some(slot)
+        })
+        .collect();
+    let upper_rows = points.iter().map(|(_, layer)| usize::from(*layer)).sum();
+    let mut graph = BulkGraph {
+        layer0: LinkRows::new(points.len(), parameters.degree(0)),
+        upper: LinkRows::new(upper_rows, parameters.degree(1)),
+        upper_slots,
+        entry: RwLock::new(Entry { node: 0, layer: 0 }),
+        unlinked: vec![false; points.len()],
+        linked: points.len(),
+        vectors: vectors::<Euclidean>(&source),
+        parameters,
+    };
+    for &(layer, left, right) in links {
+        graph.row(layer, left).push(right);
+        graph.row(layer, right).push(left);
+    }
+    *graph.entry.get_mut() = graph.entry_by_rule().unwrap();
+    graph
+}
+
+/// The links of two clusters on a line for [`line_graph`]: nodes `left` at 0,
+/// 1 and 2, and nodes `right` at 10, 11 and 12, each a layer-0 clique that
+/// links no node of the other. The first node of each cluster as given (at 0
+/// and 12) alone reaches layer 1, where the two link each other.
+fn two_cliques(left: [u32; 3], right: [u32; 3]) -> Vec<(u8, u32, u32)> {
+    [left, right]
+        .into_iter()
+        .flat_map(|[a, b, c]| [(0, a, b), (0, a, c), (0, b, c)])
+        .chain([(1, left[0], right[0])])
+        .collect()
+}
+
+/// A node left without links between two clusters is linked into both.
+///
+/// Layer 0 holds the clusters apart. A greedy walk of layer 1 from the entry
+/// point, at 0, moves to the node at 12, nearer the orphan at 6.4, and a
+/// layer-0 beam from there alone finds the right cluster only, so every link
+/// the orphan took stayed inside it. Seeded from both layer-1 nodes, the beam
+/// finds both clusters, and the orphan links the two nearest nodes of each.
+#[test]
+fn an_orphan_between_two_clusters_is_linked_into_both() {
+    // Node 3, at 6, links node 4, at 6.4, alone; unlinking node 3 leaves
+    // node 4 without links and no neighbor to relink it from.
+    let points = [
+        (0.0, 1),
+        (1.0, 0),
+        (2.0, 0),
+        (6.0, 0),
+        (6.4, 0),
+        (10.0, 0),
+        (11.0, 0),
+        (12.0, 1),
+    ];
+    let mut links = two_cliques([0, 1, 2], [7, 6, 5]);
+    links.push((0, 3, 4));
+    let mut graph = line_graph(&points, &links);
+    assert_graph_contract(&graph);
+
+    let mut changes = Vec::new();
+    graph.unlink(3, &mut changes).unwrap();
+    assert_graph_contract(&graph);
+    assert_eq!(graph.row(0, 4).iter().collect::<Vec<_>>(), [1, 2, 5, 6]);
+}
+
+/// An insert above layer 0 starts each lower layer's beam from the nearest
+/// nodes the beam above found, not from the nearest alone.
+///
+/// Node 3, at 6.4 on layer 1, finds both layer-1 nodes, nearest the one at
+/// 12. A layer-0 beam from that node alone finds only the right cluster;
+/// from both, it finds both clusters and links the two nearest nodes of each.
+#[test]
+fn an_upper_insert_seeds_layer_0_from_every_node_layer_1_found() {
+    let points = [
+        (0.0, 1),
+        (1.0, 0),
+        (2.0, 0),
+        (6.4, 1),
+        (10.0, 0),
+        (11.0, 0),
+        (12.0, 1),
+    ];
+    let graph = line_graph(&points, &two_cliques([0, 1, 2], [6, 5, 4]));
+    let entry = *graph.entry.read();
+    assert_eq!((entry.node, entry.layer), (0, 1));
+    graph.connect(3, 1, entry, &mut Scratch::default()).unwrap();
+    assert_graph_contract(&graph);
+    assert_eq!(graph.row(1, 3).iter().collect::<Vec<_>>(), [0, 6]);
+    assert_eq!(graph.row(0, 3).iter().collect::<Vec<_>>(), [1, 2, 4, 5]);
+}
+
 /// Unlinking a tenth of a graph leaves the rest as densely linked as it was:
 /// every neighbor that lost a link is linked again from the neighborhood the
 /// unlinked node left, as the serial delete relinks it, where linking again

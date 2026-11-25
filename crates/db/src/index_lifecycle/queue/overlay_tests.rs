@@ -62,13 +62,14 @@ pub(super) async fn write(db: &HelixDB, request: impl Fn() -> QueryRequest) -> s
 
 pub(super) async fn add(
     db: &HelixDB,
-    embedding: [f32; 2],
+    embedding: impl Into<Vec<f32>>,
     body: &str,
     tenant: Option<&str>,
 ) -> u64 {
+    let embedding = embedding.into();
     let result = write(db, || {
         let mut properties = vec![
-            ("embedding", PropertyInput::from(embedding.to_vec())),
+            ("embedding", PropertyInput::from(embedding.clone())),
             ("body", PropertyInput::from(body.to_string())),
         ];
         if let Some(tenant) = tenant {

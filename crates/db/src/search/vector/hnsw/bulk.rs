@@ -34,7 +34,8 @@
 //! spilled; the caller admits a build against its budget before reading the
 //! source. An insertion that raises the top layer serializes construction for
 //! its duration, which happens about `ln(n)` times. Re-linking a node left
-//! without layer-0 links is one beam search; the final sequential pass and
+//! without layer-0 links is the search of a layer-0 insert, one beam on
+//! layer 1 and one on layer 0; the final sequential pass and
 //! [`BulkGraph::unlink`] run it on one thread.
 
 use std::borrow::Cow;
@@ -699,9 +700,42 @@ impl<D: Distance> BulkGraph<D> {
         Ok(())
     }
 
-    /// Links `node` into layers `0..=level`, descending from `start`, with the
-    /// serial insert's search, selection and reciprocal pruning
-    /// ([`MutationDegreeLimits::seed_width`] says where each beam starts).
+    /// Leaves in `seeds` the nodes the first beam of an insert of `node` into
+    /// layers `0..=level` from `start` begins from, on layer
+    /// `level.min(start.layer)`: a greedy walk down every layer above `level`
+    /// and above layer 1 ends at one node, and a node on layer 0 alone then
+    /// searches layer 1 with a beam [`MutationDegreeLimits::seed_width`]
+    /// wide and begins from every node that beam found. The serial insert
+    /// descends the same way ([`VectorIndex::insert_hnsw`]).
+    fn descend(
+        &self,
+        query: &Item<'_, D>,
+        node: u32,
+        level: u8,
+        start: Entry,
+        seeds: &mut Vec<u32>,
+        scratch: &mut Scratch,
+    ) -> Result<(), HelixDbError> {
+        let current = (level.max(1).saturating_add(1)..=start.layer)
+            .rev()
+            .try_fold(start.node, |current, layer| {
+                self.greedy(query, node, current, layer, scratch)
+            })?;
+        seeds.clear();
+        seeds.push(current);
+        if level == 0 && start.layer > 0 {
+            let seed_width = self.parameters.limits.seed_width();
+            self.beam(query, node, seeds, 1, seed_width, scratch)?;
+            seeds.clear();
+            seeds.extend(scratch.ranked.iter().map(|(_, seed)| *seed));
+        }
+        Ok(())
+    }
+
+    /// Links `node` into layers `0..=level`, descending from `start`
+    /// ([`Self::descend`]), with the serial insert's search, selection and
+    /// reciprocal pruning: each lower layer's beam begins from the nearest
+    /// [`MutationDegreeLimits::seed_width`] nodes the beam above it found.
     fn connect(
         &self,
         node: u32,
@@ -711,19 +745,8 @@ impl<D: Distance> BulkGraph<D> {
     ) -> Result<(), HelixDbError> {
         let query = self.vectors.item(node);
         let seed_width = self.parameters.limits.seed_width();
-        let current = (level.max(1).saturating_add(1)..=start.layer)
-            .rev()
-            .try_fold(start.node, |current, layer| {
-                self.greedy(&query, node, current, layer, scratch)
-            })?;
         let mut seeds = std::mem::take(&mut scratch.seeds);
-        seeds.clear();
-        seeds.push(current);
-        if level == 0 && start.layer > 0 {
-            self.beam(&query, node, &seeds, 1, seed_width, scratch)?;
-            seeds.clear();
-            seeds.extend(scratch.ranked.iter().map(|(_, seed)| *seed));
-        }
+        self.descend(&query, node, level, start, &mut seeds, scratch)?;
         let top = level.min(start.layer);
         let mut chosen = std::mem::take(&mut scratch.chosen);
         chosen.resize_with(usize::from(top) + 1, Vec::new);
@@ -987,16 +1010,26 @@ impl<D: Distance> BulkGraph<D> {
     /// can link another that lost its links with it, and linking that one
     /// again would add the same link twice.
     ///
-    /// The diverse neighbors with a free slot are linked. When none has one,
-    /// the closest candidate that can spare a link trades its furthest
-    /// neighbor that keeps another link for `node`.
+    /// The candidates are what the layer-0 beam of a node on layer 0 alone
+    /// finds, from where [`Self::descend`] leaves it, as the parallel relink
+    /// of construction finds them: only the layer-0 row is linked again. The
+    /// diverse neighbors with a free slot are linked. When none has one, the
+    /// closest candidate that can spare a link trades its furthest neighbor
+    /// that keeps another link for `node`.
     ///
-    /// Some candidate always can. Layer-0 rows hold at least two links and the
-    /// beam keeps at least two candidates, so were every candidate full with
-    /// single-link neighbors only, one found over a link would have been found
-    /// from such a neighbor, which only the start can be; the beam would then
-    /// have visited the start, that candidate and its other single-link
-    /// neighbors alone, and kept one of them, which has a free slot.
+    /// Some candidate always can, in the symmetric graph this runs on.
+    /// Suppose none could: every candidate holds a full row, of at least the
+    /// two links a layer-0 row holds, and each of its neighbors links it
+    /// alone, so has a free slot and is no candidate. A candidate that is no
+    /// start was found from a visited neighbor. That neighbor is a start:
+    /// otherwise it was found from the one node it links, that candidate,
+    /// which the beam reached only after it. A start links one candidate at
+    /// most, so the candidates number at most the starts, at most
+    /// [`MutationDegreeLimits::seed_width`] (the upper degree). The beam keeps
+    /// as many nodes as its width, at least the layer-0 degree and so at
+    /// least twice the upper degree, unless it never filled; it then kept and
+    /// expanded every node it visited, so a candidate's neighbors would be
+    /// candidates too. Either way, a contradiction.
     fn relink_orphan(
         &self,
         node: u32,
@@ -1010,20 +1043,16 @@ impl<D: Distance> BulkGraph<D> {
             return Ok(false);
         };
         let query = self.vectors.item(node);
-        let nearest = (1..=start.layer)
-            .rev()
-            .try_fold(start.node, |current, layer| {
-                self.greedy(&query, node, current, layer, scratch)
-            })?;
+        let mut seeds = std::mem::take(&mut scratch.seeds);
+        self.descend(&query, node, 0, start, &mut seeds, scratch)?;
         let degree = self.parameters.degree(0);
-        self.beam(
-            &query,
-            node,
-            &[nearest],
-            0,
-            self.parameters.search_width(0),
-            scratch,
-        )?;
+        let width = self.parameters.search_width(0);
+        assert!(
+            width > seeds.len(),
+            "a beam holds more nodes than it starts from"
+        );
+        self.beam(&query, node, &seeds, 0, width, scratch)?;
+        scratch.seeds = seeds;
         let candidates = std::mem::take(&mut scratch.ranked);
         select_diverse(
             &candidates[..candidates.len().min(degree * 2)],
@@ -1143,8 +1172,8 @@ impl<D: Distance> BulkGraph<D> {
     /// ([`Self::relink`]), from the neighbors and their own neighbors, so a
     /// graph many nodes were unlinked from keeps the degree a serial build
     /// under the same deletes has. A node this leaves without a layer-0 link
-    /// is then linked as construction links one. Unlinking twice changes
-    /// nothing.
+    /// is then linked as construction links one, from the nearest nodes of
+    /// layer 1 ([`Self::relink_orphan`]). Unlinking twice changes nothing.
     ///
     /// What it costs, on the calling thread, for a node with `d` neighbors
     /// on a layer of degree `d`: each neighbor is scored against every
