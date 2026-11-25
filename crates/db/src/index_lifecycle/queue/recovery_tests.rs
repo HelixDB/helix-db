@@ -95,7 +95,7 @@ pub(super) fn text(entity: u64, body: &str) -> QueuedOperation {
     )
 }
 
-pub(super) fn vector(entity: u64, components: &[f32]) -> QueuedOperation {
+pub(crate) fn vector(entity: u64, components: &[f32]) -> QueuedOperation {
     QueuedOperation::new(
         QueuedOperationId::generate(),
         node(entity),

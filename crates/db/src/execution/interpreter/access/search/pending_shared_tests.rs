@@ -710,73 +710,317 @@ async fn a_build_whose_search_is_cancelled_still_installs_its_view_for_the_next_
     db.close().await.unwrap();
 }
 
+/// Publishes `family` until a publication publishes nothing.
+async fn drain(db: &HelixDB, family: QueueFamily) {
+    while matches!(
+        publish(db, family).await,
+        PublicationOutcome::Published { .. }
+    ) {}
+}
+
+/// Queue keys publications deleted because they drained them ("Delete on
+/// drain" on `QueueStore::stage_acknowledge`).
+fn drained_deletes(db: &HelixDB) -> u64 {
+    db.index_operation_queue_stats().drained_queue_deletes
+}
+
+/// Holds `db`'s next publication after it staged its writes, until the
+/// returned sender releases it; the receiver reports it reached the hold.
+fn hold_next_publication(
+    db: &HelixDB,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    *db.index_queue_publisher()
+        .unwrap()
+        .hooks()
+        .before_commit
+        .lock() = Some((reached_tx, release_rx));
+    (reached_rx, release_tx)
+}
+
+/// The kind of the newest stored entry of `family`'s queue key.
+async fn newest(
+    db: &HelixDB,
+    family: QueueFamily,
+) -> Option<crate::index_lifecycle::queue::drain_delete_tests::Stored> {
+    let target = crate::index_lifecycle::queue::tests::target(db, family).await;
+    crate::index_lifecycle::queue::drain_delete_tests::newest(&db.inner_db(), &target.key()).await
+}
+
 #[tokio::test]
-async fn a_delete_of_the_queue_key_recorded_as_acknowledging_every_operation_matches_storage() {
+async fn a_draining_delete_leaves_older_snapshots_their_operations_and_later_ones_none() {
+    use crate::index_lifecycle::queue::drain_delete_tests::Stored;
+    for layout in [QueueLayout::Map, QueueLayout::Rows] {
+        let deletes = layout == QueueLayout::Map;
+        let name = format!("shared-drain-delete-{layout:?}");
+        let db = Arc::new(open(&name, Arc::new(InMemory::new()), layout, true).await);
+        for position in 0..3 {
+            insert_at(&db, position as f32).await;
+        }
+        let mut before = read_context(&db).await;
+        check(&mut before, "before the drain").await;
+        // The draining publication waits to commit, its writes staged, while
+        // a request takes its snapshot below the delete.
+        let vector = crate::index_lifecycle::queue::tests::target(&db, QueueFamily::Vector).await;
+        let (reached, release) = hold_next_publication(&db);
+        let publishing = tokio::spawn({
+            let db = Arc::clone(&db);
+            async move {
+                db.index_queue_publisher()
+                    .unwrap()
+                    .publish_once(vector)
+                    .await
+                    .unwrap()
+            }
+        });
+        reached.await.unwrap();
+        let mut staged = read_context(&db).await;
+        release.send(()).unwrap();
+        assert!(matches!(
+            publishing.await.unwrap(),
+            PublicationOutcome::Published { operations: 3, .. }
+        ));
+        assert_eq!(drained_deletes(&db), u64::from(deletes), "{layout:?}");
+        drain(&db, QueueFamily::Text).await;
+        assert_eq!(drained_deletes(&db), 2 * u64::from(deletes), "{layout:?}");
+        if deletes {
+            for family in FAMILIES {
+                assert_eq!(newest(&db, family).await, Some(Stored::Tombstone));
+            }
+        }
+        let mut drained = read_context(&db).await;
+        // A later enqueue lands above the tombstones.
+        insert_at(&db, 9.0).await;
+        let mut later = read_context(&db).await;
+        let (selected, _) =
+            selections(&mut staged, QueueFamily::Vector, SearchConsistency::Strong).await;
+        assert_eq!(selected.len(), 3, "the snapshot below the delete sees all");
+        let (selected, _) =
+            selections(&mut drained, QueueFamily::Vector, SearchConsistency::Strong).await;
+        assert!(
+            selected.is_empty(),
+            "the snapshot above the delete sees none"
+        );
+        let (selected, _) =
+            selections(&mut later, QueueFamily::Vector, SearchConsistency::Strong).await;
+        assert_eq!(selected.len(), 1, "the later enqueue is never hidden");
+        // Every snapshot, in any order and at once, from the views.
+        futures::future::join_all(
+            [
+                (&mut later, "later"),
+                (&mut before, "before"),
+                (&mut drained, "drained"),
+                (&mut staged, "staged"),
+            ]
+            .into_iter()
+            .map(|(context, label)| async move { check(context, label).await }),
+        )
+        .await;
+        assert_eq!(
+            fallbacks(&db),
+            0,
+            "{layout:?}: the views served every search"
+        );
+        for context in [before, staged, drained, later] {
+            let mut context = context;
+            context.close_request_read_view().unwrap();
+        }
+        // With no snapshot left below the deletes, the views hold exactly
+        // what the ledger charges: the later enqueue.
+        let mut charged = 0;
+        for family in FAMILIES {
+            let target = crate::index_lifecycle::queue::tests::target(&db, family).await;
+            charged += db
+                .index_operation_backlog()
+                .usage(target.scope, target.index_id)
+                .retained_bytes;
+        }
+        assert!(charged > 0);
+        assert_eq!(
+            db.index_operation_queue_stats().shared_view_bytes,
+            charged,
+            "{layout:?}"
+        );
+        Arc::into_inner(db).unwrap().close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn an_enqueue_racing_a_draining_delete_is_never_hidden_and_nothing_removed_returns() {
+    let db = Arc::new(
+        open(
+            "shared-drain-race",
+            Arc::new(InMemory::new()),
+            QueueLayout::Map,
+            true,
+        )
+        .await,
+    );
+    insert_at(&db, 0.0).await;
+    search_all(&db, "built").await;
+    let vector = crate::index_lifecycle::queue::tests::target(&db, QueueFamily::Vector).await;
+
+    // An enqueue that commits while the draining delete waits to commit
+    // aborts it: nothing of the attempt is recorded.
+    let (reached, release) = hold_next_publication(&db);
+    let publishing = tokio::spawn({
+        let db = Arc::clone(&db);
+        async move {
+            db.index_queue_publisher()
+                .unwrap()
+                .publish_once(vector)
+                .await
+                .unwrap()
+        }
+    });
+    reached.await.unwrap();
+    let mut waiting = read_context(&db).await;
+    insert_at(&db, 1.0).await;
+    let mut enqueued = read_context(&db).await;
+    release.send(()).unwrap();
+    assert_eq!(publishing.await.unwrap(), PublicationOutcome::Retry);
+    assert_eq!(drained_deletes(&db), 0);
+    let mut aborted = read_context(&db).await;
+    for (context, label, count) in [
+        (&mut waiting, "below the enqueue", 1),
+        (&mut enqueued, "above the enqueue", 2),
+        (&mut aborted, "after the aborted delete", 2),
+    ] {
+        let (selected, _) =
+            selections(context, QueueFamily::Vector, SearchConsistency::Strong).await;
+        assert_eq!(selected.len(), count, "{label}");
+        check(context, label).await;
+    }
+    // The retry removes what it read before the enqueue, which the ledger
+    // still charges; the attempt after it drains the queue and deletes it.
+    drain(&db, QueueFamily::Vector).await;
+    assert_eq!(drained_deletes(&db), 1);
+    let mut deleted = read_context(&db).await;
+    check(&mut deleted, "after the delete").await;
+
+    // A producer whose transaction began before the next draining delete
+    // committed commits after it, above the tombstone, recorded at its own
+    // sequence.
+    insert_at(&db, 2.0).await;
+    let entity = db
+        .index_queue_store()
+        .read_latest(&*db.inner_db(), vector)
+        .await
+        .unwrap()
+        .unwrap()
+        .decode_all()
+        .unwrap()
+        .1[0]
+        .entity()
+        .id
+        .get();
+    search_all(&db, "before the producer").await;
+    let producer = db
+        .inner_db()
+        .begin(slatedb::IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+    let late = crate::index_lifecycle::queue::recovery_tests::vector(entity, &[7.0, 7.0]);
+    let mut changes = crate::index_lifecycle::queue::shared::QueueChanges::default();
+    db.index_queue_store()
+        .stage_enqueue(
+            &producer,
+            &mut changes,
+            vector,
+            crate::encoding::v2::values::indexes::operation_queue::QueueOperand::enqueue(
+                std::slice::from_ref(&late),
+            )
+            .unwrap(),
+            std::slice::from_ref(&late),
+        )
+        .unwrap();
+    assert!(matches!(
+        publish(&db, QueueFamily::Vector).await,
+        PublicationOutcome::Published { operations: 1, .. }
+    ));
+    assert_eq!(drained_deletes(&db), 2);
+    let mut between = read_context(&db).await;
+    crate::index_lifecycle::queue::shared::commit_recorded(
+        producer,
+        db.index_queue_store().shared().begin_commit(changes),
+    )
+    .await
+    .expect("a draining delete never aborts a producer");
+    let mut above = read_context(&db).await;
+    for (context, label, count) in [
+        (&mut between, "between the delete and the producer", 0),
+        (&mut above, "above the producer", 1),
+    ] {
+        let (selected, _) =
+            selections(context, QueueFamily::Vector, SearchConsistency::Strong).await;
+        assert_eq!(selected.len(), count, "{label}");
+        check(context, label).await;
+    }
+    for context in [&mut waiting, &mut enqueued, &mut aborted, &mut deleted] {
+        check(context, "an older snapshot, read again").await;
+    }
+    assert_eq!(fallbacks(&db), 0, "the views served every search");
+    for context in [waiting, enqueued, aborted, deleted, between, above] {
+        let mut context = context;
+        context.close_request_read_view().unwrap();
+    }
+    Arc::into_inner(db).unwrap().close().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_uncertain_draining_delete_unsettles_its_view_until_reconciled() {
     let db = open(
-        "shared-queue-delete",
+        "shared-uncertain-delete",
         Arc::new(InMemory::new()),
         QueueLayout::Map,
         true,
     )
     .await;
-    for position in 0..3 {
-        insert_at(&db, position as f32).await;
-    }
-    let mut before = read_context(&db).await;
-    check(&mut before, "before the deletes").await;
-    let crate::HelixStorage::Writer(writer) = db.storage() else {
-        unreachable!("a writer");
-    };
-    let store = db.index_queue_store();
-    for family in FAMILIES {
-        let target = crate::index_lifecycle::queue::tests::target(&db, family).await;
-        // What a draining acknowledgement stages: the delete, recorded as the
-        // acknowledgement of every operation outstanding in what it read.
-        let transaction = writer
-            .db()
-            .begin(slatedb::IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
-        let (_, outstanding) = store
-            .read_latest(&transaction, target)
-            .await
-            .unwrap()
-            .unwrap()
-            .decode_all()
-            .unwrap();
-        transaction.delete(target.key()).unwrap();
-        let mut changes = crate::index_lifecycle::queue::shared::QueueChanges::default();
-        changes.acknowledge(
-            target,
-            &outstanding
-                .iter()
-                .map(QueuedOperation::id)
-                .collect::<Vec<_>>(),
-        );
-        crate::index_lifecycle::queue::shared::commit_recorded(
-            transaction,
-            store.shared().begin_commit(changes),
-        )
-        .await
-        .unwrap();
-    }
-    let mut deleted = read_context(&db).await;
-    check(&mut deleted, "after the deletes").await;
-    // A later enqueue lands above the tombstone.
-    insert_at(&db, 9.0).await;
-    let mut later = read_context(&db).await;
-    check(&mut later, "after an enqueue").await;
-    check(&mut before, "before the deletes, read again").await;
-    assert_eq!(fallbacks(&db), 0, "the views served every search");
-    for context in [before, deleted, later] {
-        let mut context = context;
-        context.close_request_read_view().unwrap();
-    }
+    insert_at(&db, 0.0).await;
+    search_all(&db, "built").await;
+    let hooks = db.index_queue_publisher().unwrap().hooks();
+    // A draining text delete whose commit never reached storage, reported
+    // uncertain: its view reads storage until the publisher reconciles it.
+    hooks.uncertain_without_commit.store(true, Ordering::SeqCst);
+    assert_eq!(
+        publish(&db, QueueFamily::Text).await,
+        PublicationOutcome::Retry
+    );
+    let before = fallbacks(&db);
+    search_all(&db, "unsettled").await;
+    assert_eq!(fallbacks(&db), before + 2, "the text searches read storage");
+    // Reconciliation finds the operation still queued; the next attempt
+    // deletes the queue and settles the view, which the next search rebuilds.
+    drain(&db, QueueFamily::Text).await;
+    assert_eq!(drained_deletes(&db), 1);
+    let before = fallbacks(&db);
+    search_all(&db, "settled").await;
+    assert_eq!(fallbacks(&db), before, "the rebuilt view served them");
+    // A draining delete that committed but was reported uncertain: the view
+    // recorded the commit, so it keeps serving, and reconciliation counts the
+    // delete once.
+    insert_at(&db, 1.0).await;
+    search_all(&db, "enqueued").await;
+    hooks.uncertain_after_commit.store(true, Ordering::SeqCst);
+    assert_eq!(
+        publish(&db, QueueFamily::Text).await,
+        PublicationOutcome::Retry
+    );
+    search_all(&db, "committed, reported uncertain").await;
+    publish(&db, QueueFamily::Text).await;
+    assert_eq!(drained_deletes(&db), 2);
+    search_all(&db, "reconciled").await;
+    assert_eq!(fallbacks(&db), before, "the view served every later search");
     db.close().await.unwrap();
 }
 
 #[tokio::test]
-async fn a_queue_tombstoned_before_any_search_needs_no_record() {
+async fn the_first_search_after_an_open_that_tombstones_drained_queues_builds_from_absence() {
+    use crate::index_lifecycle::queue::drain_delete_tests::Stored;
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let db = open(
         "shared-open-tombstone",
@@ -786,25 +1030,88 @@ async fn a_queue_tombstoned_before_any_search_needs_no_record() {
     )
     .await;
     insert_at(&db, 0.0).await;
-    for family in FAMILIES {
-        while matches!(
-            publish(&db, family).await,
-            PublicationOutcome::Published { .. }
-        ) {}
-    }
-    db.close().await.unwrap();
-    let db = open("shared-open-tombstone", store, QueueLayout::Map, false).await;
-    // What an open tombstones: drained queues, before any search, unrecorded.
-    let crate::HelixStorage::Writer(writer) = db.storage() else {
-        unreachable!("a writer");
-    };
+    insert_at(&db, 1.0).await;
+    // What an earlier version left: queues drained by removal operands.
     for family in FAMILIES {
         let target = crate::index_lifecycle::queue::tests::target(&db, family).await;
-        writer.db().delete(target.key()).await.unwrap();
+        let (_, operations) = db
+            .index_queue_store()
+            .read_latest(&*db.inner_db(), target)
+            .await
+            .unwrap()
+            .unwrap()
+            .decode_all()
+            .unwrap();
+        let (bytes, tokens) =
+            crate::encoding::v2::values::indexes::operation_queue::QueueOperand::acknowledge(
+                family,
+                operations.iter().map(QueuedOperation::id),
+            )
+            .unwrap()
+            .into_parts();
+        let transaction = db
+            .inner_db()
+            .begin(slatedb::IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        transaction
+            .merge_disjoint_tokens(target.key(), tokens, bytes)
+            .unwrap();
+        transaction.commit().await.unwrap();
+        assert_eq!(newest(&db, family).await, Some(Stored::Merge));
     }
-    search_all(&db, "after the tombstones").await;
-    insert_at(&db, 1.0).await;
-    search_all(&db, "after an enqueue").await;
+    db.close().await.unwrap();
+
+    // The open tombstones them before any search, so no view records them.
+    let db = open(
+        "shared-open-tombstone",
+        Arc::clone(&store),
+        QueueLayout::Map,
+        false,
+    )
+    .await;
+    assert_eq!(
+        db.index_operation_queue_stats()
+            .open_drained_queue_tombstones,
+        2
+    );
+    let shared = Arc::clone(db.index_queue_store().shared());
+    assert!(!shared.searched());
+    for family in FAMILIES {
+        assert_eq!(newest(&db, family).await, Some(Stored::Tombstone));
+    }
+    // The first search builds each view from the absent key.
+    search_all(&db, "first search").await;
+    assert!(shared.searched());
+    let vector = crate::index_lifecycle::queue::tests::target(&db, QueueFamily::Vector).await;
+    assert!(shared.holds_view(vector));
+    insert_at(&db, 2.0).await;
+    let mut enqueued = read_context(&db).await;
+    check(&mut enqueued, "after an enqueue").await;
+    for family in FAMILIES {
+        drain(&db, family).await;
+    }
+    assert_eq!(drained_deletes(&db), 2);
+    search_all(&db, "after the draining deletes").await;
+    check(&mut enqueued, "after an enqueue, read again").await;
+    enqueued.close_request_read_view().unwrap();
+    assert_eq!(fallbacks(&db), 0);
+    insert_at(&db, 3.0).await;
+    db.close().await.unwrap();
+
+    // A reopen finds nothing drained to tombstone; its views rebuild.
+    let db = open("shared-open-tombstone", store, QueueLayout::Map, false).await;
+    assert_eq!(
+        db.index_operation_queue_stats()
+            .open_drained_queue_tombstones,
+        0
+    );
+    search_all(&db, "after the reopen").await;
+    for family in FAMILIES {
+        drain(&db, family).await;
+    }
+    assert_eq!(drained_deletes(&db), 2);
+    search_all(&db, "drained after the reopen").await;
     assert_eq!(fallbacks(&db), 0);
     db.close().await.unwrap();
 }

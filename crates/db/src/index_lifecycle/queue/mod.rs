@@ -293,7 +293,7 @@ mod admission_memory_tests;
 #[cfg(test)]
 mod codec_storage_tests;
 #[cfg(test)]
-mod drain_delete_tests;
+pub(crate) mod drain_delete_tests;
 #[cfg(test)]
 mod drain_tests;
 #[cfg(test)]
@@ -318,7 +318,7 @@ mod presearch_tests;
 #[cfg(test)]
 mod publication_tests;
 #[cfg(test)]
-mod recovery_tests;
+pub(crate) mod recovery_tests;
 #[cfg(test)]
 mod soak_tests;
 #[cfg(test)]

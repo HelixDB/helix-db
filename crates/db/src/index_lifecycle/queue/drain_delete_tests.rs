@@ -29,7 +29,7 @@ use crate::HelixDB;
 
 /// The kind of one stored entry of a key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Stored {
+pub(crate) enum Stored {
     Value,
     Merge,
     Tombstone,
@@ -37,12 +37,12 @@ pub(super) enum Stored {
 
 /// Returns the kind of `key`'s newest stored entry across every source, or
 /// `None` when no source holds the key.
-pub(super) async fn newest(db: &slatedb::Db, key: &[u8]) -> Option<Stored> {
+pub(crate) async fn newest(db: &slatedb::Db, key: &[u8]) -> Option<Stored> {
     history(db, key).await.first().copied()
 }
 
 /// Every stored entry of `key` across every source, newest first.
-pub(super) async fn history(db: &slatedb::Db, key: &[u8]) -> Vec<Stored> {
+pub(crate) async fn history(db: &slatedb::Db, key: &[u8]) -> Vec<Stored> {
     let mut found = Vec::new();
     let mut entries = db.scan_prefix_by_recency(key).await.unwrap();
     while let Some(entry) = entries.next_entry().await.unwrap() {
