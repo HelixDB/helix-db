@@ -23104,7 +23104,7 @@ in a spreadsheet, with a footnote on every cell.
 
 It produces three things: the entities a document names, the facts it states about
 them, and the evidence for each fact. A sentence such as "Northwind signed the services
-agreement on March 1" yields a `Customer` named Northwind, a `Contract`, a `SIGNED`
+agreement on March 1, 2026" yields a `Customer` named Northwind, a `Contract`, a `SIGNED`
 link between them with a `signedOn` date, and the quote that states it.
 
 | Output | What it is | Example |
@@ -23112,7 +23112,7 @@ link between them with a `signedOn` date, and the quote that states it.
 | Entity mention | A name the document uses for a thing | "Northwind", "the Client" |
 | Property value | A typed value about an entity | `signedOn = 2026-03-01` |
 | Relationship | A typed link between two entities | `Customer -[SIGNED]-> Contract` |
-| Evidence | The exact quote, and where it is | Page 2, "signed the services agreement on March 1" |
+| Evidence | The exact quote, and where it is | Page 2, "signed the services agreement on March 1, 2026" |
 | Confidence | How sure the check was | A verifier's score of 0.94 |
 
 Together they become part of a
@@ -23183,8 +23183,9 @@ tables, and have a person look at what the checks cannot settle.
 
 Model calls are the main cost, so read each document once and only re-read what changed.
 
-- **Cache by content.** The same text read by the same model gives the same result, so
-  key results by document content and model, and reuse them.
+- **Cache by extraction inputs.** Key results by document content, model, target shape,
+  and extraction instructions, so unchanged inputs can reuse an earlier result instead
+  of paying for a new model call.
 - **Extract incrementally.** When a document is replaced or a new one arrives, read only
   that document. When one is deleted, its provenance says which facts to remove.
 - **Route documents.** Only read a document for the types it can fill, and skip sets no
