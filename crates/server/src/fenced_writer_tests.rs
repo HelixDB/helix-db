@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use axum::Router;
-use db::{HelixDB, StorageState};
+use db::{HelixDB, HelixDbMode, IndexRuntimeReadiness, StorageState};
 use grpc::pb::helix_db_server_server::HelixDbServer;
 use helix_ast::{batch, query::QueryRequest, traversal};
 use serde_json::json;
@@ -155,12 +155,20 @@ async fn a_fenced_writer_is_unready_but_live_and_fails_every_request_with_the_fe
         .await
         .unwrap();
     let fenced = Instant::now();
-    while get(&router, "/readyz").await.0 == StatusCode::OK {
+    loop {
+        // Each answer comes from one look: its code and body agree even
+        // while the fence lands.
+        let (status, body) = get(&router, "/readyz").await;
+        assert_eq!(status == StatusCode::OK, body["ready"] == true, "{body}");
+        assert_eq!(status == StatusCode::OK, body["storage"] == "open", "{body}");
+        if status != StatusCode::OK {
+            break;
+        }
         assert!(
             fenced.elapsed() < DETECTION_BOUND,
             "an idle fenced writer turns unready"
         );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
     assert_eq!(old.storage_state(), StorageState::Fenced);
 
@@ -297,4 +305,71 @@ async fn a_server_whose_storage_closed_is_neither_ready_nor_live() {
         .into_inner();
     assert!(!health.ready);
     assert_eq!(health.storage, "closed");
+}
+
+async fn answer(response: axum::response::Response) -> (StatusCode, serde_json::Value) {
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    (status, serde_json::from_slice(&body).unwrap())
+}
+
+/// Each storage state answers liveness and readiness over both transports
+/// from the one look each probe takes. Only open storage is ready; failed
+/// and closed storage is not live either, as a restart is what it needs,
+/// while a fenced writer stays live so that no restart fences the newer one.
+#[tokio::test]
+async fn every_storage_state_answers_both_probes_from_one_look() {
+    for (storage, live, ready) in [
+        (StorageState::Open, StatusCode::OK, StatusCode::OK),
+        (
+            StorageState::Fenced,
+            StatusCode::OK,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            StorageState::Failed,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            StorageState::Closed,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+    ] {
+        let health = state::Health {
+            storage,
+            mode: HelixDbMode::Writer,
+            index_readiness: IndexRuntimeReadiness::Ready,
+            blocked_index_entity_count: 3,
+        };
+        let expected = json!({
+            "ready": ready == StatusCode::OK,
+            "mode": "writer",
+            "storage": storage.as_str(),
+            "index_runtime": "ready",
+            "blocked_index_entity_count": 3,
+        });
+        assert_eq!(
+            answer(http::liveness(&health)).await,
+            (live, expected.clone()),
+            "{storage:?}"
+        );
+        assert_eq!(
+            answer(http::readiness(&health)).await,
+            (ready, expected),
+            "{storage:?}"
+        );
+        assert_eq!(
+            grpc::health_response(&health),
+            grpc::pb::HealthResponse {
+                ready: ready == StatusCode::OK,
+                mode: "writer".to_string(),
+                storage: storage.as_str().to_string(),
+                index_runtime: "ready".to_string(),
+                blocked_index_entity_count: 3,
+            },
+            "{storage:?}"
+        );
+    }
 }

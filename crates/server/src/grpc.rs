@@ -9,7 +9,7 @@ use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 
 use crate::server_timing;
-use crate::state::ServerState;
+use crate::state::{Health, ServerState};
 use crate::MAX_QUERY_BODY_BYTES;
 
 pub(crate) const HELIX_ERROR_CODE_METADATA: &str = "helix-error-code";
@@ -260,13 +260,18 @@ impl HelixDbServer for GrpcService {
         &self,
         _request: Request<HealthRequest>,
     ) -> Result<Response<HealthResponse>, Status> {
-        Ok(Response::new(HealthResponse {
-            ready: self.state.is_ready(),
-            mode: self.state.db_mode().as_str().to_string(),
-            storage: self.state.storage_state().as_str().to_string(),
-            index_runtime: self.state.index_readiness().code().to_string(),
-            blocked_index_entity_count: self.state.blocked_index_entity_count(),
-        }))
+        Ok(Response::new(health_response(&self.state.health())))
+    }
+}
+
+/// The gRPC health answer of one look at the server's health.
+pub(crate) fn health_response(health: &Health) -> HealthResponse {
+    HealthResponse {
+        ready: health.is_ready(),
+        mode: health.mode.as_str().to_string(),
+        storage: health.storage.as_str().to_string(),
+        index_runtime: health.index_readiness.code().to_string(),
+        blocked_index_entity_count: health.blocked_index_entity_count,
     }
 }
 

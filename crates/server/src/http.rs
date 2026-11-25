@@ -17,7 +17,7 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 
 use crate::server_timing;
-use crate::state::ServerState;
+use crate::state::{Health, ServerState};
 use crate::MAX_QUERY_BODY_BYTES;
 
 /// Serve the HTTP API.
@@ -55,37 +55,45 @@ pub(crate) fn router(state: ServerState) -> Router {
         .with_state(state)
 }
 
-/// Liveness: 503 once storage failed, when a restart may help. A fenced
-/// writer stays 200 ([`ServerState::is_live`]).
 async fn healthz(State(state): State<ServerState>) -> Response {
-    let status = if state.is_live() {
+    liveness(&state.health())
+}
+
+async fn readyz(State(state): State<ServerState>) -> Response {
+    readiness(&state.health())
+}
+
+/// Liveness: 503 once storage failed or closed, when a restart is what the
+/// server needs. A fenced writer stays 200 ([`Health::is_live`]).
+pub(crate) fn liveness(health: &Health) -> Response {
+    let status = if health.is_live() {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
-    health_response(status, state)
+    health_response(status, health)
 }
 
 /// Readiness: 503 until indexes are ready and from when storage stops
-/// serving, fenced included ([`ServerState::is_ready`]).
-async fn readyz(State(state): State<ServerState>) -> Response {
-    let status = if state.is_ready() {
+/// serving, fenced included ([`Health::is_ready`]).
+pub(crate) fn readiness(health: &Health) -> Response {
+    let status = if health.is_ready() {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
-    health_response(status, state)
+    health_response(status, health)
 }
 
-fn health_response(status: StatusCode, state: ServerState) -> Response {
+fn health_response(status: StatusCode, health: &Health) -> Response {
     json_response(
         status,
         &serde_json::json!({
-            "ready": state.is_ready(),
-            "mode": state.db_mode().as_str(),
-            "storage": state.storage_state().as_str(),
-            "index_runtime": state.index_readiness().code(),
-            "blocked_index_entity_count": state.blocked_index_entity_count(),
+            "ready": health.is_ready(),
+            "mode": health.mode.as_str(),
+            "storage": health.storage.as_str(),
+            "index_runtime": health.index_readiness.code(),
+            "blocked_index_entity_count": health.blocked_index_entity_count,
         }),
     )
 }

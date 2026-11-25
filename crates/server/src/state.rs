@@ -85,31 +85,14 @@ impl ServerState {
         self.db_mode
     }
 
-    /// Return whether all public index families have their runtime authorities.
-    pub const fn index_readiness(&self) -> IndexRuntimeReadiness {
-        self.index_readiness
-    }
-
-    /// Whether the database's storage still serves.
-    pub fn storage_state(&self) -> StorageState {
-        self.db.storage_state()
-    }
-
-    /// Whether this server should receive traffic: its storage is open and
-    /// every index family has its runtime authority. A fenced writer never
-    /// is again, so a load balancer moves its traffic to the newer writer.
-    pub fn is_ready(&self) -> bool {
-        self.storage_state() == StorageState::Open && self.index_readiness.is_ready()
-    }
-
-    /// Whether restarting the process could help, which liveness probes
-    /// report: not once storage failed or closed. A fenced writer stays live,
-    /// as a restarted one would reopen the store as writer and fence the
-    /// writer that replaced it, and the two would take turns.
-    pub fn is_live(&self) -> bool {
-        match self.storage_state() {
-            StorageState::Open | StorageState::Fenced => true,
-            StorageState::Failed | StorageState::Closed => false,
+    /// One look at the server's health. A probe answers from one look, so
+    /// its status code and its body cannot disagree across a fence.
+    pub(crate) fn health(&self) -> Health {
+        Health {
+            storage: self.db.storage_state(),
+            mode: self.db_mode,
+            index_readiness: self.index_readiness,
+            blocked_index_entity_count: self.blocked_index_entity_count(),
         }
     }
 
@@ -121,5 +104,39 @@ impl ServerState {
     /// never learn tenant or entity IDs.
     pub fn blocked_index_entity_count(&self) -> u64 {
         self.db.blocked_index_entity_count()
+    }
+}
+
+/// What a health probe reports, as of one look ([`ServerState::health`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Health {
+    /// Whether the database's storage still serves.
+    pub(crate) storage: StorageState,
+    /// The opened DB mode.
+    pub(crate) mode: HelixDbMode,
+    /// Whether all public index families have their runtime authorities.
+    pub(crate) index_readiness: IndexRuntimeReadiness,
+    /// [`ServerState::blocked_index_entity_count`].
+    pub(crate) blocked_index_entity_count: u64,
+}
+
+impl Health {
+    /// Whether this server should receive traffic: its storage is open and
+    /// every index family has its runtime authority. A fenced writer never
+    /// is again, so a load balancer moves its traffic to the newer writer.
+    pub(crate) fn is_ready(&self) -> bool {
+        self.storage == StorageState::Open && self.index_readiness.is_ready()
+    }
+
+    /// Whether the process should keep running, which liveness probes
+    /// report: not once storage failed or closed, when a restart is what it
+    /// needs. A fenced writer stays live, as a restarted one would reopen
+    /// the store as writer and fence the writer that replaced it, and the
+    /// two would take turns.
+    pub(crate) fn is_live(&self) -> bool {
+        match self.storage {
+            StorageState::Open | StorageState::Fenced => true,
+            StorageState::Failed | StorageState::Closed => false,
+        }
     }
 }
