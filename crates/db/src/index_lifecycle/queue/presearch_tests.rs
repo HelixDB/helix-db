@@ -26,7 +26,7 @@ use crate::config::{
 use crate::encoding::v2::values::indexes::operation_queue::QueueFamily;
 use crate::index_lifecycle::ValidatedDynamicIndexDefinition;
 use crate::search::vector::{
-    VectorDistanceMetric, AWAIT_WORKERS, MEMOIZED_LOOKUPS, PRESEARCH_START_FAILS,
+    VectorDistanceMetric, AWAIT_WORKERS, MEMOIZED_LOOKUPS, PRESEARCH_START_FAILS, REPLAYED_LOOKUPS,
 };
 use crate::HelixDB;
 
@@ -293,4 +293,79 @@ async fn a_single_threaded_runtime_runs_workers_too() {
     )
     .await;
     assert!(alone == beside, "rows differ on a current-thread runtime");
+}
+
+/// A worker's descent is the insert's own: an insert published alone, which
+/// changes nothing its beams read before they finish, finds in the memo its
+/// worker captured every neighbor distance its beams look up, on every layer
+/// they search. A beam scores its starts directly, outside the memo, so a
+/// worker that starts a beam elsewhere shows only through the neighbors the
+/// insert's beam then expands and the worker's never did.
+///
+/// The graph makes those differ. At 32 dimensions a beam of sixteen, the
+/// narrowest construction width a stored definition takes, reaches little
+/// beyond what its starts lead to.
+/// A layer multiplier of one puts about one insert in three on layer 1 or
+/// above and one in seven on layer 2 or above, so many inserts start a lower
+/// layer from the four nearest nodes of the layer above, and each insert on
+/// layer 0 alone starts it from the four nearest of layer 1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lone_insert_replays_every_distance_its_beams_look_up() {
+    const DIMENSION: usize = 32;
+    let config =
+        queued(IndexOperationQueueTuning::default()).with_wal_flush_interval_ms(NonZeroU64::MIN);
+    let db = open("presearch-lone-insert", Arc::new(InMemory::new()), config).await;
+    let definition = VectorIndexDefinition::new_node(
+        "Doc",
+        "embedding",
+        DIMENSION,
+        VectorDistanceMetric::Euclidean,
+    )
+    .unwrap()
+    .with_m(4)
+    .unwrap()
+    .with_ef_construction(16)
+    .unwrap()
+    .with_ml(1.0)
+    .unwrap();
+    db.install_index_for_tests(ValidatedDynamicIndexDefinition::try_from(definition).unwrap())
+        .await
+        .unwrap();
+    let mut rng = Rng(23);
+    let mut embedding = || {
+        (0..DIMENSION)
+            .map(|_| rng.below(1_000) as f32 / 500.0 - 1.0)
+            .collect::<Vec<_>>()
+    };
+    let publisher = |workers| {
+        publisher_with_presearch(
+            &db,
+            batch_limits(8 * 1024 * 1024, 8192),
+            DbConfig::new()
+                .search_index_backfill()
+                .active_text_mutation(),
+            workers,
+        )
+    };
+    for _ in 0..400 {
+        add(&db, embedding(), "doc", None).await;
+    }
+    drain(&publisher(None), &db).await;
+
+    for _ in 0..48 {
+        add(&db, embedding(), "doc", None).await;
+        let lone = publisher(NonZeroUsize::new(1));
+        let [served, missed] = REPLAYED_LOOKUPS
+            .scope(Cell::new([0, 0]), async {
+                AWAIT_WORKERS.scope((), drain(&lone, &db)).await;
+                REPLAYED_LOOKUPS.with(Cell::get)
+            })
+            .await;
+        assert!(served > 0, "the insert replayed its worker's memo");
+        assert_eq!(
+            missed, 0,
+            "the insert looked up a distance its worker never scored"
+        );
+    }
+    db.close().await.unwrap();
 }

@@ -20,7 +20,9 @@ use super::*;
 use crate::encoding::v2::keys::scope::DataScope;
 use crate::index_lifecycle::IndexElementKind;
 use crate::search::vector::distance::{Cosine, Euclidean, Manhattan};
-use crate::search::vector::hnsw::mutation::FreshVectorBuildProof;
+use crate::search::vector::hnsw::mutation::{
+    FreshVectorBuildProof, MutationOpCache, MutationScratch,
+};
 use crate::search::vector::storage::VectorRows;
 use crate::search::vector::{
     self, Candidate, SearchParams, ValidatedVectorGenerationHandle, VectorBuildSession,
@@ -534,6 +536,243 @@ fn duplicate_vectors_are_linked_like_any_other() {
     }
 }
 
+/// A beam enters each start once, never visits the node it excludes, keeps
+/// at most `ef` of the nearest, and ranks starts and visited nodes alike.
+#[test]
+fn a_beam_enters_each_start_once_and_keeps_the_nearest() {
+    let config = config(2, 2);
+    // Points on a line, so distances to the query are known: node `i` lies
+    // `i` from the query at 0, and every two nodes tie at no distance.
+    let source = (0..40)
+        .map(|position| ((position + 1) * 10, vec![position as f32, 0.0], 0))
+        .collect::<Vec<_>>();
+    let graph = built::<Euclidean>(&source, &config, ONE_THREAD);
+    let query = graph.vectors.item(0);
+    let mut scratch = Scratch::default();
+    let ranked = |scratch: &Scratch| {
+        scratch
+            .ranked
+            .iter()
+            .map(|(_, node)| *node)
+            .collect::<Vec<_>>()
+    };
+
+    // Repeated starts are scored once.
+    graph
+        .beam(&query, 0, &[30, 30, 20, 30], 0, 64, &mut scratch)
+        .unwrap();
+    let all = ranked(&scratch);
+    assert_eq!(all.len(), 39, "every node but the excluded one, once");
+    assert!(
+        all.windows(2).all(|pair| pair[0] < pair[1]),
+        "nearest first"
+    );
+
+    // More starts than the beam holds: the nearest `ef` stay.
+    graph
+        .beam(&query, 0, &[39, 38, 37, 3, 36], 0, 2, &mut scratch)
+        .unwrap();
+    assert_eq!(ranked(&scratch), [1, 2]);
+}
+
+/// A beam never starts at the node it excludes.
+#[test]
+#[should_panic(expected = "a beam starts at other nodes")]
+fn a_beam_rejects_the_excluded_node_as_a_start() {
+    let config = config(2, 2);
+    let source = source(3, 20, 2, config.ml);
+    let graph = built::<Euclidean>(&source, &config, ONE_THREAD);
+    let query = graph.vectors.item(4);
+    graph
+        .beam(&query, 4, &[1, 4], 0, 8, &mut Scratch::default())
+        .unwrap();
+}
+
+/// A beam needs a start.
+#[test]
+#[should_panic(expected = "a beam starts at other nodes")]
+fn a_beam_rejects_no_start() {
+    let config = config(2, 2);
+    let source = source(3, 20, 2, config.ml);
+    let graph = built::<Euclidean>(&source, &config, ONE_THREAD);
+    let query = graph.vectors.item(4);
+    graph
+        .beam(&query, 4, &[], 0, 8, &mut Scratch::default())
+        .unwrap();
+}
+
+/// The serial insert's beam enters its entry points as the bulk beam does:
+/// each once and in order, never the inserting node, at most `ef` of them,
+/// and a missing later one not at all.
+#[tokio::test]
+async fn a_serial_beam_enters_each_entry_point_once() {
+    let config = config(2, 2);
+    let source = (0..40)
+        .map(|position| ((position + 1) * 10, vec![position as f32, 0.0], 0))
+        .collect::<Vec<_>>();
+    let index = index::<Euclidean>(2);
+    let config = VectorIndexConfig {
+        index_name: index.name().to_string(),
+        ..config
+    };
+    let db = database("bulk-graph-serial-beam-starts").await;
+    store_serially(&db, &index, &source, &config).await;
+    let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    let measured = MeasuredVectorTransaction::new(&transaction);
+    let origin = UnalignedVector::<f32>::from_slice(&[0.0, 0.0]);
+    let query = Item::<Euclidean> {
+        header: Euclidean::new_header(&origin),
+        vector: Cow::Owned(origin.into_owned()),
+    };
+    let limits = MutationDegreeLimits::try_from_config(&config).unwrap();
+    let beam = |entry_points: Vec<NodeId>, ef: usize| {
+        let (index, measured, query) = (&index, &measured, &query);
+        async move {
+            let mut cache = MutationOpCache::<Euclidean>::with_degree_limits(
+                limits.layer0.get(),
+                limits.upper.get(),
+            )
+            .unwrap();
+            index
+                .search_layer_beam(
+                    measured,
+                    query,
+                    &entry_points,
+                    0,
+                    ef,
+                    10,
+                    &mut cache,
+                    &mut MutationScratch::default(),
+                )
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|candidate| candidate.node_id)
+                .collect::<Vec<_>>()
+        }
+    };
+
+    let all = beam(vec![300, 300, 200, 300, 10], 64).await;
+    assert_eq!(all.len(), 39, "every node but the inserting one, once");
+    assert!(
+        all.windows(2).all(|pair| pair[0] < pair[1]),
+        "nearest first"
+    );
+    assert_eq!(beam(vec![400, 390, 380, 40, 370], 2).await, [20, 30]);
+    // A missing later entry point is skipped.
+    assert_eq!(beam(vec![400, 9_999], 64).await.len(), 39);
+    transaction.rollback();
+}
+
+/// Two clusters of normally distributed points `separation` apart on every
+/// axis, alternating in source order, and joined by a thin filament: about
+/// one point in 33 lies anywhere between them.
+fn two_clusters(count: usize, dimension: usize, ml: f32) -> Vec<(NodeId, Vec<f32>, u16)> {
+    let separation = 5.0_f32;
+    let mut rng = StdRng::seed_from_u64(1);
+    let points = (0..count)
+        .map(|position| {
+            let centre = match (rng.random_range(0.0_f32..1.0) < 0.03, position % 2) {
+                (true, _) => rng.random_range(0.0..separation),
+                (false, 0) => 0.0,
+                (false, _) => separation,
+            };
+            (0..dimension)
+                .map(|_| {
+                    // Box-Muller: a standard normal from two uniforms.
+                    let (radius, angle): (f32, f32) = (
+                        rng.random_range(f32::EPSILON..1.0),
+                        rng.random_range(0.0..1.0),
+                    );
+                    centre + (-2.0 * radius.ln()).sqrt() * (std::f32::consts::TAU * angle).cos()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let mut layers = StdRng::seed_from_u64(7);
+    points
+        .into_iter()
+        .enumerate()
+        .map(|(position, vector)| {
+            (
+                position as NodeId + 1,
+                vector,
+                vector::select_layer(ml, &mut layers),
+            )
+        })
+        .collect()
+}
+
+/// Two clusters joined by a filament, built by both builders at a degree
+/// low enough to show at six hundred points what SIFT shows at a million.
+///
+/// When every layer-0 beam of an insert started from the one node a greedy
+/// walk of layer 1 reached, the beam stayed in that node's cluster, so the
+/// links along the filament were pruned and never formed again: layer 0
+/// split into the two clusters, and a node linked into the cluster opposite
+/// to where a search for it descends was never found, even by its own
+/// vector. Both builds now store the same graph, whose layer 0 is one
+/// component reachable from the entry point, so a beam as wide as the graph
+/// finds every node.
+#[tokio::test(flavor = "multi_thread")]
+async fn clusters_joined_by_a_filament_stay_linked_and_every_node_is_found() {
+    let dimension = 16;
+    let config = config(dimension, 4);
+    let source = two_clusters(600, dimension, config.ml);
+    let index = index::<Euclidean>(dimension);
+    let config = VectorIndexConfig {
+        index_name: index.name().to_string(),
+        ..config
+    };
+    let graph = built::<Euclidean>(&source, &config, ONE_THREAD);
+    let bulk = database("bulk-graph-filament").await;
+    store(&bulk, &index, &graph, &source, &config).await;
+    let serial = database("bulk-graph-filament-serial").await;
+    store_serially(&serial, &index, &source, &config).await;
+    assert!(
+        committed_rows(&bulk).await == committed_rows(&serial).await,
+        "a one-thread bulk build stores the serial build's rows"
+    );
+
+    let params = SearchParams::new(1)
+        .unwrap()
+        .with_ef(source.len())
+        .unwrap()
+        .with_simhash_mode(vector::SimHashMode::Off)
+        .with_pre_simhash_sampling_ratio(1.0)
+        .unwrap();
+    for (name, db) in [("bulk", &bulk), ("serial", &serial)] {
+        let rows = VectorRows::new(db.as_ref(), index.row_keyspace());
+        let entry = rows.metadata().await.unwrap().unwrap().entry_point.unwrap();
+        let mut reached = BTreeSet::from([entry]);
+        let mut frontier = vec![entry];
+        while let Some(node) = frontier.pop() {
+            for neighbor in rows.layer0_neighbors(node).await.unwrap() {
+                if reached.insert(neighbor) {
+                    frontier.push(neighbor);
+                }
+            }
+        }
+        assert_eq!(
+            reached.len(),
+            source.len(),
+            "{name}: layer 0 is one component"
+        );
+
+        let mut missed = Vec::new();
+        for (entity, vector, _) in &source {
+            let results = index.search(db.as_ref(), vector, &params).await.unwrap();
+            if results.first().map(|result| result.entity_id()) != Some(*entity) {
+                missed.push(*entity);
+            }
+        }
+        assert!(
+            missed.is_empty(),
+            "{name}: not found by their own vectors: {missed:?}"
+        );
+    }
+}
+
 /// Small degrees make later inserts prune every link of earlier nodes; the
 /// build links each of them again and stays symmetric.
 #[test]
@@ -736,6 +975,149 @@ fn neighbors_orphaned_together_are_linked_once() {
             link(2, 1, LinkChangeKind::Added),
         ]
     );
+}
+
+/// A graph at an upper degree of two with a node per point on a line, each
+/// at its position and reaching its layer, holding `links` (layer and both
+/// ends) both ways, with its entry point by rule.
+fn line_graph(points: &[(f32, u8)], links: &[(u8, u32, u32)]) -> BulkGraph<Euclidean> {
+    let source = points
+        .iter()
+        .enumerate()
+        .map(|(node, (position, layer))| (node as NodeId + 1, vec![*position], u16::from(*layer)))
+        .collect::<Vec<_>>();
+    let parameters = BulkParameters::try_from_config(&config(1, 2)).unwrap();
+    let upper_slots = points
+        .iter()
+        .scan(0_u32, |next, (_, layer)| {
+            let slot = *next;
+            *next += u32::from(*layer);
+            Some(slot)
+        })
+        .collect();
+    let upper_rows = points.iter().map(|(_, layer)| usize::from(*layer)).sum();
+    let mut graph = BulkGraph {
+        layer0: LinkRows::new(points.len(), parameters.degree(0)),
+        upper: LinkRows::new(upper_rows, parameters.degree(1)),
+        upper_slots,
+        entry: RwLock::new(Entry { node: 0, layer: 0 }),
+        unlinked: vec![false; points.len()],
+        linked: points.len(),
+        vectors: vectors::<Euclidean>(&source),
+        parameters,
+    };
+    for &(layer, left, right) in links {
+        graph.row(layer, left).push(right);
+        graph.row(layer, right).push(left);
+    }
+    *graph.entry.get_mut() = graph.entry_by_rule().unwrap();
+    graph
+}
+
+/// The links of two clusters on a line for [`line_graph`]: nodes `left` at 0,
+/// 1 and 2, and nodes `right` at 10, 11 and 12, each a layer-0 clique that
+/// links no node of the other. The first node of each cluster as given (at 0
+/// and 12) alone reaches layer 1, where the two link each other.
+fn two_cliques(left: [u32; 3], right: [u32; 3]) -> Vec<(u8, u32, u32)> {
+    [left, right]
+        .into_iter()
+        .flat_map(|[a, b, c]| [(0, a, b), (0, a, c), (0, b, c)])
+        .chain([(1, left[0], right[0])])
+        .collect()
+}
+
+/// A node left without links between two clusters is linked into both.
+///
+/// Layer 0 holds the clusters apart. A greedy walk of layer 1 from the entry
+/// point, at 0, moves to the node at 12, nearer the orphan at 6.4, and a
+/// layer-0 beam from there alone finds the right cluster only, so every link
+/// the orphan took stayed inside it. Seeded from both layer-1 nodes, the beam
+/// finds both clusters, and the orphan links the two nearest nodes of each.
+#[test]
+fn an_orphan_between_two_clusters_is_linked_into_both() {
+    // Node 3, at 6, links node 4, at 6.4, alone; unlinking node 3 leaves
+    // node 4 without links and no neighbor to relink it from.
+    let points = [
+        (0.0, 1),
+        (1.0, 0),
+        (2.0, 0),
+        (6.0, 0),
+        (6.4, 0),
+        (10.0, 0),
+        (11.0, 0),
+        (12.0, 1),
+    ];
+    let mut links = two_cliques([0, 1, 2], [7, 6, 5]);
+    links.push((0, 3, 4));
+    let mut graph = line_graph(&points, &links);
+    assert_graph_contract(&graph);
+
+    let mut changes = Vec::new();
+    graph.unlink(3, &mut changes).unwrap();
+    assert_graph_contract(&graph);
+    assert_eq!(graph.row(0, 4).iter().collect::<Vec<_>>(), [1, 2, 5, 6]);
+}
+
+/// A node on layer 0 alone starts layer 0 from what a beam of layer 1 as wide
+/// as the upper degree finds from the entry point, not from where a greedy
+/// walk of layer 1 ends nor from a beam started there.
+///
+/// Seen from node 5, at 0, the entry point E at 10 links A at 5 and B at
+/// -5.2; A links A2 at 5.5, and B links C at -1. A greedy walk moves to A
+/// and stops: A2 is further. A beam of two from A keeps A and A2 and stops,
+/// as E is further than both. From E, the beam keeps A and B, ahead of A2,
+/// and B leads it to C.
+#[test]
+fn a_layer_0_insert_starts_from_a_layer_1_beam_from_the_entry() {
+    let points = [
+        (10.0, 1),
+        (5.0, 1),
+        (5.5, 1),
+        (-5.2, 1),
+        (-1.0, 1),
+        (0.0, 0),
+    ];
+    let graph = line_graph(&points, &[(1, 0, 1), (1, 0, 3), (1, 1, 2), (1, 3, 4)]);
+    let entry = *graph.entry.read();
+    assert_eq!((entry.node, entry.layer), (0, 1));
+    let mut seeds = Vec::new();
+    graph
+        .descend(
+            &graph.vectors.item(5),
+            5,
+            0,
+            entry,
+            &mut seeds,
+            &mut Scratch::default(),
+        )
+        .unwrap();
+    assert_eq!(seeds, [4, 1], "C and A, nearest first");
+}
+
+/// An insert above layer 0 starts each lower layer's beam from the nearest
+/// nodes the beam above found, not from the nearest alone.
+///
+/// Node 3, at 6.4 on layer 1, finds both layer-1 nodes, nearest the one at
+/// 12. A layer-0 beam from that node alone finds only the right cluster;
+/// from both, it finds both clusters and links the two nearest nodes of each.
+#[test]
+fn an_upper_insert_seeds_layer_0_from_every_node_layer_1_found() {
+    let points = [
+        (0.0, 1),
+        (1.0, 0),
+        (2.0, 0),
+        (6.4, 1),
+        (10.0, 0),
+        (11.0, 0),
+        (12.0, 1),
+    ];
+    let graph = line_graph(&points, &two_cliques([0, 1, 2], [6, 5, 4]));
+    let entry = *graph.entry.read();
+    assert_eq!((entry.node, entry.layer), (0, 1));
+    graph.connect(3, 1, entry, &mut Scratch::default()).unwrap();
+    assert_graph_contract(&graph);
+    assert_eq!(graph.row(1, 3).iter().collect::<Vec<_>>(), [0, 6]);
+    assert_eq!(graph.row(0, 3).iter().collect::<Vec<_>>(), [1, 2, 4, 5]);
 }
 
 /// Unlinking a tenth of a graph leaves the rest as densely linked as it was:

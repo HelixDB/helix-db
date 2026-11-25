@@ -1034,7 +1034,7 @@ async fn run_graph_delete_contracts(db: &Db) {
         .search_layer_beam(
             &measured,
             &query,
-            entry,
+            &[entry],
             0,
             4,
             999,
@@ -1061,7 +1061,7 @@ async fn run_graph_delete_contracts(db: &Db) {
         .search_layer_beam(
             &measured,
             &query,
-            entry,
+            &[entry],
             1,
             4,
             999,
@@ -1110,7 +1110,7 @@ async fn run_graph_delete_contracts(db: &Db) {
         .search_layer_beam(
             &measured,
             &query,
-            999,
+            &[999],
             0,
             4,
             1,

@@ -7894,6 +7894,12 @@ Vector indexes are HNSW graphs with fixed settings: `m` 16 (32 on the bottom lay
 `ef_construction` 200, and a search `ef` of `max(k, 100)`. Queries cannot change them.
 Results are approximate, so a whole-index search can miss a true nearest neighbor.
 
+Each insert searches the bottom layer from the nearest nodes it finds one layer up, so
+vectors where two clusters meet stay linked to both. Indexes built by earlier releases
+could leave the bottom layer split between well-separated clusters, so that a small share
+of rows (about 0.5% of SIFT 1M) was not found even by its own vector. Drop and create such
+an index again to rebuild it with the better-connected graph.
+
 ## Prefilter with a traversal
 
 To rank only the nodes or edges a traversal reaches, such as documents a user may

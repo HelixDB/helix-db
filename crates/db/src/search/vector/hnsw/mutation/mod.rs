@@ -253,6 +253,22 @@ impl MutationDegreeLimits {
         })
     }
 
+    /// Returns how many nodes an insert's beam on one layer starts from: the
+    /// nearest this many (the upper degree) that the search of the layer above
+    /// found. A node on layer 0 alone searches layer 1 with a beam this wide
+    /// instead of the greedy walk that serves the layers above it.
+    ///
+    /// Starting layer 0 from one node confines the beam to that node's
+    /// layer-0 component. Pruning can leave none of the links between two
+    /// clusters of nodes, and a node linked into the cluster its descent
+    /// happened to reach is then out of reach of every search that descends
+    /// into the other one, its own vector included. Seeds spread over the
+    /// nearest layer-1 nodes reach both clusters where they meet, so inserts
+    /// there keep linking them.
+    pub(in crate::search::vector) fn seed_width(self) -> usize {
+        self.upper.get()
+    }
+
     /// Validates persisted degree settings and retains the conventional doubled floor.
     fn try_from_metadata(metadata: &VectorIndexMetadata) -> Result<Self, HelixDbError> {
         Self::try_from_config(&metadata.config)
@@ -917,20 +933,37 @@ impl<D: Distance> VectorIndex<D> {
         let degree_limits = MutationDegreeLimits::try_from_metadata(metadata)?;
         let maximum_upper_connections = degree_limits.upper.get();
         let maximum_layer0_connections = degree_limits.layer0.get();
+        let seed_width = degree_limits.seed_width();
         let mut current_entry_point = entry_point;
-        if node_layer < old_max_layer {
-            for layer in (node_layer + 1..=old_max_layer).rev() {
-                current_entry_point = self
-                    .search_layer_greedy_for_mutation(
-                        txn,
-                        item,
-                        current_entry_point,
-                        layer,
-                        node_id,
-                        mutation_cache,
-                        &mut scratch,
-                    )
-                    .await?;
+        for layer in (node_layer.max(1) + 1..=old_max_layer).rev() {
+            current_entry_point = self
+                .search_layer_greedy_for_mutation(
+                    txn,
+                    item,
+                    current_entry_point,
+                    layer,
+                    node_id,
+                    mutation_cache,
+                    &mut scratch,
+                )
+                .await?;
+        }
+        let mut seeds = vec![current_entry_point];
+        if node_layer == 0 && old_max_layer > 0 {
+            let found = self
+                .search_layer_beam(
+                    txn,
+                    item,
+                    &seeds,
+                    1,
+                    seed_width,
+                    node_id,
+                    mutation_cache,
+                    &mut scratch,
+                )
+                .await?;
+            if !found.is_empty() {
+                seeds = found.iter().map(|candidate| candidate.node_id).collect();
             }
         }
 
@@ -941,7 +974,7 @@ impl<D: Distance> VectorIndex<D> {
                 .search_layer_beam(
                     txn,
                     item,
-                    current_entry_point,
+                    &seeds,
                     layer,
                     ef,
                     node_id,
@@ -949,6 +982,15 @@ impl<D: Distance> VectorIndex<D> {
                     &mut scratch,
                 )
                 .await?;
+            if !candidates.is_empty() {
+                seeds.clear();
+                seeds.extend(
+                    candidates
+                        .iter()
+                        .take(seed_width)
+                        .map(|candidate| candidate.node_id),
+                );
+            }
             let maximum_neighbors = if layer == 0 {
                 maximum_layer0_connections
             } else {
@@ -981,10 +1023,6 @@ impl<D: Distance> VectorIndex<D> {
                 )
                 .await?;
             }
-
-            if let Some(candidate) = candidates.first() {
-                current_entry_point = candidate.node_id;
-            }
         }
 
         if node_layer > old_max_layer {
@@ -1002,8 +1040,10 @@ impl<D: Distance> VectorIndex<D> {
     ///
     /// Unlike read-only greedy traversal, this beam consults the operation-local
     /// neighbor/item cache so staged rows are authoritative and speculative
-    /// layer-0 reads remain bounded. Missing entry points are resolved through
-    /// the write-side recovery contract before expansion begins.
+    /// layer-0 reads remain bounded. The beam starts from `entry_points` in
+    /// order: a missing first entry point is resolved through the write-side
+    /// recovery contract before expansion begins, and a later one without an
+    /// item on `layer` is skipped.
     ///
     /// `inserting_node_id` is never a candidate. Its item is staged before the
     /// search, and a row may still link it: a link released versions left
@@ -1015,13 +1055,18 @@ impl<D: Distance> VectorIndex<D> {
         &self,
         txn: &MeasuredVectorTransaction<'_>,
         query: &Item<'_, D>,
-        entry_point: NodeId,
+        entry_points: &[NodeId],
         layer: u16,
         ef: usize,
         inserting_node_id: NodeId,
         mutation_cache: &mut MutationOpCache<D>,
         scratch: &mut MutationScratch<D>,
     ) -> Result<Vec<Candidate>, HelixDbError> {
+        let Some((&entry_point, later_entry_points)) = entry_points.split_first() else {
+            return Err(HelixDbError::InvariantViolation(
+                "an insert beam starts from at least one node".to_string(),
+            ));
+        };
         let MutationScratch {
             visited,
             beam: candidates,
@@ -1064,6 +1109,26 @@ impl<D: Distance> VectorIndex<D> {
         )?));
         w.push(Candidate::try_new(resolved_entry_point, entry_distance)?);
         visited.insert(resolved_entry_point);
+        unscored.clear();
+        unscored.extend(
+            later_entry_points
+                .iter()
+                .copied()
+                .filter(|entry_point| visited.insert(*entry_point)),
+        );
+        self.get_items_for_layer_cached_batch(txn, layer, unscored, mutation_cache, neighbor_items)
+            .await?;
+        for (&entry_point, entry_item) in unscored.iter().zip(&neighbor_items.found) {
+            let Some(entry_item) = entry_item else {
+                continue;
+            };
+            let entry = Candidate::try_new(entry_point, D::distance(query, entry_item))?;
+            candidates.push(Reverse(entry));
+            w.push(entry);
+            if w.len() > ef {
+                w.pop();
+            }
+        }
 
         while let Some(Reverse(current)) = candidates.pop() {
             let current_distance = current.score();
@@ -4703,7 +4768,9 @@ use presearch::{
     SharedGraphAccess, SharedRow,
 };
 #[cfg(test)]
-pub(crate) use presearch::{AWAIT_WORKERS, MEMOIZED_LOOKUPS, PRESEARCH_START_FAILS};
+pub(crate) use presearch::{
+    AWAIT_WORKERS, MEMOIZED_LOOKUPS, PRESEARCH_START_FAILS, REPLAYED_LOOKUPS,
+};
 
 #[cfg(test)]
 #[path = "../../../../../tests/unit/vector/mutation.rs"]
