@@ -879,13 +879,31 @@ async fn publication_commits_despite_concurrent_updates_to_selected_entities() {
     );
     install_vector(&db, None).await;
     let first = add_doc(&db, vec![0.0, 0.0], "a").await.unwrap();
+    // Left queued by a one-entity publication, so its acknowledgement does
+    // not drain the queue: a draining one deletes the key, which conflicts
+    // with any enqueue committed meanwhile (see `drain_delete_tests`).
+    let other = add_doc(&db, vec![20.0, 20.0], "c").await.unwrap();
     let target = target(&db, QueueFamily::Vector).await;
+    let one_entity = publisher_with_limits(
+        &db,
+        SearchIndexBatchLimits::try_new(
+            NonZeroUsize::MIN,
+            NonZeroU64::new(1 << 30).unwrap(),
+            NonZeroU64::new(1 << 20).unwrap(),
+            NonZeroU64::new(8 << 20).unwrap(),
+            NonZeroU64::new(8 << 20).unwrap(),
+        )
+        .unwrap(),
+        DbConfig::new()
+            .search_index_backfill()
+            .active_text_mutation(),
+    );
     let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-    *publisher(&db).hooks().before_commit.lock() = Some((reached_tx, release_rx));
+    *one_entity.hooks().before_commit.lock() = Some((reached_tx, release_rx));
     let publishing = {
-        let db = Arc::clone(&db);
-        tokio::spawn(async move { publisher(&db).publish_once(target).await })
+        let one_entity = Arc::clone(&one_entity);
+        tokio::spawn(async move { one_entity.publish_once(target).await })
     };
     reached_rx.await.unwrap();
     // While the publication transaction holds staged HNSW rows and the ACK of
@@ -911,10 +929,10 @@ async fn publication_commits_despite_concurrent_updates_to_selected_entities() {
             .iter()
             .map(|operation| operation.entity().id.get())
             .collect::<Vec<_>>(),
-        vec![first, second],
+        vec![other, first, second],
         "the ACK of the older operation left both newer operations queued"
     );
-    assert_eq!(drain(&db, target).await, 2);
+    assert_eq!(drain(&db, target).await, 3);
     assert_eq!(
         search(&db, vec![4.0, 4.0], 2, None).await,
         vec![first, second]

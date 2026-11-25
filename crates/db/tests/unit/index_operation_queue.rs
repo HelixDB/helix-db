@@ -1544,7 +1544,13 @@ async fn acknowledge_in_storage(db: &HelixDB, target: QueueTarget, id: codec::Qu
         .await
         .expect("transaction begins");
     db.index_queue_store()
-        .stage_acknowledge(&transaction, target, &stored, &[id])
+        .stage_acknowledge(
+            &transaction,
+            db.index_operation_backlog(),
+            target,
+            &stored,
+            &[id],
+        )
         .expect("acknowledgement stages");
     transaction.commit().await.expect("acknowledgement commits");
 }

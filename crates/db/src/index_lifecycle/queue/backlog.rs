@@ -238,6 +238,17 @@ struct Charge {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct Admission(u64);
 
+/// What an acknowledgement would leave of its target's charges
+/// ([`IndexOperationBacklog::remainder`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Remainder {
+    /// The acknowledgement names every charge of the target and none is
+    /// uncertain: the queue holds nothing else.
+    Drained,
+    /// Some charge of the target is not named, or is uncertain.
+    Outstanding,
+}
+
 /// Current retained work for one logical index.
 #[derive(Debug, Default)]
 struct IndexUsage {
@@ -715,6 +726,56 @@ impl IndexOperationBacklog {
             .collect::<Vec<_>>();
         targets.sort_unstable();
         targets
+    }
+
+    /// Returns what acknowledging exactly `ids`, which must be distinct,
+    /// would leave of `target`'s charges.
+    ///
+    /// [`Remainder::Drained`] only when `target` holds no uncertain charge
+    /// and `ids` name every charge it holds, whatever its state: reserved by
+    /// a producer whose commit has not returned, durable, or found at open.
+    /// An ID the ledger does not charge to `target` names nothing.
+    ///
+    /// # Contract
+    ///
+    /// Callers ask only once the acknowledging transaction has begun. Every
+    /// producer reserves before it commits, so an operation that committed
+    /// before that transaction began is charged here (it is one of `ids` or
+    /// makes the answer [`Remainder::Outstanding`]), and one reserved after
+    /// this call commits after the transaction began, which then aborts a
+    /// delete of the queue key (see
+    /// [`super::storage::stage_queue_delete`]).
+    pub(crate) fn remainder(&self, target: QueueTarget, ids: &[QueuedOperationId]) -> Remainder {
+        debug_assert_eq!(
+            ids.iter().collect::<HashSet<_>>().len(),
+            ids.len(),
+            "an acknowledgement names each operation once"
+        );
+        let state = self.state.lock();
+        if state.uncertain.contains_key(&target) {
+            return Remainder::Outstanding;
+        }
+        let Some(work) = state
+            .indexes
+            .get(&target.logical_index())
+            .and_then(|usage| usage.generations.get(&target.generation))
+        else {
+            return Remainder::Outstanding;
+        };
+        let named = ids
+            .iter()
+            .filter(|id| {
+                state
+                    .charges
+                    .get(id)
+                    .is_some_and(|charge| charge.target == target)
+            })
+            .count() as u64;
+        if named == work.operations {
+            Remainder::Drained
+        } else {
+            Remainder::Outstanding
+        }
     }
 
     /// Returns `target`'s latest [`Admission`], or `None` while it retains

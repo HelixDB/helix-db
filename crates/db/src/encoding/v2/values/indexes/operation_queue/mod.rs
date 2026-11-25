@@ -2,9 +2,32 @@
 //!
 //! One SlateDB key per `(scope, logical index, generation)` holds every
 //! committed-but-unpublished operation for that generation. Producers append
-//! with blind [`slatedb::DbTransaction::merge_disjoint_tokens`] operands and the
-//! publication worker removes exact operation IDs with acknowledgement
-//! operands. Neither side reads the row to stage its operand.
+//! with blind [`slatedb::DbTransaction::merge_disjoint_tokens`] operands and
+//! never read the key. The publication worker removes exact operation IDs
+//! with acknowledgement operands, blind too, except in the case below, where
+//! it writes a SlateDB tombstone of the key instead.
+//!
+//! # Tombstones of drained queues
+//!
+//! **Delete on drain.** An acknowledgement that names every operation it
+//! read, while the writer's ledger (asked after its transaction began)
+//! charges the generation nothing else and nothing uncertain, deletes the key.
+//! The key is marked read and the delete is left out of conflict checks, so an
+//! enqueue that commits after the acknowledgement's transaction began aborts
+//! that acknowledgement alone, and an enqueue committed after it lands above
+//! the tombstone. The tombstone holds exactly what the history resolved to,
+//! so the logical queue is unchanged; it only stops later reads from merging
+//! the shadowed history again.
+//!
+//! **Older binaries.** A tombstoned queue key is not a new stored state:
+//! compaction already writes one whenever a queue resolves to empty against
+//! its resolved base (see [`QueueMergeResult::Empty`]), and every reader
+//! treats an absent key as the empty queue: the backlog load and search
+//! overlays read nothing, uncertain-commit reconciliation reads an absent
+//! acknowledged ID as committed, and later operands resolve above the
+//! tombstone with no base. A binary without these tombstones therefore reads
+//! and writes such a store correctly, so rolling back is safe; it only merges
+//! drained history again until compaction resolves it.
 //!
 //! # Persisted format
 //!

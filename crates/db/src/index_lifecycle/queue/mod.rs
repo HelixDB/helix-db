@@ -102,6 +102,12 @@ pub struct IndexOperationQueueStats {
     pub blocked_entities: u64,
     /// Operations of retired generations acknowledged without publication.
     pub discarded_operations: u64,
+    /// Acknowledgements, publishing or discarding, that drained their queue
+    /// and so deleted its key instead of merging a removal (see "Delete on
+    /// drain" on the queue storage), counted once the delete is known to have
+    /// committed: when its commit returns, or when reconciliation finds that
+    /// one whose outcome was uncertain committed.
+    pub drained_queue_deletes: u64,
     /// Storage reads of a generation queue by publication, including reads
     /// that find it empty, retired-generation discards, and uncertain-commit
     /// reconciliation. An attempt that continues from the queue its target's
@@ -273,6 +279,8 @@ impl QueueTarget {
 mod admission_memory_tests;
 #[cfg(test)]
 mod codec_storage_tests;
+#[cfg(test)]
+mod drain_delete_tests;
 #[cfg(test)]
 mod drain_tests;
 #[cfg(test)]

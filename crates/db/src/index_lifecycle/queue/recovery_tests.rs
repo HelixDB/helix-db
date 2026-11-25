@@ -52,7 +52,7 @@ use crate::HelixDB;
 
 const PATH: &str = "queue-recovery";
 
-fn ledger() -> Arc<IndexOperationBacklog> {
+pub(super) fn ledger() -> Arc<IndexOperationBacklog> {
     IndexOperationBacklog::new(
         BacklogLimits {
             max_retained_bytes: u64::MAX,
@@ -66,7 +66,7 @@ fn tenant(id: u128) -> DataScope {
     DataScope::Tenant(TenantId::from_u128(id))
 }
 
-fn queue_target(scope: DataScope, index: u64, generation: u64) -> QueueTarget {
+pub(super) fn queue_target(scope: DataScope, index: u64, generation: u64) -> QueueTarget {
     QueueTarget::new(
         scope,
         IndexId::new(index).unwrap(),
@@ -81,7 +81,7 @@ fn node(id: u64) -> IndexEntity {
     }
 }
 
-fn text(entity: u64, body: &str) -> QueuedOperation {
+pub(super) fn text(entity: u64, body: &str) -> QueuedOperation {
     QueuedOperation::new(
         QueuedOperationId::generate(),
         node(entity),
@@ -94,7 +94,7 @@ fn text(entity: u64, body: &str) -> QueuedOperation {
     )
 }
 
-fn vector(entity: u64, components: &[f32]) -> QueuedOperation {
+pub(super) fn vector(entity: u64, components: &[f32]) -> QueuedOperation {
     QueuedOperation::new(
         QueuedOperationId::generate(),
         node(entity),
@@ -204,7 +204,7 @@ async fn assert_loads_like_the_reference(
     (backlog, summary)
 }
 
-async fn raw_db(store: Arc<dyn ObjectStore>) -> Db {
+pub(super) async fn raw_db(store: Arc<dyn ObjectStore>) -> Db {
     Db::builder(PATH, store)
         .with_settings(manual_compaction_settings())
         .with_merge_operator(Arc::new(HelixMergeOperator::new()))
@@ -214,7 +214,7 @@ async fn raw_db(store: Arc<dyn ObjectStore>) -> Db {
         .unwrap()
 }
 
-async fn flush(db: &Db) {
+pub(super) async fn flush(db: &Db) {
     db.flush_with_options(slatedb::config::FlushOptions {
         flush_type: slatedb::config::FlushType::MemTable,
     })
@@ -222,7 +222,7 @@ async fn flush(db: &Db) {
     .unwrap();
 }
 
-async fn enqueue(
+pub(super) async fn enqueue(
     db: &Db,
     queues: &QueueStore,
     target: QueueTarget,
@@ -256,7 +256,7 @@ async fn acknowledge(db: &Db, queues: &QueueStore, target: QueueTarget, count: u
         .await
         .unwrap();
     queues
-        .stage_acknowledge(&transaction, target, &stored, &ids)
+        .stage_acknowledge(&transaction, &ledger(), target, &stored, &ids)
         .unwrap();
     transaction.commit().await.unwrap();
 }

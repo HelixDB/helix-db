@@ -4664,6 +4664,7 @@ impl HelixDB {
             blocked_attempts: load(&metrics.blocked_attempts),
             blocked_entities: publisher.blocked_entity_count() as u64,
             discarded_operations: load(&metrics.discarded_operations),
+            drained_queue_deletes: load(&metrics.drained_queue_deletes),
             queue_reads: load(&metrics.queue_reads),
             queue_read_bytes: load(&metrics.queue_read_bytes),
             queue_read_micros: load(&metrics.queue_read_micros),
