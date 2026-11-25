@@ -160,7 +160,11 @@ async fn a_fenced_writer_is_unready_but_live_and_fails_every_request_with_the_fe
         // while the fence lands.
         let (status, body) = get(&router, "/readyz").await;
         assert_eq!(status == StatusCode::OK, body["ready"] == true, "{body}");
-        assert_eq!(status == StatusCode::OK, body["storage"] == "open", "{body}");
+        assert_eq!(
+            status == StatusCode::OK,
+            body["storage"] == "open",
+            "{body}"
+        );
         if status != StatusCode::OK {
             break;
         }

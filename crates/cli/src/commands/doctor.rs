@@ -549,9 +549,7 @@ async fn server_checks(url: &str, instance: Option<&str>, checks: &mut Vec<Check
                 },
             },
         ),
-        Some(ReportedStorage::Open | ReportedStorage::Unknown) | None
-            if !status.is_success() =>
-        {
+        Some(ReportedStorage::Open | ReportedStorage::Unknown) | None if !status.is_success() => {
             let detail = match status {
                 reqwest::StatusCode::NOT_FOUND => {
                     "Nothing there serves GET /healthz: the URL may not point at a Helix server."

@@ -1828,9 +1828,11 @@ impl HelixDB {
     async fn lifecycle_test_writer_epoch(&self) -> Result<crate::index_lifecycle::WriterEpoch> {
         let worker = self.inner.index_worker.lock().await;
         let Some(worker) = worker.as_ref() else {
-            return Err(self.background_task_missing(HelixDbError::InvariantViolation(
-                "explicit lifecycle controller has no worker epoch".to_string(),
-            )));
+            return Err(
+                self.background_task_missing(HelixDbError::InvariantViolation(
+                    "explicit lifecycle controller has no worker epoch".to_string(),
+                )),
+            );
         };
         Ok(worker.writer_epoch())
     }

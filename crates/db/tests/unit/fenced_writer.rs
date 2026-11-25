@@ -279,10 +279,8 @@ async fn a_close_waits_for_the_task_the_fenced_writer_is_still_stopping() {
     let old = HelixDB::open_with_object_store("fenced-close-joins", Arc::clone(&object_store))
         .await
         .expect("first writer opens");
-    let pause = index_lifecycle::outbox::step_pause::StepPause::arm(
-        old.inner_db().as_ref(),
-        |_| true,
-    );
+    let pause =
+        index_lifecycle::outbox::step_pause::StepPause::arm(old.inner_db().as_ref(), |_| true);
     old.query(QueryRequest::write(
         write_batch()
             .var_as(
@@ -538,4 +536,3 @@ async fn calls_that_need_a_stopped_task_report_why_storage_closed() {
         );
     }
 }
-
