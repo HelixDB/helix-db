@@ -3183,6 +3183,70 @@ async fn forgetting_a_preparing_build_frees_its_turn_and_memory() {
     db.close().await.expect("vector test database closes");
 }
 
+/// Releasing the builds, as a stopped worker does, forgets every one: each
+/// build in passes 1 and 2 is cancelled and frees its turn and memory, and
+/// no build is reported or parked any more.
+#[tokio::test(flavor = "multi_thread")]
+async fn releasing_the_builds_forgets_every_one() {
+    let db = test_db("vector-bulk-release").await;
+    let definition = definition(None);
+    put_source(&db, SCOPE, 0, &properties(vector_of(0), None)).await;
+    let (build_id, _, _) = create_build(&db, SCOPE, &definition, 0).await;
+    let builds = bulk_driver(2, BUDGET, 0).bulk;
+    let turn = Turn {
+        _permit: Arc::clone(&builds.preparing)
+            .try_acquire_owned()
+            .expect("no build is preparing"),
+        _woken: WakeAllOnDrop(Arc::clone(&builds.parking)),
+    };
+    let Admission::Reserved(reservation) = MemoryReservation::admit(&builds.memory, 1 << 20) else {
+        panic!("the budget holds the reservation");
+    };
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let (sender, done) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let _held = (turn, reservation, sender);
+        std::future::pending::<()>().await
+    });
+    let progress = Arc::<PreparationProgress>::default();
+    let attempt = counted(&db, build_id, 1).await;
+    builds.builds.lock().insert(
+        build_id,
+        Arc::new(tokio::sync::Mutex::new(BuildState::Preparing(
+            Preparation {
+                task,
+                done,
+                cancelled: Arc::clone(&cancelled),
+                attempt,
+                progress: Arc::clone(&progress),
+            },
+        ))),
+    );
+    builds
+        .reports
+        .publish(build_id, Some(Activity::Preparing(progress)));
+    // A second build that waits for the turn holds nothing but its slot.
+    let waiting = IndexOperationId::from_bytes([0x77; 16]).unwrap();
+    builds.builds.lock().insert(waiting, Arc::default());
+    builds.parking.park(waiting);
+    assert!(builds.reports.phase(build_id).is_some());
+
+    builds.release();
+    assert!(builds.builds.lock().is_empty());
+    assert!(cancelled.load(Ordering::Relaxed));
+    assert!(builds.reports.phase(build_id).is_none());
+    assert_eq!(builds.parking.until(waiting), None);
+    tokio::time::timeout(WOKEN_WITHIN, async {
+        while builds.memory.reserved() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the aborted task drops its reservation");
+    assert_eq!(builds.preparing.available_permits(), 1);
+    db.close().await.expect("vector test database closes");
+}
+
 /// An abort during pass 3 takes the operation off the bulk stage at once,
 /// drops the graph with its reservation and removes every row the build
 /// stored.

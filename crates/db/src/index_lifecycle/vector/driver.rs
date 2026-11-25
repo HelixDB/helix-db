@@ -920,6 +920,11 @@ impl VectorBuildCache {
         drop(self.retained.lock().await.take(owner));
     }
 
+    /// Forgets every retained session, as if each owner forgot its own.
+    async fn forget_all(&self) {
+        drop(std::mem::take(&mut *self.retained.lock().await));
+    }
+
     /// Replaces `owner`'s retained session with `offered` through `admit`,
     /// then rebalances the budget.
     ///
@@ -1144,6 +1149,32 @@ impl VectorIndexDriver {
     /// Returns the planning budget builds share with queue publication.
     pub(crate) fn build_cache(&self) -> Arc<VectorBuildCache> {
         Arc::clone(&self.build_cache)
+    }
+
+    /// Drops what builds and publication hold in memory between steps:
+    /// every bulk build, cancelling its passes 1 and 2 and releasing its
+    /// graph and memory reservation, and every retained planning session.
+    ///
+    /// For a handle whose lifecycle worker stopped for good, on close or
+    /// once storage closed under it. Nothing stored changes: a later step,
+    /// in this process or the next writer's, starts from the stored rows as
+    /// it would after a crash.
+    pub(crate) async fn release_held_work(&self) {
+        self.bulk.release();
+        self.build_cache.forget_all().await;
+    }
+
+    /// Bytes the bulk builds of this driver reserve together.
+    #[cfg(test)]
+    pub(crate) fn bulk_reserved_bytes(&self) -> u64 {
+        self.bulk.reserved_bytes()
+    }
+
+    /// Holds the construction thread of every later bulk build's pass 2
+    /// until the build is cancelled.
+    #[cfg(test)]
+    pub(crate) fn hold_bulk_linking_until_cancelled(&self) {
+        self.bulk.hold_linking_until_cancelled();
     }
 }
 

@@ -1182,6 +1182,9 @@ struct HelixDBInner {
     config: HelixConfig,
     runtime_state: RwLock<HelixRuntimeState>,
     index_capabilities: index_lifecycle::worker::IndexFamilyCapabilities,
+    /// The vector driver of `index_capabilities`, whose builds hold memory
+    /// between steps that a stopped worker must release.
+    vector_driver: Arc<index_lifecycle::vector::VectorIndexDriver>,
     index_worker_wake: Option<index_lifecycle::worker::IndexWorkerWakeHandle>,
     index_worker: Mutex<Option<index_lifecycle::worker::IndexWorkerSupervisor>>,
     migration_worker: Mutex<Option<migrations::background::MigrationWorkerSupervisor>>,
@@ -2164,8 +2167,9 @@ impl HelixDB {
         // Queue publication plans within the budget builds retain sessions in.
         let vector_planning_cache = vector_driver.build_cache();
         let vector_build_reports = vector_driver.build_reports();
-        let vector_driver: Arc<dyn index_lifecycle::outbox::IndexOperationDriver> =
-            Arc::new(vector_driver);
+        let vector_driver = Arc::new(vector_driver);
+        let vector_operation_driver: Arc<dyn index_lifecycle::outbox::IndexOperationDriver> =
+            vector_driver.clone();
         let secondary_scheduling = index_scheduling.resolve(match secondary_tuning.worker_mode() {
             config::SecondaryIndexLifecycleWorkerMode::Enabled => {
                 index_lifecycle::worker::IndexDriverScheduling::Automatic
@@ -2200,7 +2204,7 @@ impl HelixDB {
             secondary_scheduling,
         );
         let vector_capability = index_lifecycle::worker::IndexFamilyCapability::new(
-            vector_driver,
+            vector_operation_driver,
             config.db().search_index_backfill().batch(),
             automatic_scheduling,
         );
@@ -2323,6 +2327,7 @@ impl HelixDB {
                     indexes,
                 )),
                 index_capabilities,
+                vector_driver,
                 index_worker_wake,
                 index_worker: Mutex::new(index_worker),
                 migration_worker: Mutex::new(None),
@@ -2386,12 +2391,33 @@ impl HelixDB {
     /// # });
     /// ```
     pub fn storage_state(&self) -> StorageState {
+        StorageState::of(self.storage_close_reason())
+    }
+
+    /// Why SlateDB closed this handle's storage: `None` while it serves.
+    fn storage_close_reason(&self) -> Option<slatedb::CloseReason> {
         let status = match self.storage() {
             HelixStorage::Reader(reader) => reader.subscribe(),
             HelixStorage::Writer(writer) => writer.db().subscribe(),
         };
-        let close_reason = status.borrow().close_reason;
-        StorageState::of(close_reason)
+        status.borrow().close_reason
+    }
+
+    /// The error of a call that needs a background task this handle does not
+    /// run: `missing` while storage serves, [`HelixDbError::DatabaseClosed`]
+    /// once [`Self::close`] closed it, and, once storage closed under the
+    /// handle, SlateDB's closed error with its reason, the error every
+    /// request then gets, so a fenced writer's calls all report the fence.
+    fn background_task_missing(&self, missing: HelixDbError) -> HelixDbError {
+        match self.storage_close_reason() {
+            None => missing,
+            Some(slatedb::CloseReason::Clean) => HelixDbError::DatabaseClosed,
+            // Fenced, failed, or a reason a later SlateDB adds.
+            Some(reason) => HelixDbError::Storage(slatedb::Error::closed(
+                "storage closed under this handle, which stopped its background work".to_string(),
+                reason,
+            )),
+        }
     }
 
     /// Once SlateDB closes this handle's storage under it (a newer writer
@@ -2438,7 +2464,15 @@ impl HelixDB {
     }
 
     /// Stops and joins every background task the handle runs over its
-    /// storage. A task stopped already, or never started, is skipped.
+    /// storage, and drops what its index builds hold in memory between steps.
+    /// A task stopped already, or never started, is skipped.
+    ///
+    /// Each task is stopped while its slot's lock is held: the guard of an
+    /// `if let` scrutinee lives through its body. So a stop that runs while
+    /// another joins a task waits for that join on the slot's lock rather
+    /// than finding the slot empty, and a [`Self::close`] racing the storage
+    /// watcher still joins every task before it closes storage. Taking a
+    /// task out of its slot before stopping it would break that.
     async fn stop_background_tasks(&self) {
         if let Some(worker) = self.inner.migration_worker.lock().await.take() {
             worker.stop().await;
@@ -2477,6 +2511,8 @@ impl HelixDB {
         {
             task.stop().await;
         }
+        // Only the joined worker stepped the builds.
+        self.inner.vector_driver.release_held_work().await;
     }
 
     async fn start_background_migration_worker(
@@ -2545,11 +2581,11 @@ impl HelixDB {
             .as_ref()
             .map(index_lifecycle::dropped::retire::RetireSupervisor::retirer)
             .ok_or_else(|| {
-                HelixDbError::Config(
+                self.background_task_missing(HelixDbError::Config(
                     "this writer runs no compaction worker, so it retires no dropped index entry \
                      and reclaims no dropped index storage"
                         .to_string(),
-                )
+                ))
             })
     }
 
@@ -2993,7 +3029,7 @@ impl HelixDB {
             .lock_owned()
             .await;
         if !matches!(*self.inner.close_state.lock().await, CloseState::Open) {
-            return Err(HelixDbError::DatabaseClosed);
+            return Err(self.background_task_missing(HelixDbError::DatabaseClosed));
         }
         let writer_epoch = self
             .inner
@@ -3002,7 +3038,7 @@ impl HelixDB {
             .await
             .as_ref()
             .map(index_lifecycle::worker::IndexWorkerSupervisor::writer_epoch)
-            .ok_or(HelixDbError::DatabaseClosed)?;
+            .ok_or_else(|| self.background_task_missing(HelixDbError::DatabaseClosed))?;
         // A step can hold the scope's exclusive lifecycle permit through its
         // commit. If the caller is cancelled mid-commit, SlateDB still applies
         // the batch; releasing the permit first would let a planner cache the
@@ -4839,7 +4875,7 @@ impl HelixDB {
             .await
             .as_ref()
             .map(index_lifecycle::worker::IndexWorkerSupervisor::writer_epoch)
-            .ok_or(HelixDbError::DatabaseClosed)
+            .ok_or_else(|| self.background_task_missing(HelixDbError::DatabaseClosed))
     }
 
     #[cfg(test)]

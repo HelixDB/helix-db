@@ -1272,6 +1272,16 @@ async fn publication_sessions_are_reused_only_at_their_exact_commit() {
     cache.forget_publication(target).await;
     assert!(cache.retained_publication(target).is_none());
 
+    // A stopped worker forgets every session, pending and drained alike.
+    let other_committed = publication_checkpoint(other);
+    retain_marked_publication(&cache, &gates, committed, PublicationBacklog::Pending).await;
+    retain_marked_publication(&cache, &gates, other_committed, PublicationBacklog::Drained).await;
+    assert_eq!(cache.retained_publication(target), Some(committed));
+    assert_eq!(cache.retained_publication(other), Some(other_committed));
+    cache.forget_all().await;
+    assert!(cache.retained_publication(target).is_none());
+    assert!(cache.retained_publication(other).is_none());
+
     // A session of another metric is never reused.
     retain_marked_publication(&cache, &gates, committed, PublicationBacklog::Pending).await;
     assert!(
