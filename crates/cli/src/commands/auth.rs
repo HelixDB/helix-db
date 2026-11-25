@@ -1744,15 +1744,28 @@ Zeta Labs    ws-1
     }
 
     /// Required single sign-on binds the same fixed port a second time.
-    #[tokio::test]
-    async fn the_callback_port_is_free_again_after_the_callback() {
-        let listener = bind_callback(0).await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let callback = tokio::spawn(async move { receive_callback(listener, "xyz", || {}).await });
-        send_raw(address, &callback_request("/callback?code=abc&state=xyz")).await;
-        callback.await.unwrap().unwrap();
+    ///
+    /// Alone in its process, as the CLI is: a child another test starts while
+    /// the listener is open keeps the socket listening until its `exec`, after
+    /// the callback has closed it.
+    #[test]
+    fn the_callback_port_is_free_again_after_the_callback() {
+        crate::test_isolation::in_own_process(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime builds")
+                .block_on(async {
+                    let listener = bind_callback(0).await.unwrap();
+                    let address = listener.local_addr().unwrap();
+                    let callback =
+                        tokio::spawn(async move { receive_callback(listener, "xyz", || {}).await });
+                    send_raw(address, &callback_request("/callback?code=abc&state=xyz")).await;
+                    assert_eq!(callback.await.unwrap().unwrap(), "abc");
 
-        bind_callback(address.port()).await.unwrap();
+                    bind_callback(address.port()).await.unwrap();
+                });
+        });
     }
 
     #[tokio::test]

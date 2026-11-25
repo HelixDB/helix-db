@@ -766,7 +766,13 @@ async fn crash_at_every_scan_failpoint() {
     // 300 rows of the label at 10 a step: the scan outlasts every crash.
     let limits = batch_limits(10, 1 << 20, 1 << 20, 1 << 30);
     let mut claim_sequence = 1;
-    let crashed_epoch = WriterEpoch::from_bytes([0x5C; 16]).expect("writer epoch is non-nil");
+    // Each open is a new process, with a writer epoch of its own as a real
+    // writer has. Claims and progressed steps commit without waiting for
+    // their WAL upload, so a crash can keep a step's claim and lose the
+    // step. The next process takes that claim over; the process that left
+    // it would not, since to it the claim says the step is still running.
+    let mut process = 1;
+    let mut writer_epoch = WriterEpoch::from_bytes([process; 16]).expect("writer epoch is non-nil");
     for failpoint in [
         IndexOutboxFailpoint::ClaimAfter,
         IndexOutboxFailpoint::BatchReadBefore,
@@ -789,7 +795,7 @@ async fn crash_at_every_scan_failpoint() {
         // process-wide; this test runs in a process of its own.
         failpoints::inject_once(failpoint).expect("failpoint installs");
         let OperationPointerObservation::Eligible(eligible) =
-            observe_operation_pointer(&db, operation_id, crashed_epoch, NOW_MILLIS + 1)
+            observe_operation_pointer(&db, operation_id, writer_epoch, NOW_MILLIS + 1)
                 .await
                 .expect("operation pointer is readable")
         else {
@@ -798,7 +804,7 @@ async fn crash_at_every_scan_failpoint() {
         let claimed = claim_operation(
             &db,
             &eligible,
-            crashed_epoch,
+            writer_epoch,
             ClaimSequence::new(claim_sequence).expect("claim sequence is non-zero"),
             NOW_MILLIS + 1,
             ClaimPermission::Normal,
@@ -806,23 +812,27 @@ async fn crash_at_every_scan_failpoint() {
         .await;
         claim_sequence += 1;
         // A failpoint in the claim leaves nothing to execute.
-        let Ok(Some(claimed)) = claimed else {
-            assert!(
-                failpoints::was_triggered(),
-                "{failpoint:?} fired in the claim"
-            );
-            drop(db);
-            db = open().await.expect("database reopens after the crash");
-            drive_one_with_limits(&db, &driver, operation_id, &mut claim_sequence, limits).await;
-            continue;
-        };
-        let _ = execute_claimed_step(&db, &claimed, &driver, limits, NOW_MILLIS + 1).await;
+        if let Ok(Some(claimed)) = claimed {
+            let _ = execute_claimed_step(&db, &claimed, &driver, limits, NOW_MILLIS + 1).await;
+        }
         assert!(failpoints::was_triggered(), "{failpoint:?} fired");
         drop(db);
         db = open().await.expect("database reopens after the crash");
+        process += 1;
+        writer_epoch = WriterEpoch::from_bytes([process; 16]).expect("writer epoch is non-nil");
         // One ordinary step after each crash, so every crash lands on a
         // build that has scanned further.
-        drive_one_with_limits(&db, &driver, operation_id, &mut claim_sequence, limits).await;
+        let now_unix_millis = NOW_MILLIS + claim_sequence;
+        drive_one_at(
+            &db,
+            &driver,
+            operation_id,
+            writer_epoch,
+            &mut claim_sequence,
+            limits,
+            now_unix_millis,
+        )
+        .await;
     }
     let (_, end) = drive_build(&db, &driver, operation_id, &mut claim_sequence, limits).await;
     assert_eq!(end, CommittedOperationStep::Completed);
