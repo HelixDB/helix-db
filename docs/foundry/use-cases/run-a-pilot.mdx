@@ -62,8 +62,9 @@ free, and room for a few GB of images. To run the bundled Ollama, give Docker at
   <Step title="Choose where AI runs">
     Drafting, reading documents and answering run on an AI provider. To keep your data
     on the machine, run Ollama beside Foundry with
-    `docker compose --profile ollama up -d --wait`; small local models may stop a draft
-    early. Otherwise Foundry uses the
+    `docker compose --profile ollama up -d --wait`, and set `FOUNDRY_AI_PROVIDER=ollama`
+    in `local/.env`: otherwise a key in the shell is picked first. Small local models
+    may stop a draft early. Otherwise Foundry uses the
     `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` of the shell that started it, or a provider
     you choose in **Settings › AI models**. See
     [what reaches AI model providers](/foundry/reference/security-and-data#what-reaches-ai-model-providers).
@@ -128,8 +129,8 @@ free, and room for a few GB of images. To run the bundled Ollama, give Docker at
 
   <Step title="Answer the five questions">
     Ask each with `helix_foundry_ask` and a new `client_token`, and follow it with
-    `helix_foundry_get_question` until it's done, or ask in the
-    [Analyst](/foundry/ask/ask-questions). For each answer, open two or three of its
+    `helix_foundry_get_question` until it's done, or ask
+    [Founder](/foundry/ask/founder). For each answer, open two or three of its
     citations and check them against the source. An answer of **This ontology can't
     answer that** says what the ontology lacks: generate again with that in the goal.
   </Step>

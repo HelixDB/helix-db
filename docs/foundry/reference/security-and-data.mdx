@@ -16,7 +16,7 @@ on your own computer; where they differ, it says so. For Helix Cloud databases, 
 
 | What | Where it's kept |
 | --- | --- |
-| Workspaces, connections and their sealed credentials, ontologies, versions, loads, questions and review decisions | Foundry's database (MySQL) |
+| Workspaces, connections and their sealed credentials, ontologies, versions, loads, questions, review decisions, Founder chats, dashboards and workflows | Foundry's database (MySQL) |
 | Each sync's snapshot of a connection's tables, and the documents you upload | Foundry's object store |
 | What each load writes: entities, facts, and where each came from | The ontology's Helix database |
 
@@ -40,8 +40,9 @@ install's [backup and restore](https://github.com/helixdb/helix-foundry/blob/mai
 - **Sealed at rest.** Foundry seals each connector credential, and each AI provider key
   entered under [AI models](/foundry/workspace/ai-models), with AES-256-GCM under the
   deployment's connector key. Each sealed value is bound to the row it belongs to, so a
-  copy moved to another connection or workspace doesn't open. New values use the current
-  key; values sealed under the previous key still open, so the key can be rotated.
+  copy moved to another connection or workspace doesn't open. Hosted, new values use the
+  current key and values sealed under the previous one still open, so Helix can rotate
+  it. The local install's key is written once and never rotated.
 - **Not shown again.** Foundry keeps a key encrypted and never shows it again.
 - **On your own computer**, the first start writes the install's secrets, the connector
   key among them, into the `secrets` volume. Nothing is printed or written to the
@@ -75,6 +76,7 @@ Foundry never writes to your sources:
 | Reading documents in a load | Their text, to find and check the names and facts they hold |
 | Reading tables in a load | Nothing: tables load without AI models |
 | Answering a question | The question, and what each step reads from the load |
+| Talking to Founder | Your messages, and what its steps read from the load |
 
 Hosted, these run on Anthropic's Claude models through Helix by default. On Pro or Max,
 an owner can run them on the workspace's own Anthropic key instead; see
@@ -82,7 +84,10 @@ an owner can run them on the workspace's own Anthropic key instead; see
 
 On your own computer, they run on the provider you choose: Claude, OpenAI, Azure OpenAI,
 Amazon Bedrock, Cohere, an OpenAI-compatible server, or a local model in Ollama or LM
-Studio. To keep everything on the machine, run Ollama beside Foundry:
+Studio. To keep everything on the machine, run Ollama beside Foundry, and either set
+`FOUNDRY_AI_PROVIDER=ollama` in `local/.env` or start it from a shell without
+`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`: Foundry picks Claude, then OpenAI, before
+Ollama.
 
 ```bash
 docker compose --profile ollama up -d --wait
@@ -92,7 +97,7 @@ Nothing sent to the bundled Ollama leaves the machine, and it listens on the ont
 agent's loopback only. Small local models may stop drafts early. See the install's
 [AI settings](https://github.com/helixdb/helix-foundry/blob/main/local/README.md#ai).
 
-The install's Assistant can also run on the Claude Code or Codex you're signed in to.
+On your own computer, Founder can also run on the Claude Code or Codex you're signed in to.
 Each CLI then keeps a thread's session on your computer, holding what Foundry's tools
 answered in that thread; the helper deletes them when the thread is deleted or the
 helper is revoked.
@@ -108,8 +113,10 @@ helper is revoked.
   part on to Databuddy. They send no data, documents, questions, answers, names or
   emails. Set `FOUNDRY_TELEMETRY=off` (or `DO_NOT_TRACK=1`) in `local/.env` to turn it
   off.
-- **People enrichment**, hosted, sends context.dev the email or LinkedIn profile of each
-  person a load holds, and adds the profile it finds. Only an owner can allow it. The
+- **Slack, on your own computer**, is off until you link the install to Helix in
+  **Settings › Slack**. Once linked, Founder's replies and the Slack calls they need pass
+  through Helix. `FOUNDRY_TELEMETRY` doesn't control it.
+- **People enrichment**: Helix has paused its lookups, so no person's data is sent. The
   open-source install has none.
 
 ## Who can read what
@@ -117,7 +124,7 @@ helper is revoked.
 Hosted, a workspace has owners, admins and members; see
 [Members and roles](/foundry/workspace/members-and-roles).
 
-- Reading what a load wrote, in the Analyst, the Explorer or through an agent, needs
+- Reading what a load wrote, in Founder, the Explorer or through an agent, needs
   **Query read** on the database's Helix project, or sources shared under
   [Access](/foundry/workspace/access). New members have neither.
 - Shared sources limit a member, team or agent key to the part of each ontology those
