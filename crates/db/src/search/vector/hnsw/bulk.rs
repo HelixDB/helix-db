@@ -13,11 +13,13 @@
 //! - Construction applies the rules of the serial insert in
 //!   [`super::mutation`]: the same degree limits and beam widths
 //!   ([`MutationDegreeLimits`]), the caller's layer per node, a greedy descent
-//!   above the node's layer, a beam search per layer truncated to twice the
-//!   degree, the diverse-neighbor selection, and reciprocal links pruned by the
-//!   same selection with mirrored removal. Inserts run concurrently, so the
-//!   edges differ from the ones a serial build would choose; every stored row
-//!   keeps the serial path's key and value encoding.
+//!   above the node's layer and layer 1, a beam search per layer from the
+//!   nodes the layer above found ([`MutationDegreeLimits::seed_width`])
+//!   truncated to twice the degree, the diverse-neighbor selection, and
+//!   reciprocal links pruned by the same selection with mirrored removal.
+//!   Inserts run concurrently, so the edges differ from the ones a serial
+//!   build would choose; every stored row keeps the serial path's key and
+//!   value encoding.
 //! - A constructed graph is symmetric (a link exists only with its reverse),
 //!   which the stored reverse locators require, and has no node without a
 //!   layer-0 link unless it holds a single node. Its entry point is the first
@@ -336,6 +338,7 @@ struct Scratch {
     ranked: Vec<Scored>,
     selected: Vec<u32>,
     chosen: Vec<Vec<u32>>,
+    seeds: Vec<u32>,
 }
 
 /// What adding a node to a link row came to ([`BulkGraph::link_back`]).
@@ -610,18 +613,21 @@ impl<D: Distance> BulkGraph<D> {
     }
 
     /// Leaves the up to `ef` nodes of `layer` nearest to `query` that a beam
-    /// from `start` reaches in `scratch.ranked`, closest first, never
-    /// visiting `exclude`.
+    /// from `starts` reaches in `scratch.ranked`, closest first, never
+    /// visiting `exclude`. Starts enter the beam in the order given.
     fn beam(
         &self,
         query: &Item<'_, D>,
         exclude: u32,
-        start: u32,
+        starts: &[u32],
         layer: u8,
         ef: usize,
         scratch: &mut Scratch,
     ) -> Result<(), HelixDbError> {
-        assert_ne!(start, exclude, "a beam starts at another node");
+        assert!(
+            !starts.is_empty() && !starts.contains(&exclude),
+            "a beam starts at other nodes"
+        );
         let Scratch {
             visited,
             frontier,
@@ -634,10 +640,17 @@ impl<D: Distance> BulkGraph<D> {
         frontier.clear();
         nearest.clear();
         visited.insert(exclude);
-        visited.insert(start);
-        let start = (self.score(query, start)?, start);
-        frontier.push(Reverse(start));
-        nearest.push(start);
+        for &start in starts {
+            if !visited.insert(start) {
+                continue;
+            }
+            let start = (self.score(query, start)?, start);
+            frontier.push(Reverse(start));
+            nearest.push(start);
+            if nearest.len() > ef {
+                nearest.pop();
+            }
+        }
         while let Some(Reverse((distance, current))) = frontier.pop() {
             if nearest.len() >= ef && nearest.peek().is_some_and(|worst| distance > worst.0) {
                 break;
@@ -687,7 +700,8 @@ impl<D: Distance> BulkGraph<D> {
     }
 
     /// Links `node` into layers `0..=level`, descending from `start`, with the
-    /// serial insert's search, selection and reciprocal pruning.
+    /// serial insert's search, selection and reciprocal pruning
+    /// ([`MutationDegreeLimits::seed_width`] says where each beam starts).
     fn connect(
         &self,
         node: u32,
@@ -696,11 +710,20 @@ impl<D: Distance> BulkGraph<D> {
         scratch: &mut Scratch,
     ) -> Result<(), HelixDbError> {
         let query = self.vectors.item(node);
-        let mut current = (level.saturating_add(1)..=start.layer)
+        let seed_width = self.parameters.limits.seed_width();
+        let current = (level.max(1).saturating_add(1)..=start.layer)
             .rev()
             .try_fold(start.node, |current, layer| {
                 self.greedy(&query, node, current, layer, scratch)
             })?;
+        let mut seeds = std::mem::take(&mut scratch.seeds);
+        seeds.clear();
+        seeds.push(current);
+        if level == 0 && start.layer > 0 {
+            self.beam(&query, node, &seeds, 1, seed_width, scratch)?;
+            seeds.clear();
+            seeds.extend(scratch.ranked.iter().map(|(_, seed)| *seed));
+        }
         let top = level.min(start.layer);
         let mut chosen = std::mem::take(&mut scratch.chosen);
         chosen.resize_with(usize::from(top) + 1, Vec::new);
@@ -709,11 +732,19 @@ impl<D: Distance> BulkGraph<D> {
             self.beam(
                 &query,
                 node,
-                current,
+                &seeds,
                 layer,
                 self.parameters.search_width(layer),
                 scratch,
             )?;
+            seeds.clear();
+            seeds.extend(
+                scratch
+                    .ranked
+                    .iter()
+                    .take(seed_width)
+                    .map(|(_, seed)| *seed),
+            );
             scratch.ranked.truncate(degree * 2);
             select_diverse(
                 &scratch.ranked,
@@ -721,8 +752,8 @@ impl<D: Distance> BulkGraph<D> {
                 |left, right| self.pair(left, right),
                 &mut chosen[usize::from(layer)],
             )?;
-            current = scratch.ranked.first().map_or(current, |closest| closest.1);
         }
+        scratch.seeds = seeds;
         // Every row of the node is in place before a reciprocal link lets
         // another thread reach it and descend through it. A row ascends;
         // reciprocal links follow in selection order, closest first, as the
@@ -988,7 +1019,7 @@ impl<D: Distance> BulkGraph<D> {
         self.beam(
             &query,
             node,
-            nearest,
+            &[nearest],
             0,
             self.parameters.search_width(0),
             scratch,

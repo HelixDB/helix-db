@@ -143,8 +143,17 @@ impl BeamDistances {
         };
         let distance = memo.distances.get(&(layer, node_id)).copied();
         #[cfg(test)]
-        if distance.is_some() {
-            MEMOIZED_LOOKUPS.fetch_add(1, Ordering::Relaxed);
+        {
+            if distance.is_some() {
+                MEMOIZED_LOOKUPS.fetch_add(1, Ordering::Relaxed);
+            }
+            let _outside_scope = REPLAYED_LOOKUPS.try_with(|counts| {
+                let [served, missed] = counts.get();
+                counts.set(match distance {
+                    Some(_) => [served + 1, missed],
+                    None => [served, missed + 1],
+                });
+            });
         }
         distance
     }
@@ -576,6 +585,9 @@ tokio::task_local! {
     pub(crate) static AWAIT_WORKERS: ();
     /// Fails every other attempt in scope before its workers start.
     pub(crate) static PRESEARCH_START_FAILS: std::cell::Cell<bool>;
+    /// Counts the lookups replaying beams in scope served from a memo and
+    /// the ones it lacked, in that order.
+    pub(crate) static REPLAYED_LOOKUPS: std::cell::Cell<[u64; 2]>;
 }
 
 /// Whether the planner may score a job no worker has started.
@@ -883,8 +895,10 @@ impl<D: Distance> WorkerContext<D> {
             excluded: Arc::clone(&self.changed),
             cancelled: Arc::clone(&self.run.cancelled),
         });
+        // The insert's descent (`VectorIndex::insert_hnsw`).
+        let seed_width = self.degree_limits.seed_width();
         let mut current = entry_point;
-        for layer in (job.layer + 1..=max_layer).rev() {
+        for layer in (job.layer.max(1) + 1..=max_layer).rev() {
             current = self
                 .index
                 .search_layer_greedy_for_mutation(
@@ -898,25 +912,41 @@ impl<D: Distance> WorkerContext<D> {
                 )
                 .await?;
         }
+        let mut seeds = vec![current];
+        if job.layer == 0 && max_layer > 0 {
+            let found = self
+                .index
+                .search_layer_beam(
+                    txn,
+                    &item,
+                    &seeds,
+                    1,
+                    seed_width,
+                    job.node_id,
+                    overlay,
+                    scratch,
+                )
+                .await?;
+            if !found.is_empty() {
+                seeds = found.iter().map(|candidate| candidate.node_id).collect();
+            }
+        }
         for layer in (0..=max_layer.min(job.layer)).rev() {
             let ef = self
                 .degree_limits
                 .search_width(layer, self.metadata.config.ef_construction);
             let candidates = self
                 .index
-                .search_layer_beam(
-                    txn,
-                    &item,
-                    current,
-                    layer,
-                    ef,
-                    job.node_id,
-                    overlay,
-                    scratch,
-                )
+                .search_layer_beam(txn, &item, &seeds, layer, ef, job.node_id, overlay, scratch)
                 .await?;
-            if let Some(candidate) = candidates.first() {
-                current = candidate.node_id;
+            if !candidates.is_empty() {
+                seeds.clear();
+                seeds.extend(
+                    candidates
+                        .iter()
+                        .take(seed_width)
+                        .map(|candidate| candidate.node_id),
+                );
             }
         }
         let BeamDistances::Capture(capture) = core::mem::take(&mut scratch.beam_distances) else {

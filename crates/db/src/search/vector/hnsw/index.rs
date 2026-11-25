@@ -3746,7 +3746,7 @@ mod tests {
             .search_layer_beam(
                 &measured,
                 &query_item,
-                stale_entry,
+                &[stale_entry],
                 0,
                 8,
                 42,

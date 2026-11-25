@@ -449,15 +449,15 @@ async fn assert_workloads<D: Distance>(
 
 /// Every planner of one seed stores the same rows: eviction and cache
 /// ownership never change what a mutation plans.
-const EUCLIDEAN_SEED_1: &str = "8a8268fc073bdc4a82d573624a62767ba4275dd83cab24b312160a49f2b66090";
-const MANHATTAN_SEED_4: &str = "f0d2b874474a7b5e4c1df05e2b97447ee257eec8aaeb918d7cc42030c7f9d485";
-const COSINE_SEED_6: &str = "0d715c730a137e4d0c15e255e965c3f367a27c8e0100f7dcb34451ff0cc2d680";
+const EUCLIDEAN_SEED_1: &str = "18fd8365f9eda83460ed08cff0dc1b6b63d510d26e9dcba270bd50599b111604";
+const MANHATTAN_SEED_4: &str = "26763c2e12c11f985701a486a90c74fef62b96d03f1783955708bb0521179927";
+const COSINE_SEED_6: &str = "38e1c743ffcc193bce5e0e82da0f1f84bc7a2dfdc1b9f3fb2b6ac8c7d51a910e";
 const EUCLIDEAN_SEEDS_1_8: &str =
-    "2d11a658df45606174a74f6ff28e43ed3e0c829e23e036a430afa459c8c1890f";
+    "a67580db0ee313f1edfe56d2dd8797e2a66aa613db4dca708b1b31f1c489bdd3";
 const EUCLIDEAN_SIMD_SEED_10: &str =
-    "881616a23421c37d6619b4ae302886678f9b45963209229d365e0e6e3c825285";
+    "326855cd379e050f84968fe95d52e044f45cb174ab244ef46689a5d973a6ded9";
 const COSINE_SIMD_SEED_12: &str =
-    "3ac7f75723ee22d01aa8af38f18c87c43fbb6b27ce2bba8ca1bf3bc2d6ef80f4";
+    "23142e1916d18cbb4588b6ffba3def389e288fbe29ea242125c880e20bdc7f22";
 
 /// Session cache behavior (hits, misses, evictions, flushes, and retained
 /// footprint after every operation) is pinned too, where it is deterministic:
@@ -479,21 +479,21 @@ async fn seeded_euclidean_workloads_keep_golden_rows_and_cache_behavior() {
             ("one-off", EUCLIDEAN_SEED_1),
             (
                 "backfill",
-                "a03743504040462fad25621372320c0c20530d3669d87eb2d7c7c9ed9d1a86e7",
+                "8f00c3beb142ecad2736ff7d97060f39b4c254054579dbc56f7df791e94b7c49",
             ),
             (
                 "tiny-3",
-                "262debfb7b3ffd696a8381955784d1a0a92554b38806c53f37a35368904d215d",
+                "d377f73f116890d14d4c5cae8cd87fa06be514fa76fb59a051fb7e6654e5074e",
             ),
         ],
         &[
             (
                 "large",
-                "d6463777480b42ee26e3bbcfa0f4f3d6bf6984623ff87d1b24b855c1ef042ccf",
+                "af1ae6f2c0cdb7a2e4ca9186b1026aed040d2f260855b5d348265de295a8fdfa",
             ),
             (
                 "backfill",
-                "aa05ee91553659bfe819929f34ebe00cb74cb6776d6949a1bbe80abd93332fcc",
+                "194efd41d85c0eb2e085718bac8a8fd6dbdb37a09cf715e03f6675d5020a902d",
             ),
         ],
     )
@@ -519,7 +519,7 @@ async fn seeded_manhattan_workloads_keep_golden_rows_and_cache_behavior() {
         ],
         &[(
             "backfill",
-            "c6e2550acb0d3f934cc249d789605fd5eb96f6fcd7e5fbaefc5c8546425605eb",
+            "3c945ceb59793757f7014eb2274dc23fc1ec03cb94e4143aa7a14651e9084195",
         )],
     )
     .await;
@@ -541,17 +541,17 @@ async fn seeded_cosine_workloads_keep_golden_rows_and_cache_behavior() {
             ("one-off", COSINE_SEED_6),
             (
                 "backfill",
-                "10417445e00bba9cafaa87d7138f624fd922e634a2e116a232c2b8bd44ea2e12",
+                "f32c1387ac375d47ef8526123a55be6e03cbb1bd2932a54e4a98678d32208064",
             ),
         ],
         &[
             (
                 "large",
-                "6839fdfe85b773d1eeb29e7d138429ccca187028b760cf450f0946cd4b7b474f",
+                "44ae115e77d857624110f712cb7b082a4ca824ccffe5da59d47810c26435e6d8",
             ),
             (
                 "backfill",
-                "5d0982ce195feee4bf592b15c67512da59eefd84f942acd508ec1fbd0ff9c732",
+                "c29eda2405a4dcf9b9083b269b6e8abe855c63a067489a4adc3e00f72657fd51",
             ),
         ],
     )
@@ -577,17 +577,17 @@ async fn namespaces_sharing_a_session_keep_golden_rows_and_cache_behavior() {
             ("one-off", EUCLIDEAN_SEEDS_1_8),
             (
                 "backfill",
-                "53c1bdd03b731e3f50b155b431287c1a3ed44cee199388a9c77ca52de870bd8d",
+                "c645306d09e61e7ba9b1964cfeb23bf34df995c97518e7364a29e77a21b4a602",
             ),
         ],
         &[
             (
                 "large",
-                "5043efc97d1aa1906f2c618e5b8556864880928b3879aa2adaa1d3365b4049a0",
+                "0ce595c65a45a39950c79158b5cc7b6d45e47c28eca7a6fe2afe5cacde176f2f",
             ),
             (
                 "backfill",
-                "b211ab321baf0a5a8f9e6f3f1a1f2fc02d03e0674307e6b053956bb3460cef12",
+                "249fe8fd2cac193d5b558d4ab007456a6a82f1e1eeb39bdb8a264a70086839e1",
             ),
         ],
     )
@@ -611,7 +611,7 @@ async fn simd_width_workloads_keep_golden_rows() {
             ("one-off", EUCLIDEAN_SIMD_SEED_10),
             (
                 "backfill",
-                "85696f48959019e939f6dd4c343fd1acd430304ecadb392caf0e0df9980dca2c",
+                "fd81e0022f7f124f7494ae0b711ae3cc7d890c2c699524c386c5f9933f9a0278",
             ),
         ],
         &[],
@@ -629,7 +629,7 @@ async fn simd_width_workloads_keep_golden_rows() {
             ("one-off", COSINE_SIMD_SEED_12),
             (
                 "backfill",
-                "a167f027a60ab249915dc9492f21257f65c33adc6830974ac2ae9fce42ed7e98",
+                "2ccf9576df8b275756f66d09de95a172db9a1ffba29399d6d30825b568abe7b3",
             ),
         ],
         &[],
