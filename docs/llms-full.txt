@@ -7,6 +7,28 @@
 
 Page type: Concept
 
+What your company knows is split across the systems it runs on: the database, billing,
+support, contracts and call notes. People spend their time hunting across them. Agents
+draft answers they can't finish. And revenue slips between the tools: a renewal at risk
+shows only when you read the invoice, the usage, the tickets and the last call together.
+
+Foundry connects the systems you run into one ontology, so your people and agents make
+better calls, move faster and catch the revenue that slips between tools, with every
+answer cited to its source. It's open source, under Apache 2.0.
+
+- **Connected.** One graph across your systems, with the same customer matched across
+  them.
+- **Cited.** Every answer traces to the row or quote it came from.
+- **Yours.** Open source. Run it on your own computer with the AI provider you choose,
+  or a local model.
+- **Agent-ready.** Your agent sets it up with you through the
+  [Helix MCP](/foundry/agents/helix-mcp).
+
+Search finds what looks relevant. Foundry follows what's connected; see
+[Why an ontology instead of RAG](/foundry/start-here/ontology-vs-rag).
+
+## How it works
+
 Helix Foundry turns the tools your company runs on into one connected graph. Connect
 sources such as Stripe or your PostgreSQL database, send it your app's or agent's own
 data, upload the documents your tables don't cover, let Foundry's agent draft an
@@ -16,7 +38,9 @@ ontologies refresh when their data changes.
 
 Foundry runs at [foundry.helix-db.com](https://foundry.helix-db.com), and your agents
 reach it through the [Helix MCP](/foundry/agents/helix-mcp). Sign in with the account
-you use for Helix Cloud; your workspaces come with it.
+you use for Helix Cloud; your workspaces come with it. To run it on your own computer
+instead, start it from its
+[repository](https://github.com/helixdb/helix-foundry) with Docker Compose.
 
   <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/start-here/tour-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/start-here/tour.webm"></video>
 
@@ -97,6 +121,8 @@ generation attempt has a spending cap of its own.
     Connect Claude Code, Codex or another agent through the Helix MCP.
 
     Push pieces of data to an API source.
+
+    Answer five business questions on your own data.
 
 # Helix Foundry quickstart
 
@@ -351,6 +377,402 @@ Invitations to a workspace come from Helix; see
     Compare Free, Pro and Max.
 
     Ask questions and get work done on Foundry's main page.
+
+# Why an ontology instead of RAG
+
+Page type: Concept
+
+Search finds what looks relevant. Foundry follows what's connected.
+
+[Retrieval-augmented generation](/learn/ai-memory/what-is-rag) (RAG) answers a question
+by finding the passages that look most like it and handing them to a model. That works
+when the answer sits in a passage. Most business questions don't: their answer is
+spread across tables and documents, and only the links between records hold it. This
+page explains what Foundry's ontology adds.
+
+## Questions that span systems
+
+Take "Which renewals are at risk in the next 90 days, and why?" on the
+[sample company](/foundry/use-cases/sample-company#renewal-risk). The answer needs a
+subscription's term end, its unpaid invoice, a fall in usage and two open tickets, from
+four tables, and a call note that says the champion is leaving. Few of
+those rows contain the word "renewal", and none of them says "at risk".
+
+Search ranks passages by how close they are to the question, so it returns the ones
+that talk about renewals. An ontology starts from the subscriptions whose term ends
+soon and follows their links: to the account, its invoices, its usage, its tickets and
+its calls. It reads what is connected, whether or not it looks like the question.
+
+| | Search over passages | Foundry's ontology |
+| --- | --- | --- |
+| What it reads | The passages most like the question | The records the question's types and links reach |
+| Counts and totals | What the passages it found happen to mention | Queries over the records of a type, within read limits |
+| The same customer in two systems | Two unrelated passages | One entity, matched by its key, email or ID |
+| Where an answer came from | The passages it was given | The row or quote behind each value and link |
+
+## One entity across sources
+
+An ontology names the kinds of things in your business, their properties, how they
+link and the rules they follow. A [load](/foundry/ontologies/load-data) writes your
+tables and documents into it as entities:
+
+- **Tables** become entities by their keys. The sample's `contacts` and
+  `support_tickets` rows link to the same `Account` because they carry its
+  `account_id`.
+- **Documents** are read for the names and facts they hold. A call note that names an
+  account, a contact's email or a ticket number is matched to the record the tables
+  made, so its facts land on that record, not beside it.
+- **Names that match nothing**, or more than one record, aren't guessed. They wait for
+  review: **Names something that isn't in your data** or **Could mean more than one
+  entity**. See [Settle a review](/foundry/explore/records-and-entities#settle-a-review).
+
+## Every value keeps its source
+
+Each value and link a load writes keeps where it came from: a table row, or a quote in
+a document. An entity's page shows each property with the row or quote that states it.
+[Founder](/foundry/ask/ask-questions)'s answers cite each record, row, quote and rule
+they used, and your agents get the same citations through the
+[Helix MCP](/foundry/agents/query-from-agents). A person can open the source of a
+claim from the answer, and an agent can show its work.
+
+A version's rules derive facts, such as the sample's `renewal_due`, and an entity's
+**Derived** tab says why each one holds.
+
+## Conflicts go to a person
+
+When documents state a value differently, or differently from a table, Foundry doesn't
+pick one silently. The value waits under **Needs review**: keep one, or replace the
+table's value with the document's. A claim the model wasn't sure of is held until
+someone approves or rejects it. Each decision is kept and applied to later loads too,
+so the same conflict isn't settled twice.
+
+## When search is enough
+
+Search is the right tool for "find the paragraph about X": a question one passage
+answers. Foundry is for questions about your customers, accounts, contracts and
+operations, whose answers are in the links between records in different systems.
+
+## Next steps
+
+    Four business questions, and what answers them.
+
+    Read each value's source, and settle reviews.
+
+# Use cases on the sample company
+
+Page type: Guide
+
+Each use case below is one question the [sample company](/foundry/start-here/sample-company)
+answers, Acme Corp, a made-up company that sells scheduling software. For each: the
+question, the types and links of the **Acme Corp customers** ontology that answer it,
+and how to ask it in Founder or from an agent. Run the sample first, then ask along.
+
+## What the sample holds
+
+The ontology is built from six tables of Acme Corp's PostgreSQL database and nine
+documents: three contracts, call notes, a support escalation, an incident report and a
+price list.
+
+| Type | From | Key |
+| --- | --- | --- |
+| `Account` | `accounts`, plus `notice_days` and `service_credit_terms` from contracts | `account_id` |
+| `Contact` | `contacts` | `contact_id` |
+| `Subscription` | `subscriptions` | `subscription_id` |
+| `Plan` | `subscriptions.plan` | its name |
+| `Invoice` | `invoices` | `invoice_id` |
+| `Ticket` | `support_tickets` | `ticket_id` |
+| `MonthlyUsage` | `product_usage` | the account and `month` |
+| `Conversation` | Call notes and emails: `held_on`, `summary`, `risks` | its title |
+| `Commitment` | What documents say Acme Corp promised or owes: `amount_usd`, `due_on` | what it promises |
+
+Links tie them together: `subscription_of`, `contact_at`, `ticket_for` and `usage_of`
+lead to an `Account`; `invoice_for` from an `Invoice` to its `Subscription`; `on_plan`
+to a `Plan`; `requested_by` from a `Ticket` to its `Contact`. From the documents,
+`conversation_with`, `attended_by`, `discussed` and `promised_to` tie conversations and
+commitments to accounts, contacts and tickets. The rule `renewal_due` marks a
+subscription that isn't canceled and whose term ends within 90 days.
+
+Tables and documents name the same things: a call note names an account, a contact
+and a ticket number, and the load matches them to the records the tables made. That's
+what lets one question read across all of them.
+
+## Renewal risk
+
+**What it's worth:** revenue kept. A renewal at risk shows only when you read the
+subscription, the invoices, the usage, the tickets and the last call together.
+
+**The question:**
+
+> Which renewals are at risk in the next 90 days, and why?
+
+**What answers it:**
+
+- `renewal_due` finds the subscriptions coming up, each with its `status`, `seats`,
+  `discount_pct` and `current_term_end`, and `subscription_of` gives the account.
+- `invoice_for` reaches its invoices, with their `status` and `paid_on`.
+- `usage_of` gives the account's `MonthlyUsage`, so a fall in `active_users` shows.
+- `ticket_for` gives its open tickets; `conversation_with` gives its calls, with their
+  `risks`; `notice_days` says how much notice its contract needs.
+
+In the sample, Brightmoor Facilities is the account to find. Its subscription
+`SUB-2028` is `past_due` with its term ending 30 November 2026. Invoice `INV-30350` is
+`overdue`. Its active users fell from 104 in April to 71 in September. Tickets `T-4393`
+and `T-4414` ask to cut seats and keep the discount, and the renewal call's notes say its
+champion is leaving. No single table says any of this is a risk; together they do.
+
+## Account research before a call
+
+**What it's worth:** rep time saved. The brief comes with sources, rather than a search
+across the CRM, billing, support and old notes.
+
+**The question:**
+
+> Brief me on Halvorsen Freight before my call: who they are, what they pay, how they
+> use the product, open issues and what we've promised.
+
+**What answers it:**
+
+- The `Account` and its `Contact`s through `contact_at`, with each contact's `title`
+  and `role`.
+- Its `Subscription` through `subscription_of`, with its `Plan`, `seats`,
+  `price_per_seat_usd` and `current_term_end`; its invoices through `invoice_for`.
+- Its `MonthlyUsage` over the months, and its tickets through `ticket_for`.
+- Its conversations through `conversation_with`, who took part through `attended_by`,
+  and its commitments through `promised_to`.
+
+In the sample, Halvorsen Freight is on Enterprise with 600 seats, its term ending
+31 January 2027, and had 584 active users in September. Its expansion call asks for 150
+more seats and a lower per-seat price, and its ticket `T-4402` came from the
+7 October incident.
+
+## Support triage with full customer context
+
+**What it's worth:** faster resolution. Whoever takes the ticket sees who raised it,
+what the customer pays for, what else went wrong and what was already offered.
+
+**The question:**
+
+> T-4404 is urgent. Who raised it, what's the customer's context, and what have we
+> already told them?
+
+**What answers it:**
+
+- The `Ticket`'s `priority`, `status`, `category` and `subject`.
+- `requested_by` gives the `Contact` who raised it, and `ticket_for` the `Account`.
+- The account's `Subscription` and `Plan`, and its `service_credit_terms` from its
+  contract.
+- The account's other tickets, and the conversations that `discussed` this one.
+
+In the sample, `T-4404` is Sable Solar's, raised by its operations director during the
+7 October incident, with a second ticket, `T-4401`, from the same morning. The
+escalation thread and the incident report name both tickets, which is what lets the
+load link them to the conversations about them.
+
+## Ops questions without a data request
+
+**What it's worth:** analyst time saved. Whoever has the question asks it, rather than
+filing a request with the data team and waiting.
+
+**The question:**
+
+> Which invoices are overdue, which accounts owe them, and how much?
+
+**What answers it:**
+
+- The `Invoice`'s `status`, `amount_usd` and `due_on`.
+- `invoice_for` reaches its `Subscription`, and `subscription_of` the `Account` that
+  owes it.
+
+In the sample, three invoices are `overdue`, $6,162 in all: Vantage Lift Trucks'
+`INV-30309` and `INV-30339`, $435 each on its Starter subscription `SUB-2011`, and
+Brightmoor Facilities' `INV-30350`, $5,292 on `SUB-2028`. Other questions of this kind
+the sample answers: how much active subscriptions on each plan bring in each month, from
+each `Subscription`'s `monthly_amount_usd` and `on_plan`, and how each account's active
+users moved month by month, from its `MonthlyUsage`.
+
+## Ask Founder
+
+Open **Founder**, pick **Acme Corp customers** in the **Ontology** picker, write the
+question, and select the arrow. Its **Asked the data** step holds the answer, which cites
+each record, row and quote it used: select a citation to open the
+entity's page, the table row or the sentence in its document. Follow up in the same
+chat. See [Ask questions about your data](/foundry/ask/ask-questions).
+
+On an entity's page, such as an account's, **Ask about this** asks about that record.
+
+## Ask from an agent
+
+Connect your agent to the [Helix MCP](/foundry/agents/query-from-agents), then ask it in
+plain words, such as "Using Helix Foundry, which renewals are at risk in the next 90
+days, and why?". The agent finds the ontology with `helix_foundry_list_ontologies`,
+reads its schema with `helix_foundry_get_context`, asks with `helix_foundry_ask` and
+follows the answer with `helix_foundry_get_question`. For an exact list, such as every
+overdue invoice, it reads the graph with `helix_foundry_read_graph`.
+
+## Next steps
+
+    Answer five questions like these on your own data.
+
+    Why one connected graph answers what search can't.
+
+# Run a Foundry pilot on your own data
+
+Page type: Tutorial
+
+A pilot answers five questions your business cares about, on your own data, with every
+answer cited to its source. This checklist runs it on open-source Foundry, on a machine
+you control, and is written so your coding agent can follow it with you. It ends with a
+short value report.
+
+Foundry's open-source install runs on one computer with Docker Compose, for one person,
+and listens on that computer's loopback only. There is no multi-user deployment for
+your own cloud yet. To run a pilot with Helix, email
+[founders@helix-db.com](mailto:founders@helix-db.com).
+
+## Before you start
+
+Agree five questions before anything is installed. Each should be tied to money or
+time, and each should need more than one system to answer. For each, write down:
+
+- **The question**, as someone would ask it.
+- **Who asks it today**, how often, and how long an answer takes them.
+- **What it's worth**: revenue kept or found, or hours saved.
+- **The sources that hold the answer**: which databases, apps and documents.
+
+[Use cases on the sample company](/foundry/use-cases/sample-company) shows four such
+questions. Then check the machine has Docker with Compose v2, ports 3000, 8333 and 8081
+free, and room for a few GB of images. To run the bundled Ollama, give Docker at least
+10 GB of memory.
+
+## The checklist
+
+    Paste this into your coding agent:
+
+    ```text
+    Set up Helix Foundry on this computer.
+
+    Clone https://github.com/helixdb/helix-foundry.git (or use the copy I
+    already have), then follow its README.md and local/README.md to start it
+    with Docker Compose and check that it is up. Ask me before deleting data,
+    removing Docker volumes or stopping anything that is already running.
+    When it is ready, give me the URL and tell me what to do next.
+    ```
+
+    Or run it yourself:
+
+    ```bash
+    git clone https://github.com/helixdb/helix-foundry.git
+    cd helix-foundry
+    docker compose up -d --wait
+    ```
+
+    Open `http://localhost:3000`. Foundry opens on **My workspace**, with no sign-in.
+
+    Drafting, reading documents and answering run on an AI provider. To keep your data
+    on the machine, run Ollama beside Foundry with
+    `docker compose --profile ollama up -d --wait`, and set `FOUNDRY_AI_PROVIDER=ollama`
+    in `local/.env`: otherwise a key in the shell is picked first. Small local models
+    may stop a draft early. Otherwise Foundry uses the
+    `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` of the shell that started it, or a provider
+    you choose in **Settings › AI models**. See
+    [what reaches AI model providers](/foundry/reference/security-and-data#what-reaches-ai-model-providers).
+
+    To send no usage analytics either, set `FOUNDRY_TELEMETRY=off` in `local/.env` and
+    run `docker compose up -d` again.
+
+    Load the install's owner token into the agent's environment, without printing it,
+    and add the local MCP at `http://localhost:8081/mcp`. See
+    [Query from your agents](/foundry/agents/query-from-agents#on-your-own-computer).
+    In Foundry, **Set up with your agent** copies a prompt that carries the workspace
+    and the steps left.
+
+    For each source the questions need, create a read-only credential at the source:
+    a `SELECT`-only database user, or a read-only key. Each connector's form gives the
+    steps; see [Connectors](/foundry/data/connectors).
+
+    The person enters credentials in Foundry, never in the chat:
+    `helix_foundry_connect` gives the agent a link to the form. Once a connection is
+    saved, the agent syncs it with the `sync_connector` operation and follows
+    `helix_foundry_get_sync`. Upload documents, such as contracts and call notes, into a
+    set with `create_document_set` and `upload_document`, or select **Upload documents**
+    in Connectors.
+
+    Write a goal that names the five questions, and agree which connections and document
+    sets it reads. The agent creates the ontology with `create_ontology`, then asks for a
+    draft with `generate_ontology`, and follows `helix_foundry_get_generation` until it
+    ends. Every change goes through `helix_foundry_prepare_operation`, your confirmation,
+    then `helix_foundry_execute_operation`.
+
+    Read it with `helix_foundry_get_version`, or on the version's page. Check:
+
+    - each of the five questions has a path through its types and links;
+    - its open questions, and what it left out and why;
+    - the document sets it doesn't read.
+
+    Generate again with what you decided in the goal, or make a small edit with
+    `revise_version`. See [Generate and version](/foundry/ontologies/generate-and-version).
+
+    Make the reviewed version current with `set_current_version`, then load it with
+    `create_load` and follow `helix_foundry_get_load`. Report any failed jobs, how many
+    documents were read, and how many items they left for review.
+
+    `helix_foundry_list_reviews` lists what the load couldn't settle: names that match
+    no record or more than one, values documents disagree on, and claims held for a
+    person. A person decides each; the agent records it with `settle_review`, or you
+    settle them on the entity's page. See
+    [Settle a review](/foundry/explore/records-and-entities#settle-a-review).
+
+    Ask each with `helix_foundry_ask` and a new `client_token`, and follow it with
+    `helix_foundry_get_question` until it's done, or ask
+    [Founder](/foundry/ask/founder). For each answer, open two or three of its
+    citations and check them against the source. An answer of **This ontology can't
+    answer that** says what the ontology lacks: generate again with that in the goal.
+
+    Fill in the template below, and keep the threads: each answer's citations are the
+    evidence.
+
+## Value report template
+
+```markdown
+# Foundry pilot: <company>, <dates>
+
+## Setup
+- Sources connected: <connections, tables, document sets>
+- Ontology: <name>, version <n>, load <id>
+- AI provider: <provider and models>
+- Reviews settled: <count>; left open: <count and why>
+
+## Questions
+
+### 1. <question>
+- Answer: <one or two sentences>
+- Citations checked: <n of n correct>
+- Today: <who answers it, how often, time per answer>
+- With Foundry: <time to answer>
+- Worth: <revenue kept or found, or hours saved per month, and how you estimated it>
+
+<!-- Repeat for questions 2 to 5. -->
+
+## Summary
+- Revenue at stake found: <amount, with the answers it comes from>
+- Time saved: <hours per month, by role>
+- What the ontology couldn't answer, and what it would need
+- Next step: <decision>
+```
+
+## Clean up
+
+To keep the pilot, back it up first: see the install's
+[backup and restore](https://github.com/helixdb/helix-foundry/blob/main/local/README.md#back-up-and-restore).
+To remove everything, run `docker compose down -v` from the repository. It deletes the
+data and the key that seals every credential you gave Foundry, so revoke those
+credentials at their sources too.
+
+## Next steps
+
+    What the pilot stores, and what leaves the machine.
+
+    Wire the ontology into your own agents.
 
 # Connect and sync data
 
@@ -2647,7 +3069,8 @@ plain language, as [Founder](/foundry/ask/founder) does, and waits up to 25 seco
 longer question carries on: the agent follows it with `helix_foundry_get_question`, which
 waits up to 25 seconds each call, and stops it with `helix_foundry_cancel_question`. `helix_foundry_list_questions` lists the ontology's
 questions. Questions asked through the MCP count against the same hourly limit and
-monthly budget as those Founder asks.
+monthly budget as those Founder asks. See
+[Query Foundry from your agents](/foundry/agents/query-from-agents) for the whole flow.
 
 In a client that draws MCP Apps, the answer shows as a card with its charts and tables,
 and a link to the question in Foundry. Other clients get the answer as text.
@@ -2770,6 +3193,152 @@ goes wrong. Each caller can send 20 an hour, of up to 4,096 bytes each.
     How questions are answered, and their limits.
 
     Run steps on a schedule or when something happens, as you.
+
+# Query Foundry from your agents
+
+Page type: Guide
+
+Once an ontology is loaded, your agents can ask it what your people ask
+[Founder](/foundry/ask/founder), through the Helix MCP. The answer cites each
+entity, fact, row and document quote it read, so the agent can show where it came from.
+This page covers connecting an agent and the read tools it uses. To have an agent set up
+an ontology, see [Use Foundry from your agent](/foundry/agents/helix-mcp).
+
+## Connect your agent
+
+The MCP is at `https://mcp.helix-db.com/mcp` for Foundry at foundry.helix-db.com, and
+at `http://localhost:8081/mcp` for Foundry
+[on your own computer](#on-your-own-computer). Hosted, it signs you in with OAuth in your
+browser, with the account you use for Foundry, and acts with your role and rights.
+
+```bash
+    claude mcp add --transport http helix https://mcp.helix-db.com/mcp
+    ```
+
+    Then run `/mcp` in Claude Code and sign in.
+
+    Any MCP client that speaks streamable HTTP works, including an agent built on the
+    [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk). Add
+    `https://mcp.helix-db.com/mcp` as a remote server. A client that discovers OAuth
+    finds it at `https://mcp.helix-db.com/.well-known/oauth-protected-resource/mcp`.
+
+    An agent that runs without a person, such as a service or a CI job, sends a Helix
+    [service credential](/foundry/agents/helix-mcp#service-credentials) as
+    `Authorization: Bearer hlxs_…` instead of signing in. Keep it in the agent's
+    environment or a secret store, never in a prompt or a repository.
+
+## Ask a question
+
+A typical agent works in four steps.
+
+    `helix_list_workspaces` lists your workspaces. `helix_foundry_list_ontologies` lists
+    a workspace's ontologies with their current version and load.
+
+    `helix_foundry_get_context` returns the ontology's schema (each type's properties,
+    key and names, and its links, rules and constraints) and the questions Foundry
+    suggests for it. It describes the version of the current load.
+
+    `helix_foundry_ask` takes `workspace_id`, `ontology_id`, the `question` in plain
+    language and a `client_token`: a new UUID per question, which the agent keeps. The
+    same token returns the same question instead of asking again, so a retry is safe.
+
+```json
+{
+  "workspace_id": "<workspace id>",
+  "ontology_id": "<ontology id>",
+  "question": "Which active subscriptions come up for renewal soon, and for which accounts?",
+  "client_token": "<a new UUID>"
+}
+```
+
+    It waits up to 25 seconds. Optional fields: `thread_id` to follow up in a thread,
+    `focus` for the entity the question is about, `load_id` to ask a load other than the
+    current one, and `valid_at` (`YYYY-MM-DD`) to answer as of a past day.
+
+    A question's `status` is `queued`, `running`, `answered`, `cannot_answer`, `failed` or
+    `cancelled`. Until `done` is true, call `helix_foundry_get_question` with its
+    `question_id`; each call waits up to 25 seconds. `result` holds the answer and its
+    citations. `helix_foundry_cancel_question` stops one that no longer matters.
+
+`helix_foundry_list_questions` lists an ontology's questions, newest first, with the
+workspace's question budget. Questions asked through the MCP count against the same
+hourly limit and monthly budget as questions asked in Foundry; see
+[Limits and spending](/foundry/ask/ask-questions#limits-and-spending).
+
+  An answer is built from your data, and your data can hold anything. The tools mark
+  what they return as untrusted content. Have your agent treat it as data, never as
+  instructions.
+
+## Read exact records
+
+For exact lookups, rather than a question in plain language, the agent reads the graph
+itself. `helix_foundry_read_guide` returns the reads it can make and their JSON Schema.
+`helix_foundry_read_graph` makes 1 to 20 of them per call: typed queries over entities
+and facts, the evidence and source behind a fact, why a derived fact holds, and rule
+breaks. An entity is named by its id, its key's values, such as
+`{"type": "Account", "key": "ACC-1023"}`, or a name.
+
+An answer's queries come without their rows. To see the rows behind one of its charts or
+tables, the agent reads that query again with `helix_foundry_read_graph`, on the
+question's `load_id`.
+
+## Who can query
+
+The agent can read only what you can read. Reading a load, through the graph or through
+questions, needs **Query read** on the database's Helix project, or sources shared with
+you under [Access](/foundry/workspace/access). A service credential needs
+**query-read** on the project, or sources given to its key. See
+[Members and roles](/foundry/workspace/members-and-roles#what-new-members-can-read).
+
+## On your own computer
+
+Foundry's open-source install serves the same query tools at
+`http://localhost:8081/mcp`, on this computer's loopback only. It has no sign-in: the agent sends the install's
+owner token as a bearer. Load it into your environment without printing it, from the
+repository's root:
+
+```bash
+export FOUNDRY_LOCAL_TOKEN="$(docker compose exec -T foundry cat /secrets/site-token)"
+```
+
+Then point the client at the local MCP and have it read the token from the environment.
+For Claude Code, add it to the project's `.mcp.json`; Claude Code expands
+`${FOUNDRY_LOCAL_TOKEN}` as it starts the server, so the file holds no secret:
+
+```json
+{
+  "mcpServers": {
+    "foundry": {
+      "type": "http",
+      "url": "http://localhost:8081/mcp",
+      "headers": { "Authorization": "Bearer ${FOUNDRY_LOCAL_TOKEN}" }
+    }
+  }
+}
+```
+
+The token acts as the owner of every local workspace. Keep it in the client's
+environment, out of prompts and code a browser loads. If 8081 was taken and you set
+`FOUNDRY_MCP_PORT`, use that port.
+
+### Ask over HTTP
+
+An app without an MCP client can ask the local install over HTTP:
+`POST http://localhost:8081/v1/ontologies/<ontology-id>/ask` with the same bearer,
+`Content-Type: application/json`, an `Idempotency-Key` of at most 64 bytes, and
+`{"question": "…"}`. It waits up to 25 seconds, then answers 200 with the question
+done, or 202 with a `Location` to `GET` until `done` is true. Reuse the idempotency key
+after a lost response. The repository's
+[Python example](https://github.com/helixdb/helix-foundry/blob/main/examples/ask_tool.py)
+wraps this as one agent tool.
+
+Hosted Foundry doesn't serve these HTTP routes yet. Use the MCP.
+
+## Next steps
+
+    Four questions worth money or time, and how an agent asks them.
+
+    What Foundry stores, and what reaches AI models.
 
 # Give your agent a memory
 
@@ -3414,6 +3983,167 @@ See [Dashboards](/foundry/automate/dashboards).
     What to do when you reach a limit.
 
     This month's spend against each cap.
+
+# Security and data handling
+
+Page type: Reference
+
+This page says what Foundry keeps, where your credentials live, what leaves it and who
+can read what. It covers both Foundry at foundry.helix-db.com and the open-source install
+on your own computer; where they differ, it says so. For Helix Cloud databases, see
+[Helix Cloud security](/database/helix-cloud/operate/security).
+
+## What Foundry stores
+
+| What | Where it's kept |
+| --- | --- |
+| Workspaces, connections and their sealed credentials, ontologies, versions, loads, questions, review decisions, Founder chats, dashboards and workflows | Foundry's database (MySQL) |
+| Each sync's snapshot of a connection's tables, and the documents you upload | Foundry's object store |
+| What each load writes: entities, facts, and where each came from | The ontology's Helix database |
+
+A sync's snapshot replaces the one before it. A load is a complete copy written beside
+earlier loads, so you can compare them; see [Load data](/foundry/ontologies/load-data).
+Deleting an ontology removes what its loads wrote and leaves the database's other data
+in place. Foundry never deletes a Helix database.
+
+On your own computer, these are Docker Compose volumes: `mysql`, `storage` (the object
+store, SeaweedFS), `helix` (HelixDB), `work` (the workers' working files), `secrets`,
+and `ollama` (the local models, with the `ollama` profile). `docker compose down` keeps
+them; `docker compose down -v` deletes them all. See the
+install's [backup and restore](https://github.com/helixdb/helix-foundry/blob/main/local/README.md#back-up-and-restore).
+
+## Credentials
+
+- **Entered in Foundry, never through an agent.** Database passwords and API keys are
+  entered in Foundry's **Add data** form. An agent on the
+  [Helix MCP](/foundry/agents/helix-mcp#connectors-stay-on-the-website) gets a link to
+  that form, never the credential, and Foundry's tools never return one.
+- **Sealed at rest.** Foundry seals each connector credential, and each AI provider key
+  entered under [AI models](/foundry/workspace/ai-models), with AES-256-GCM under the
+  deployment's connector key. Each sealed value is bound to the row it belongs to, so a
+  copy moved to another connection or workspace doesn't open. Hosted, new values use the
+  current key and values sealed under the previous one still open, so Helix can rotate
+  it. The local install's key is written once and never rotated.
+- **Not shown again.** Foundry keeps a key encrypted and never shows it again.
+- **On your own computer**, the first start writes the install's secrets, the connector
+  key among them, into the `secrets` volume. Nothing is printed or written to the
+  checkout. Whoever holds that volume and the data can open every credential, so keep a
+  backup of it encrypted, or apart from the rest. Losing it makes the credentials
+  unreadable. An `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` passed from your shell is never
+  stored or logged.
+
+## Connectors only read
+
+Foundry never writes to your sources:
+
+- **Databases.** Create a user with `SELECT` on the tables Foundry reads; each
+  connector's form gives the SQL. PostgreSQL and MySQL reads run in read-only
+  transactions. Change capture also needs the right to read the database's change log:
+  `REPLICATION` on PostgreSQL (`rds_replication` on Amazon RDS and Aurora), and
+  `REPLICATION SLAVE, REPLICATION CLIENT` on MySQL. With PostgreSQL change capture,
+  Foundry keeps a replication slot named `helix_foundry_<connection>` on the database,
+  which it creates and drops itself; it changes no table.
+- **Apps.** Foundry only calls their read endpoints, and each connector's setup asks for
+  read-only scopes where the provider offers them, such as a restricted Stripe key or
+  read-only Google scopes. See [Connectors](/foundry/data/connectors) for each one's
+  scopes.
+- **API sources** take what your apps and agents send; Foundry reads nothing from them.
+
+## What reaches AI model providers
+
+| Task | What is sent |
+| --- | --- |
+| Generating a draft | Your synced tables, and up to five of the newest documents of each set the generation picks |
+| Reading documents in a load | Their text, to find and check the names and facts they hold |
+| Reading tables in a load | Nothing: tables load without AI models |
+| Answering a question | The question, and what each step reads from the load |
+| Talking to Founder | Your messages, and what its steps read from the load |
+
+Hosted, these run on Anthropic's Claude models through Helix by default. On Pro or Max,
+an owner can run them on the workspace's own Anthropic key instead; see
+[AI models](/foundry/workspace/ai-models).
+
+On your own computer, they run on the provider you choose: Claude, OpenAI, Azure OpenAI,
+Amazon Bedrock, Cohere, an OpenAI-compatible server, or a local model in Ollama or LM
+Studio. To keep everything on the machine, run Ollama beside Foundry, and either set
+`FOUNDRY_AI_PROVIDER=ollama` in `local/.env` or start it from a shell without
+`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`: Foundry picks Claude, then OpenAI, before
+Ollama.
+
+```bash
+docker compose --profile ollama up -d --wait
+```
+
+Nothing sent to the bundled Ollama leaves the machine, and it listens on the ontology
+agent's loopback only. Small local models may stop drafts early. See the install's
+[AI settings](https://github.com/helixdb/helix-foundry/blob/main/local/README.md#ai).
+
+On your own computer, Founder can also run on the Claude Code or Codex you're signed in to.
+Each CLI then keeps a thread's session on your computer, holding what Foundry's tools
+answered in that thread; the helper deletes them when the thread is deleted or the
+helper is revoked.
+
+## Other outbound traffic
+
+- **Usage analytics, hosted.** Foundry's site sends Databuddy (databuddy.cc) the pages
+  you open, the steps you take, errors and session replays, under your account's name
+  and email. Replays mask the page's text and what you type.
+- **Usage analytics, on your own computer.** The install's site and its HelixDB tell
+  Helix, anonymously, how Foundry is used: page paths with ids taken out, steps such as
+  a load being ready, and each query's shape with values taken out. The site sends its
+  part on to Databuddy. They send no data, documents, questions, answers, names or
+  emails. Set `FOUNDRY_TELEMETRY=off` (or `DO_NOT_TRACK=1`) in `local/.env` to turn it
+  off.
+- **Slack, on your own computer**, is off until you link the install to Helix in
+  **Settings › Slack**. Once linked, Founder's replies and the Slack calls they need pass
+  through Helix. `FOUNDRY_TELEMETRY` doesn't control it.
+- **People enrichment**: Helix has paused its lookups, so no person's data is sent. The
+  open-source install has none.
+
+## Who can read what
+
+Hosted, a workspace has owners, admins and members; see
+[Members and roles](/foundry/workspace/members-and-roles).
+
+- Reading what a load wrote, in Founder, the Explorer or through an agent, needs
+  **Query read** on the database's Helix project, or sources shared under
+  [Access](/foundry/workspace/access). New members have neither.
+- Shared sources limit a member, team or agent key to the part of each ontology those
+  sources fill.
+- An agent acts with its person's role and rights. Every change it makes needs a
+  [confirmation](/foundry/agents/helix-mcp#changes-with-a-confirmation): one-time, valid
+  for five minutes, and bound to that operation, its target and its exact payload.
+- Tool results are marked as untrusted data, so agents treat what your sources say as
+  data, never as instructions.
+- Owners and admins can publish a dashboard to a public link, which anyone with the
+  link can read without signing in. It holds a snapshot of the tile outputs, can end
+  after 7, 30 or 90 days, and can be unpublished. An owner can turn public links off for
+  the workspace. The open-source install never publishes.
+
+The open-source install has one owner and no sign-in: no team, no roles and no source
+sharing. Anyone who can reach it controls it.
+
+## The local install stays on 127.0.0.1
+
+The open-source install is for one person on their own computer.
+
+| Service | Listens on |
+| --- | --- |
+| Foundry's site | `127.0.0.1:3000`, and answers only `localhost:3000` |
+| Object store, for the uploads Foundry signs | `127.0.0.1:8333` |
+| MCP and HTTP Ask | `127.0.0.1:8081` (or `FOUNDRY_MCP_PORT`), answering only `localhost`, `127.0.0.1`, `::1`, `host.docker.internal` and the host of `HELIX_LOCAL__SITE_ORIGIN` |
+| Bundled Ollama | The ontology agent's loopback only |
+
+Never expose it through a reverse proxy, tunnel or port forward. The MCP's owner token
+acts as the owner of every local workspace; keep it in your agent's environment, out of
+prompts. See
+[Query from your agents](/foundry/agents/query-from-agents#on-your-own-computer).
+
+## Next steps
+
+    Choose where a hosted workspace's AI runs.
+
+    Limit what each member, team or agent key reads.
 
 # Troubleshooting Helix Foundry
 
