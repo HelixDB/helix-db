@@ -7,6 +7,7 @@ import sys
 import types
 import unittest
 import warnings
+from http.client import RemoteDisconnected
 from io import BytesIO
 from typing import Any
 from unittest.mock import patch
@@ -97,6 +98,28 @@ class CypherContractTests(unittest.TestCase):
                 serialize_cypher(query, None, query_name)  # type: ignore[arg-type]
             self.assertEqual(invalid.exception.kind, "InvalidRequest")
         self.assertEqual(json.loads(serialize_cypher("RETURN 1", None, None))["parameters"], {})
+
+    def test_sync_statements_wrap_dropped_connections_as_network_errors(self) -> None:
+        # urllib only wraps errors raised while sending; a connection that drops
+        # before the response arrives comes out of urlopen unwrapped.
+        client = Client()
+        methods = {
+            "cypher": lambda: client.cypher("RETURN 1"),
+            "explain_cypher": lambda: client.explain_cypher("RETURN 1"),
+            "sql": lambda: client.sql("SELECT 1"),
+            "explain_sql": lambda: client.explain_sql("SELECT 1"),
+        }
+        errors = (
+            RemoteDisconnected("Remote end closed connection without response"),
+            ConnectionResetError(104, "Connection reset by peer"),
+        )
+        for name, call in methods.items():
+            for error in errors:
+                with self.subTest(method=name, error=type(error).__name__):
+                    with patch("helixdb.client.urlopen", side_effect=error):
+                        with self.assertRaises(HelixError) as network:
+                            call()
+                    self.assertEqual(network.exception.kind, "Network")
 
     def test_sync_options_and_database_id_headers(self) -> None:
         calls = []

@@ -274,7 +274,9 @@ class Client:
                 return route.decode(response.getcode(), response.read())
         except HTTPError as exc:
             raise remote_error(exc.read(), str(exc.reason), status_code=exc.code) from exc
-        except (URLError, TimeoutError) as exc:
+        except OSError as exc:
+            # URLError and TimeoutError are OSErrors too; a connection dropped
+            # while reading the response is raised without the URLError wrapper.
             raise HelixError.network(str(exc), cause=exc) from exc
 
     def _graph_response(self, request: QueryRequest, native_spec: Any) -> Any:
