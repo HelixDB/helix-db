@@ -1213,6 +1213,30 @@ async fn reuses_marked_publication<D: Distance>(
         == MARKED_PUBLICATION
 }
 
+/// Releasing what a driver holds, as a stopped worker does, drops the
+/// planning sessions its cache retains.
+#[tokio::test]
+async fn a_released_driver_retains_no_planning_session() {
+    let gates = IndexScopeGates::default();
+    let driver = VectorIndexDriver::new(
+        Arc::new(IndexScopeGates::default()),
+        Arc::new(vector::VectorCacheRegistry::default()),
+        Arc::new(vector::SimHasherRegistry::default()),
+    );
+    let cache = driver.build_cache();
+    let target = QueueTarget::new(
+        DataScope::LegacyUnscoped,
+        IndexId::new(7).expect("fixture index id"),
+        IndexGenerationId::initial(),
+    );
+    let committed = publication_checkpoint(target);
+    retain_marked_publication(&cache, &gates, committed, PublicationBacklog::Pending).await;
+    assert_eq!(cache.retained_publication(target), Some(committed));
+
+    driver.release_held_work().await;
+    assert!(cache.retained_publication(target).is_none());
+}
+
 /// A publication session is reused only at the exact target, record
 /// revision, and commit it was retained at. Any checkout of its target takes
 /// it out, so a stale session never survives an attempt.
@@ -1271,6 +1295,16 @@ async fn publication_sessions_are_reused_only_at_their_exact_commit() {
     assert_eq!(cache.retained_publication(target), Some(committed));
     cache.forget_publication(target).await;
     assert!(cache.retained_publication(target).is_none());
+
+    // A stopped worker forgets every session, pending and drained alike.
+    let other_committed = publication_checkpoint(other);
+    retain_marked_publication(&cache, &gates, committed, PublicationBacklog::Pending).await;
+    retain_marked_publication(&cache, &gates, other_committed, PublicationBacklog::Drained).await;
+    assert_eq!(cache.retained_publication(target), Some(committed));
+    assert_eq!(cache.retained_publication(other), Some(other_committed));
+    cache.forget_all().await;
+    assert!(cache.retained_publication(target).is_none());
+    assert!(cache.retained_publication(other).is_none());
 
     // A session of another metric is never reused.
     retain_marked_publication(&cache, &gates, committed, PublicationBacklog::Pending).await;

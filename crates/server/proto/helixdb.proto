@@ -46,4 +46,8 @@ message HealthResponse {
   // applying their queued change fails the same way every time. Only the
   // count: the writer's logs name each one.
   uint64 blocked_index_entity_count = 5;
+  // Whether storage still serves: "open", or "fenced" once a newer writer
+  // opened the same store, "failed" once a storage task failed, "closed"
+  // while shutting down. Only "open" can be ready.
+  string storage = 6;
 }

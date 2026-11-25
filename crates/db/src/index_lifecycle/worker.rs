@@ -681,6 +681,15 @@ async fn supervise_worker(context: WorkerSupervisorContext) {
         .await
         {
             Ok(WorkerCycleExit::Shutdown) => return,
+            // Closed or fenced storage fails every later cycle too.
+            Err(error) if outbox::DriverFailure::of(&error) == outbox::DriverFailure::Stops => {
+                tracing::info!(
+                    %error,
+                    writer_epoch = %context.writer_epoch.as_uuid(),
+                    "index outbox worker stopped: storage no longer serves this writer"
+                );
+                return;
+            }
             Err(error) => {
                 #[cfg(feature = "index-lifecycle-testing")]
                 {
@@ -2107,6 +2116,70 @@ mod tests {
             }
         ));
         assert_eq!(released.progress(), waiting.progress());
+    }
+
+    /// Fenced storage fails every cycle the supervisor could start, so its
+    /// first failed cycle ends it rather than a restart every 10 ms.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_supervisor_ends_once_storage_is_fenced() {
+        let store: Arc<dyn slatedb::object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = Arc::new(
+            Db::builder("worker-fenced-supervisor", Arc::clone(&store))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let newer = Db::builder("worker-fenced-supervisor", store)
+            .build()
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            db.subscribe()
+                .wait_for(|status| status.close_reason == Some(slatedb::CloseReason::Fenced)),
+        )
+        .await
+        .expect("the older writer sees the fence within a manifest poll")
+        .unwrap();
+
+        let capability = IndexFamilyCapability::new(
+            Arc::new(Arc::new(ParkingDriver::default())),
+            SearchIndexBackfillLimits::default().batch(),
+            IndexDriverScheduling::Automatic,
+        );
+        struct NoCompaction;
+        #[async_trait]
+        impl ActiveTextCompactionDriver for NoCompaction {
+            async fn compact_active_text_once(&self, _db: &Db) -> Result<bool> {
+                Ok(false)
+            }
+        }
+        let supervisor = IndexWorkerSupervisor::start(
+            Arc::clone(&db),
+            IndexFamilyCapabilities::new(
+                capability.clone(),
+                capability.clone(),
+                capability,
+                Arc::new(NoCompaction),
+                Arc::default(),
+            ),
+            None,
+            Duration::from_secs(3_600),
+            IndexLifecycleConcurrency::try_new(1, 1, 1, 1).unwrap(),
+            Arc::new(ClaimSequenceAllocator::new()),
+            IndexWorkerWakeHandle::default(),
+            #[cfg(feature = "index-lifecycle-testing")]
+            Arc::new(crate::index_lifecycle_testing::AutomaticLifecycleMetrics::new()),
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !supervisor.handle.is_finished() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the supervisor ends without being stopped");
+        supervisor.stop().await;
+        newer.close().await.unwrap();
     }
 
     /// A parked operation takes no step, and so none of its lane's time,

@@ -1745,6 +1745,32 @@ impl BulkBuilds {
         self.parking.clear(operation_id);
     }
 
+    /// Bytes the builds reserve together.
+    #[cfg(test)]
+    pub(super) fn reserved_bytes(&self) -> u64 {
+        self.memory.reserved()
+    }
+
+    /// Holds the construction thread of every later pass 2 until its build
+    /// is cancelled.
+    #[cfg(test)]
+    pub(super) fn hold_linking_until_cancelled(&self) {
+        self.faults.hold_linking.store(true, Ordering::Relaxed);
+    }
+
+    /// Forgets every build ([`Self::forget`]): each drops its graph and its
+    /// reservation, and passes 1 and 2 still running see their cancellation
+    /// flag and end, which releases the memory and the turn they hold.
+    pub(super) fn release(&self) {
+        // Out of the lock first: dropping a build aborts its task and frees
+        // its graph.
+        let builds = std::mem::take(&mut *self.builds.lock());
+        builds.into_keys().for_each(|operation_id| {
+            self.reports.publish(operation_id, None);
+            self.parking.clear(operation_id);
+        });
+    }
+
     /// Runs one step of a bulk build, or tells the caller to run the serial
     /// scan.
     ///
@@ -3079,6 +3105,9 @@ struct TestFaults {
     write_panics: std::sync::atomic::AtomicUsize,
     /// Runs read, by the probe and by pass 1.
     runs: std::sync::atomic::AtomicUsize,
+    /// Whether pass 2 holds its construction thread, before it links
+    /// anything, until the build is cancelled.
+    hold_linking: AtomicBool,
 }
 
 #[cfg(test)]
@@ -3479,6 +3508,8 @@ where
     }
     drop(rows);
     let operation_id = source.operation_id;
+    #[cfg(test)]
+    let hold_linking = source.faults.hold_linking.load(Ordering::Relaxed);
     drop(source);
     // Only a source too large to count before it was read gets here with
     // fewer vectors than a bulk build is started for.
@@ -3510,6 +3541,10 @@ where
     std::thread::Builder::new()
         .name("vector-bulk-build".to_string())
         .spawn(move || {
+            #[cfg(test)]
+            while hold_linking && !cancelled.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
             let constructed = BulkGraph::construct(
                 vectors,
                 parameters,

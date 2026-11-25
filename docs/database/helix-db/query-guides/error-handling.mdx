@@ -383,7 +383,7 @@ embedded configurations may override it.
 | `writer_mode_required` | The operation requires a writer handle, including a request with `X-Helix-Require-Writer` on a reader. | 503 | On a writer | Operational |
 | `reader_mode_required` | The operation requires a standalone reader handle. | 503 | On a reader | Operational |
 | `query_cancelled_by_reader_retirement` | Reader retirement cancelled the query before the reader closed. | 503 | After routing to another reader | Operational |
-| `writer_fenced_commit_outcome_unknown` | Writer fencing made the final commit outcome unknowable. | 503 | Only with idempotency protection | No |
+| `writer_fenced_commit_outcome_unknown` | A newer writer opened the same storage and fenced this one: a write it was committing may or may not have landed, and it serves no request, read or write, again. | 503 | Only with idempotency protection, on the newer writer | No |
 
 ### Internal failures
 

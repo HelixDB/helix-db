@@ -449,3 +449,6 @@ mod cypher_tests;
 
 #[cfg(test)]
 mod server_timing_tests;
+
+#[cfg(test)]
+mod fenced_writer_tests;

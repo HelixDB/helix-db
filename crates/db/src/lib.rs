@@ -360,6 +360,52 @@ impl HelixDbMode {
     }
 }
 
+/// Whether a handle's storage still serves, as SlateDB reports it.
+///
+/// Every state but [`Self::Open`] is terminal for the handle: SlateDB closes
+/// its storage for good, so every later request fails. SlateDB moves a writer
+/// to [`Self::Fenced`] when it notices a newer writer, on the commit that
+/// fails or within one manifest poll (a second by default) when idle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageState {
+    /// Storage is open and serves requests.
+    Open,
+    /// A newer writer opened the same store and fenced this one. Opening
+    /// this process's store again as writer would fence that writer in turn.
+    Fenced,
+    /// A storage background task failed, and SlateDB closed storage.
+    Failed,
+    /// [`HelixDB::close`] closed storage.
+    Closed,
+}
+
+impl StorageState {
+    /// The state SlateDB's close reason gives: `None` while storage is open.
+    fn of(close_reason: Option<slatedb::CloseReason>) -> Self {
+        match close_reason {
+            None => Self::Open,
+            Some(slatedb::CloseReason::Fenced) => Self::Fenced,
+            Some(slatedb::CloseReason::Clean) => Self::Closed,
+            // `Panic`, and any reason a later SlateDB adds: none is ours.
+            Some(_) => Self::Failed,
+        }
+    }
+
+    /// Stable lowercase name for health responses.
+    ///
+    /// ```
+    /// assert_eq!(db::StorageState::Fenced.as_str(), "fenced");
+    /// ```
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Fenced => "fenced",
+            Self::Failed => "failed",
+            Self::Closed => "closed",
+        }
+    }
+}
+
 /// Storage source used to open a [`HelixDB`] handle.
 #[derive(Clone)]
 pub enum HelixDbSource {
@@ -1136,6 +1182,9 @@ struct HelixDBInner {
     config: HelixConfig,
     runtime_state: RwLock<HelixRuntimeState>,
     index_capabilities: index_lifecycle::worker::IndexFamilyCapabilities,
+    /// The vector driver of `index_capabilities`, whose builds hold memory
+    /// between steps that a stopped worker must release.
+    vector_driver: Arc<index_lifecycle::vector::VectorIndexDriver>,
     index_worker_wake: Option<index_lifecycle::worker::IndexWorkerWakeHandle>,
     index_worker: Mutex<Option<index_lifecycle::worker::IndexWorkerSupervisor>>,
     migration_worker: Mutex<Option<migrations::background::MigrationWorkerSupervisor>>,
@@ -1561,6 +1610,7 @@ impl HelixDB {
             .await;
         db.start_dropped_generation_retirement(compaction_slots)
             .await;
+        db.stop_background_tasks_when_storage_closes();
         Ok(db)
     }
 
@@ -1820,6 +1870,7 @@ impl HelixDB {
         .await;
         db.start_dropped_generation_retirement(compaction_slots)
             .await;
+        db.stop_background_tasks_when_storage_closes();
         tracing::info!(
             open_intent,
             writer_epoch,
@@ -1935,14 +1986,16 @@ impl HelixDB {
                 .await?;
         let storage = HelixStorage::Reader(Arc::new(reader));
         let fts_cache = build_fts_cache(&path, &object_store, &config)?;
-        Ok(Self::from_storage(
+        let db = Self::from_storage(
             HelixStorageParts::new(path, object_store, storage),
             HelixConfig::new(config),
             loaded_catalog,
             None,
             fts_cache,
             compatibility,
-        ))
+        );
+        db.stop_background_tasks_when_storage_closes();
+        Ok(db)
     }
 
     async fn open_reader_inner(
@@ -2029,6 +2082,7 @@ impl HelixDB {
         }
         .await;
         db.close_on_open_error(warm_result).await?;
+        db.stop_background_tasks_when_storage_closes();
         Ok(db)
     }
 
@@ -2113,8 +2167,9 @@ impl HelixDB {
         // Queue publication plans within the budget builds retain sessions in.
         let vector_planning_cache = vector_driver.build_cache();
         let vector_build_reports = vector_driver.build_reports();
-        let vector_driver: Arc<dyn index_lifecycle::outbox::IndexOperationDriver> =
-            Arc::new(vector_driver);
+        let vector_driver = Arc::new(vector_driver);
+        let vector_operation_driver: Arc<dyn index_lifecycle::outbox::IndexOperationDriver> =
+            vector_driver.clone();
         let secondary_scheduling = index_scheduling.resolve(match secondary_tuning.worker_mode() {
             config::SecondaryIndexLifecycleWorkerMode::Enabled => {
                 index_lifecycle::worker::IndexDriverScheduling::Automatic
@@ -2149,7 +2204,7 @@ impl HelixDB {
             secondary_scheduling,
         );
         let vector_capability = index_lifecycle::worker::IndexFamilyCapability::new(
-            vector_driver,
+            vector_operation_driver,
             config.db().search_index_backfill().batch(),
             automatic_scheduling,
         );
@@ -2272,6 +2327,7 @@ impl HelixDB {
                     indexes,
                 )),
                 index_capabilities,
+                vector_driver,
                 index_worker_wake,
                 index_worker: Mutex::new(index_worker),
                 migration_worker: Mutex::new(None),
@@ -2317,6 +2373,146 @@ impl HelixDB {
     /// Whether this handle can execute write plans.
     pub fn is_writer_mode(&self) -> bool {
         self.mode() == HelixDbMode::Writer
+    }
+
+    /// Whether this handle's storage still serves. It reads SlateDB's status
+    /// without I/O, so health probes may call it as often as they like.
+    ///
+    /// ```
+    /// # tokio_test::block_on(async {
+    /// use db::{HelixDB, HelixDbSource, StorageState};
+    ///
+    /// let db = HelixDB::open(HelixDbSource::InMemory {
+    ///     database: "storage-state-example".to_string(),
+    /// }).await.unwrap();
+    /// assert_eq!(db.storage_state(), StorageState::Open);
+    /// db.close().await.unwrap();
+    /// assert_eq!(db.storage_state(), StorageState::Closed);
+    /// # });
+    /// ```
+    pub fn storage_state(&self) -> StorageState {
+        StorageState::of(self.storage_close_reason())
+    }
+
+    /// Why SlateDB closed this handle's storage: `None` while it serves.
+    fn storage_close_reason(&self) -> Option<slatedb::CloseReason> {
+        let status = match self.storage() {
+            HelixStorage::Reader(reader) => reader.subscribe(),
+            HelixStorage::Writer(writer) => writer.db().subscribe(),
+        };
+        status.borrow().close_reason
+    }
+
+    /// The error of a call that needs a background task this handle does not
+    /// run: `missing` while storage serves, [`HelixDbError::DatabaseClosed`]
+    /// once [`Self::close`] closed it, and, once storage closed under the
+    /// handle, SlateDB's closed error with its reason, the error every
+    /// request then gets, so a fenced writer's calls all report the fence.
+    fn background_task_missing(&self, missing: HelixDbError) -> HelixDbError {
+        match self.storage_close_reason() {
+            None => missing,
+            Some(slatedb::CloseReason::Clean) => HelixDbError::DatabaseClosed,
+            // Fenced, failed, or a reason a later SlateDB adds.
+            Some(reason) => HelixDbError::Storage(slatedb::Error::closed(
+                "storage closed under this handle, which stopped its background work".to_string(),
+                reason,
+            )),
+        }
+    }
+
+    /// Once SlateDB closes this handle's storage under it (a newer writer
+    /// fenced it, or a storage task failed), logs that once and stops the
+    /// handle's background work, which could only fail and retry from then
+    /// on. SlateDB stops its own flushes, compactions and garbage collection.
+    ///
+    /// Every open calls this last, after the work it stops has started, so
+    /// storage that closed during the open stops it at once. [`Self::close`]
+    /// stops the work itself before it closes storage cleanly. The task holds
+    /// the runtime weakly and ends when storage closes or is dropped.
+    fn stop_background_tasks_when_storage_closes(&self) {
+        let mut status = match self.storage() {
+            HelixStorage::Reader(reader) => reader.subscribe(),
+            HelixStorage::Writer(writer) => writer.db().subscribe(),
+        };
+        let runtime = Arc::downgrade(&self.inner);
+        tokio::spawn(async move {
+            let state = match status
+                .wait_for(|status| status.close_reason.is_some())
+                .await
+            {
+                Ok(status) => StorageState::of(status.close_reason),
+                // Storage was dropped without a close.
+                Err(_) => return,
+            };
+            match state {
+                StorageState::Fenced => tracing::error!(
+                    "a newer writer opened this store and fenced this writer: it serves no \
+                     more requests and stops its background work; restart it only once \
+                     that writer is gone, as a restarted writer fences it in turn"
+                ),
+                StorageState::Failed => tracing::error!(
+                    "storage closed after a storage task failed: this handle serves no more \
+                     requests and stops its background work; restart it"
+                ),
+                StorageState::Open | StorageState::Closed => return,
+            }
+            let Some(inner) = runtime.upgrade() else {
+                return;
+            };
+            HelixDB { inner }.stop_background_tasks().await;
+        });
+    }
+
+    /// Stops and joins every background task the handle runs over its
+    /// storage, and drops what its index builds hold in memory between steps.
+    /// A task stopped already, or never started, is skipped.
+    ///
+    /// Each task is stopped while its slot's lock is held: the guard of an
+    /// `if let` scrutinee lives through its body. So a stop that runs while
+    /// another joins a task waits for that join on the slot's lock rather
+    /// than finding the slot empty, and a [`Self::close`] racing the storage
+    /// watcher still joins every task before it closes storage. Taking a
+    /// task out of its slot before stopping it would break that.
+    async fn stop_background_tasks(&self) {
+        if let Some(worker) = self.inner.migration_worker.lock().await.take() {
+            worker.stop().await;
+        }
+        if let Some(retire) = self.inner.dropped_retire.lock().await.take() {
+            retire.stop().await;
+        }
+        if let Some(worker) = self.inner.index_worker.lock().await.take() {
+            worker.stop().await;
+        }
+        if let Some(task) = self.inner.caches.startup_tasks.slate.lock().await.take() {
+            task.stop().await;
+        }
+        if let Some(task) = self.inner.caches.startup_tasks.fts.lock().await.take() {
+            task.stop().await;
+        }
+        if let Some(warm) = self
+            .inner
+            .caches
+            .startup_tasks
+            .vector_parts
+            .lock()
+            .await
+            .take()
+        {
+            warm.task.stop().await;
+        }
+        if let Some(task) = self
+            .inner
+            .caches
+            .vector_memory
+            .refresh_task
+            .lock()
+            .await
+            .take()
+        {
+            task.stop().await;
+        }
+        // Only the joined worker stepped the builds.
+        self.inner.vector_driver.release_held_work().await;
     }
 
     async fn start_background_migration_worker(
@@ -2385,11 +2581,11 @@ impl HelixDB {
             .as_ref()
             .map(index_lifecycle::dropped::retire::RetireSupervisor::retirer)
             .ok_or_else(|| {
-                HelixDbError::Config(
+                self.background_task_missing(HelixDbError::Config(
                     "this writer runs no compaction worker, so it retires no dropped index entry \
                      and reclaims no dropped index storage"
                         .to_string(),
-                )
+                ))
             })
     }
 
@@ -2833,7 +3029,7 @@ impl HelixDB {
             .lock_owned()
             .await;
         if !matches!(*self.inner.close_state.lock().await, CloseState::Open) {
-            return Err(HelixDbError::DatabaseClosed);
+            return Err(self.background_task_missing(HelixDbError::DatabaseClosed));
         }
         let writer_epoch = self
             .inner
@@ -2842,7 +3038,7 @@ impl HelixDB {
             .await
             .as_ref()
             .map(index_lifecycle::worker::IndexWorkerSupervisor::writer_epoch)
-            .ok_or(HelixDbError::DatabaseClosed)?;
+            .ok_or_else(|| self.background_task_missing(HelixDbError::DatabaseClosed))?;
         // A step can hold the scope's exclusive lifecycle permit through its
         // commit. If the caller is cancelled mid-commit, SlateDB still applies
         // the batch; releasing the permit first would let a planner cache the
@@ -3586,43 +3782,7 @@ impl HelixDB {
             if let Some(runtime) = self.inner.query_metrics_runtime.lock().await.take() {
                 runtime.shutdown().await;
             }
-            if let Some(worker) = self.inner.migration_worker.lock().await.take() {
-                worker.stop().await;
-            }
-            if let Some(retire) = self.inner.dropped_retire.lock().await.take() {
-                retire.stop().await;
-            }
-            if let Some(worker) = self.inner.index_worker.lock().await.take() {
-                worker.stop().await;
-            }
-            if let Some(task) = self.inner.caches.startup_tasks.slate.lock().await.take() {
-                task.stop().await;
-            }
-            if let Some(task) = self.inner.caches.startup_tasks.fts.lock().await.take() {
-                task.stop().await;
-            }
-            if let Some(warm) = self
-                .inner
-                .caches
-                .startup_tasks
-                .vector_parts
-                .lock()
-                .await
-                .take()
-            {
-                warm.task.stop().await;
-            }
-            if let Some(task) = self
-                .inner
-                .caches
-                .vector_memory
-                .refresh_task
-                .lock()
-                .await
-                .take()
-            {
-                task.stop().await;
-            }
+            self.stop_background_tasks().await;
             if let Some(cache) = &self.inner.caches.fts {
                 cache.close().await;
             }
@@ -4715,7 +4875,7 @@ impl HelixDB {
             .await
             .as_ref()
             .map(index_lifecycle::worker::IndexWorkerSupervisor::writer_epoch)
-            .ok_or(HelixDbError::DatabaseClosed)
+            .ok_or_else(|| self.background_task_missing(HelixDbError::DatabaseClosed))
     }
 
     #[cfg(test)]
@@ -8813,3 +8973,7 @@ mod tests {
         db.close().await.expect("writer closes");
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/fenced_writer.rs"]
+mod fenced_writer_tests;
