@@ -48,7 +48,7 @@ failures print a fix.
 | --- | --- |
 | `cli.version` | Whether a newer CLI is released. |
 | `runtime.daemon`, `runtime.container`, `runtime.image` | Local instances: Docker or Podman answers, the container is running, and its image is not older than the one this CLI ships with. |
-| `server.reachable` | The server answers `GET /healthz` and is ready. It fails when another server opened the same storage as writer and fenced this one. |
+| `server.reachable` | The server answers `GET /healthz` and is ready. It fails when another server opened the same storage as writer and fenced this one, when its storage failed, or while it shuts down; any other non-200 answer, such as a proxy's 502 or a 404 from a URL that is not a Helix server, fails with that status. |
 | `storage.durability` | Data is in S3 or on disk, not in memory only. |
 | `storage.data_device` | `HELIX_DATA_DIR` is on persistent storage: not tmpfs, the container's writable layer, or ephemeral instance storage. |
 | `storage.s3_region` | The S3 bucket is in the server's AWS region. The server's region comes from EC2 or ECS metadata; in a container on EC2 that needs an IMDSv2 hop limit of 2. |

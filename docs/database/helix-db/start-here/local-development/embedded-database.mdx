@@ -265,10 +265,12 @@ reader = Client.embedded_reader(Disk("/data/helix", "app"))
 ## Writers and readers
 
 - Open one writer per database at a time, across all processes. A second writer on the
-  same source fences the first, whose requests then fail with
-  `writer_fenced_commit_outcome_unknown`: a write it was committing may or may not have
-  landed. The fenced handle notices within about a second even when idle, stops its
-  background work, and reports `StorageState::Fenced` from `storage_state()`; close it.
+  same source fences the first. From then on every request on the first client, read or
+  write, fails with the error code `writer_fenced_commit_outcome_unknown` (see
+  [Error handling](/database/helix-db/query-guides/error-handling)), and a write it was
+  committing may or may not have landed. The fenced client notices within about a second,
+  even when idle, and stops its background work. Close it, and do not reopen it as a
+  writer while the newer writer runs: that would fence the newer writer in turn.
 - Read-only handles can open the same database alongside the writer, in any process.
   A reader sees a write only once it is durable and the reader has refreshed, so it
   can lag behind the writer.
