@@ -497,6 +497,162 @@ async fn a_fenced_server_fails_with_how_to_recover() {
     );
 }
 
+/// `/healthz` answering `status` with `body`, and no diagnostics.
+async fn health_answering(status: u16, body: Option<serde_json::Value>) -> MockServer {
+    let server = MockServer::start().await;
+    let template = ResponseTemplate::new(status);
+    Mock::given(method("GET"))
+        .and(path("/healthz"))
+        .respond_with(match body {
+            Some(body) => template.set_body_json(body),
+            None => template.set_body_string("<html>upstream error</html>"),
+        })
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/diagnostics"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    server
+}
+
+/// A server that says why its storage stopped serving fails with that
+/// cause and its own fix, and runs no checks of its own unless its health
+/// answered 200; another non-200 answer is reported for what it is, never
+/// as failed storage.
+#[tokio::test]
+async fn each_health_answer_is_reported_for_its_cause() {
+    let server_body = |storage: &str| {
+        Some(serde_json::json!({
+            "ready": false, "mode": "writer", "storage": storage, "index_runtime": "ready",
+        }))
+    };
+    for (status, body, instance, summary, detail, fix) in [
+        (
+            503,
+            server_body("failed"),
+            Some("dev"),
+            "reports that its storage failed",
+            "A storage task failed, so it serves no request until it restarts.",
+            "Check `helix logs dev` for the failure, then `helix restart dev`.",
+        ),
+        (
+            503,
+            server_body("failed"),
+            None,
+            "reports that its storage failed",
+            "A storage task failed, so it serves no request until it restarts.",
+            "Check its logs for the failure, then restart it.",
+        ),
+        (
+            503,
+            server_body("closed"),
+            Some("dev"),
+            "is shutting down",
+            "It closed its storage and serves no more requests.",
+            "Wait for it to exit, then `helix start dev`.",
+        ),
+        (
+            503,
+            server_body("closed"),
+            None,
+            "is shutting down",
+            "It closed its storage and serves no more requests.",
+            "Wait for it to exit, then start it again.",
+        ),
+        (
+            502,
+            None,
+            None,
+            "answered HTTP 502 Bad Gateway",
+            "A proxy in front of the server answered: the server behind it may be down or \
+             still starting.",
+            "Check the URL, and that the server is running and reachable from here.",
+        ),
+        (
+            504,
+            None,
+            Some("dev"),
+            "answered HTTP 504 Gateway Timeout",
+            "A proxy in front of the server answered: the server behind it may be down or \
+             still starting.",
+            "Check `helix logs dev`, then `helix restart dev`.",
+        ),
+        (
+            404,
+            None,
+            None,
+            "answered HTTP 404 Not Found",
+            "Nothing there serves GET /healthz: the URL may not point at a Helix server.",
+            "Check the URL, and that the server is running and reachable from here.",
+        ),
+        (
+            500,
+            Some(serde_json::json!({"ready": true, "mode": "writer"})),
+            None,
+            "answered HTTP 500 Internal Server Error",
+            "A Helix server answers GET /healthz with its storage state, and this answer had \
+             none.",
+            "Check the URL, and that the server is running and reachable from here.",
+        ),
+        (
+            500,
+            server_body("open"),
+            None,
+            "answered HTTP 500 Internal Server Error",
+            "A Helix server answers GET /healthz with its storage state, and this answer had \
+             none.",
+            "Check the URL, and that the server is running and reachable from here.",
+        ),
+    ] {
+        let server = health_answering(status, body.clone()).await;
+        let mut checks = Vec::new();
+        assert_eq!(
+            server_checks(&server.uri(), instance, &mut checks).await,
+            None
+        );
+        let [check] = checks.as_slice() else {
+            panic!("{status} {body:?}: only the reachability check: {checks:?}");
+        };
+        assert_eq!(check.id, "server.reachable");
+        assert_eq!(check.status, Status::Fail, "{status} {body:?}");
+        assert!(
+            check.summary.ends_with(summary),
+            "{status} {body:?}: {}",
+            check.summary
+        );
+        assert_eq!(check.detail.as_deref(), Some(detail), "{status} {body:?}");
+        assert_eq!(check.fix.as_deref(), Some(fix), "{status} {body:?}");
+    }
+}
+
+/// A fenced server answers its liveness probe, so its own checks still run
+/// after the reachability check fails; a storage state a newer server
+/// reports reads as an open one.
+#[tokio::test]
+async fn a_fenced_server_still_runs_its_checks_and_an_unknown_state_reads_as_open() {
+    let server = health_answering(
+        200,
+        Some(serde_json::json!({"ready": false, "mode": "writer", "storage": "fenced"})),
+    )
+    .await;
+    let mut checks = Vec::new();
+    server_checks(&server.uri(), None, &mut checks).await;
+    assert_eq!(checks[0].status, Status::Fail);
+    assert_eq!(checks[1].id, "server.diagnostics");
+
+    let server = health_answering(
+        200,
+        Some(serde_json::json!({"ready": true, "mode": "reader", "storage": "draining"})),
+    )
+    .await;
+    let mut checks = Vec::new();
+    server_checks(&server.uri(), None, &mut checks).await;
+    assert_eq!(checks[0].status, Status::Pass);
+    assert_eq!(checks[0].detail.as_deref(), Some("Running as a reader."));
+}
+
 #[tokio::test]
 async fn diagnostics_errors_and_bad_reports_are_skipped_with_their_cause() {
     for (response, expected) in [

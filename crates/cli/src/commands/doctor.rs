@@ -88,6 +88,32 @@ struct ServerReport {
     checks: Vec<Check>,
 }
 
+/// What a server's `GET /healthz` body says. Each field is absent from an
+/// older server's body, and all are from a body that is not a server's.
+#[derive(Debug, Default, Deserialize)]
+struct Health {
+    ready: Option<bool>,
+    mode: Option<String>,
+    storage: Option<ReportedStorage>,
+    index_runtime: Option<String>,
+}
+
+/// The state of a server's storage, as its health reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ReportedStorage {
+    Open,
+    /// A newer writer opened the same storage.
+    Fenced,
+    /// A storage task failed.
+    Failed,
+    /// The server closed its storage to shut down.
+    Closed,
+    /// A state a newer server reports.
+    #[serde(other)]
+    Unknown,
+}
+
 /// Which instance was diagnosed.
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -467,24 +493,8 @@ async fn server_checks(url: &str, instance: Option<&str>, checks: &mut Vec<Check
         }
         None => "Check the URL, and that the server is running and reachable from here.".into(),
     };
-    let health = match health {
-        Ok(response) if response.status().is_success() => response
-            .json::<serde_json::Value>()
-            .await
-            .unwrap_or_default(),
-        Ok(response) => {
-            checks.push(Check::new(
-                "server.reachable",
-                format!("The server at {url} answered HTTP {}", response.status()),
-                Verdict::Fail {
-                    detail: Some(
-                        "GET /healthz answers 503 only once the server's storage failed.".into(),
-                    ),
-                    fix: unreachable_fix,
-                },
-            ));
-            return None;
-        }
+    let response = match health {
+        Ok(response) => response,
         Err(error) => {
             checks.push(Check::new(
                 "server.reachable",
@@ -497,8 +507,12 @@ async fn server_checks(url: &str, instance: Option<&str>, checks: &mut Vec<Check
             return None;
         }
     };
-    let reachable = match (health["ready"].as_bool(), health["storage"].as_str()) {
-        (Some(false), Some("fenced")) => Check::new(
+    let status = response.status();
+    // A body that is not a server's health, such as a proxy's error page,
+    // says nothing of the server.
+    let health = response.json::<Health>().await.unwrap_or_default();
+    let reachable = match health.storage {
+        Some(ReportedStorage::Fenced) => Check::new(
             "server.reachable",
             format!("The server at {url} was fenced by another writer"),
             Verdict::Fail {
@@ -506,28 +520,86 @@ async fn server_checks(url: &str, instance: Option<&str>, checks: &mut Vec<Check
                 fix: "Stop it, or restart it once the other writer is gone.".into(),
             },
         ),
-        (Some(false), _) => Check::new(
+        Some(ReportedStorage::Failed) => Check::new(
             "server.reachable",
-            format!("The server at {url} is not ready"),
-            Verdict::Warn {
-                detail: format!(
-                    "Index runtime: {}.",
-                    health["index_runtime"].as_str().unwrap_or("unknown")
+            format!("The server at {url} reports that its storage failed"),
+            Verdict::Fail {
+                detail: Some(
+                    "A storage task failed, so it serves no request until it restarts.".into(),
                 ),
-                fix: "Wait for startup to finish; GET /readyz answers 200 once it has.".into(),
+                fix: match instance {
+                    Some(instance) => format!(
+                        "Check `helix logs {instance}` for the failure, then `helix restart \
+                         {instance}`."
+                    ),
+                    None => "Check its logs for the failure, then restart it.".into(),
+                },
             },
         ),
-        (Some(true) | None, _) => Check::new(
+        Some(ReportedStorage::Closed) => Check::new(
             "server.reachable",
-            format!("The server answers at {url}"),
-            Verdict::Pass(
-                health["mode"]
-                    .as_str()
-                    .map(|mode| format!("Running as a {mode}.")),
-            ),
+            format!("The server at {url} is shutting down"),
+            Verdict::Fail {
+                detail: Some("It closed its storage and serves no more requests.".into()),
+                fix: match instance {
+                    Some(instance) => {
+                        format!("Wait for it to exit, then `helix start {instance}`.")
+                    }
+                    None => "Wait for it to exit, then start it again.".into(),
+                },
+            },
         ),
+        Some(ReportedStorage::Open | ReportedStorage::Unknown) | None
+            if !status.is_success() =>
+        {
+            let detail = match status {
+                reqwest::StatusCode::NOT_FOUND => {
+                    "Nothing there serves GET /healthz: the URL may not point at a Helix server."
+                }
+                reqwest::StatusCode::BAD_GATEWAY
+                | reqwest::StatusCode::SERVICE_UNAVAILABLE
+                | reqwest::StatusCode::GATEWAY_TIMEOUT => {
+                    "A proxy in front of the server answered: the server behind it may be down \
+                     or still starting."
+                }
+                _ => {
+                    "A Helix server answers GET /healthz with its storage state, and this \
+                     answer had none."
+                }
+            };
+            Check::new(
+                "server.reachable",
+                format!("The server at {url} answered HTTP {status}"),
+                Verdict::Fail {
+                    detail: Some(detail.into()),
+                    fix: unreachable_fix,
+                },
+            )
+        }
+        Some(ReportedStorage::Open | ReportedStorage::Unknown) | None => match health.ready {
+            Some(false) => Check::new(
+                "server.reachable",
+                format!("The server at {url} is not ready"),
+                Verdict::Warn {
+                    detail: format!(
+                        "Index runtime: {}.",
+                        health.index_runtime.as_deref().unwrap_or("unknown")
+                    ),
+                    fix: "Wait for startup to finish; GET /readyz answers 200 once it has.".into(),
+                },
+            ),
+            Some(true) | None => Check::new(
+                "server.reachable",
+                format!("The server answers at {url}"),
+                Verdict::Pass(health.mode.map(|mode| format!("Running as a {mode}."))),
+            ),
+        },
     };
     checks.push(reachable);
+    // Only a server that answered as one runs its own checks.
+    if !status.is_success() {
+        return None;
+    }
     let response = client
         .get(format!("{url}/v2/diagnostics"))
         .timeout(DIAGNOSTICS_TIMEOUT)
