@@ -1,0 +1,192 @@
+---
+title: "What is entity resolution?"
+description: "Entity resolution decides when different records or mentions refer to the same real-world thing, so its facts are joined into one entity instead of scattered."
+sidebarTitle: "Entity resolution"
+pageType: "Concept"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="purple" size="sm">Concept</Badge></div>
+
+Entity resolution is the work of deciding when different records or mentions refer to
+the same real-world thing. Think of a receptionist who knows that "J. Smith", "Jane
+Smith", and "jane@example.com" are one visitor. In data, it joins a customer in the
+billing system, the same company in the CRM, and "the Client" in a contract into one
+entity, so every fact about it lands in one place in the
+[knowledge graph](/learn/graph-databases/what-is-a-knowledge-graph).
+
+<div className="learn-objectives">
+  <Card title="Learning objectives" icon="graduation-cap">
+    After reading this article you will be able to:
+
+    - Explain what entity resolution does and the two ways it can fail
+    - Describe the main matching techniques, from exact keys to embeddings
+    - Outline a resolution pipeline with blocking, scoring, and review
+    - Describe how to keep resolution decisions across reloads
+  </Card>
+</div>
+
+## Why is entity resolution needed?
+
+Because every system names things its own way. Billing knows a customer by account ID,
+the CRM by company name, support by email domain, and a contract by whatever the
+lawyers wrote. Without resolution, a question such as "how much has this customer paid,
+and what did they complain about?" sees four strangers instead of one customer.
+
+It goes by other names depending on the field: record linkage, deduplication, identity
+resolution, or entity matching. When the input is free text, linking a mention to a
+known record is also called entity linking.
+
+## How can entity resolution go wrong?
+
+It fails in two directions, and both corrupt answers:
+
+| Failure | What happens | Example |
+| --- | --- | --- |
+| False merge | Two different things become one entity | Two companies named "Acme" share contracts and invoices |
+| Missed match | One thing stays split across several entities | "Northwind Ltd" and "Northwind Limited" each hold half the history |
+
+A false merge is usually worse: it attaches facts to the wrong entity, and an AI answer
+built on it, as in [GraphRAG](/learn/ai-memory/what-is-graphrag), confidently reports
+the wrong customer. A missed match makes answers incomplete. Good pipelines prefer to
+hold an uncertain match for a person rather than guess.
+
+<div className="learn-cta">
+  <Card title="Try Helix Foundry" icon="rocket" href="/foundry/start-here/quickstart" cta="Get started">
+    Link your tables and documents into one graph in HelixDB, and review the matches a load is unsure of.
+  </Card>
+</div>
+
+## How does entity resolution match records?
+
+Start with the strongest evidence and fall back to weaker signals: shared identifiers
+first, then normalized names and attributes, then similarity of meaning.
+
+- **Exact identifiers.** Shared keys such as a tax ID, an email address, or a domain
+  match records with near certainty. An
+  [ontology](/learn/ontologies/what-is-an-ontology) usually names each type's
+  identifiers.
+- **Normalized values.** Lowercasing, stripping suffixes such as "Inc." or "Ltd", and
+  standardizing phone numbers turn near-duplicates into exact matches.
+- **Fuzzy string similarity.** Edit distance or token overlap scores names that differ
+  by typos or word order.
+- **Embedding similarity.** [Vector embeddings](/learn/vector-search/what-are-vector-embeddings)
+  of names and descriptions find candidates that mean the same thing in different
+  words, such as "the billing page" and "the invoices screen". A
+  [vector search](/learn/vector-search/what-is-vector-search) returns the nearest
+  existing entities to compare against.
+- **Context.** Two mentions that share neighbors, such as the same contact person or
+  the same address, are likelier to be the same entity. A
+  [graph database](/learn/graph-databases/what-is-a-graph-database) makes these
+  neighbor checks a short traversal.
+
+An LLM can judge hard candidates by reading both records and their context, but treat
+its verdict as one score among several, not as the final word.
+
+## What are the steps of an entity resolution pipeline?
+
+Narrow the candidates, score each pair, decide automatically where the evidence is
+strong, and send the rest to a person.
+
+<Steps>
+  <Step title="Standardize">
+    Normalize names, addresses, and identifiers so equal things look equal.
+  </Step>
+  <Step title="Block">
+    Comparing every record with every other grows with the square of the data. Blocking
+    compares only records that share a cheap key, such as the same domain or the same
+    first letters of a name, or that are nearest neighbors in an embedding index.
+  </Step>
+  <Step title="Score">
+    Combine the signals for each candidate pair into a match score.
+  </Step>
+  <Step title="Decide">
+    Merge above a high threshold, keep apart below a low one, and hold everything in
+    between for review.
+  </Step>
+  <Step title="Review and record">
+    A person settles held pairs, and each decision is stored so it applies again next
+    time instead of being asked twice.
+  </Step>
+</Steps>
+
+## How do you keep entity resolution correct over time?
+
+Treat matches as decisions with a history, not as a one-time merge.
+
+- **Keep the evidence.** Record why two records were linked, with the
+  [provenance](/learn/ontologies/what-is-data-provenance) of each, so a bad merge can be
+  found and undone.
+- **Link, don't overwrite.** Keep source records intact and link them to one resolved
+  entity. Splitting a false merge is then a matter of removing links.
+- **Store human decisions.** A person's "these are the same" or "these are different"
+  should survive every reload and outrank automatic scores.
+- **Re-resolve as data arrives.** A new record can reveal that two existing entities are
+  one, or that one should be split. The same applies to
+  [AI agent memory](/learn/ai-memory/what-is-ai-agent-memory), where facts about one
+  user arrive over many conversations.
+
+## How does Helix Foundry resolve entities?
+
+[Helix Foundry](/foundry/start-here/introduction) links what documents mention to the
+records its tables load into HelixDB, and holds what it is unsure of for a person:
+
+- **Identifiers in the ontology.** Each type in a version lists its keys and
+  identifiers, and an [edit](/foundry/ontologies/generate-and-version#edit-a-version)
+  can change a type's identifiers as a new version.
+- **Names in documents.** A [load](/foundry/ontologies/load-data) links the names a
+  document mentions to records. A name it matched to no record, to several, or only
+  loosely waits on the [Review](/foundry/ontologies/review) page, grouped under reasons
+  such as **Could mean more than one entity**.
+- **Saved decisions.** **Link this name to** a record applies here and in other
+  documents where nothing else links that name; **Not in data** says no record is meant,
+  for that document only. Decisions are saved for the ontology, so later loads read
+  them too, and **Undo link** takes a loose link back from the next load.
+
+## Frequently asked questions
+
+### Is entity resolution the same as deduplication?
+
+Deduplication is entity resolution within one dataset: finding repeated records and
+keeping one. Entity resolution also links records across datasets and links text
+mentions to records.
+
+### Can embeddings alone resolve entities?
+
+No. Embeddings are good at finding candidates that mean the same thing, but two
+different companies in the same industry can have very similar embeddings. Combine them
+with identifiers, attributes, and review.
+
+### How accurate does entity resolution need to be?
+
+It depends on the cost of each failure. For billing or compliance, prefer holding
+uncertain matches over guessing. For exploratory search, a few missed matches may be
+acceptable.
+
+### Should entity resolution happen before or after loading a graph?
+
+Both. Resolve what you can while loading, using identifiers and normalized values, then
+keep resolving as new records and documents arrive, because new evidence changes old
+decisions.
+
+## Related topics
+
+<CardGroup cols={2}>
+  <Card title="What is an ontology?" icon="sitemap" href="/learn/ontologies/what-is-an-ontology">
+    Shared types, links, identifiers, and rules for data from many systems.
+  </Card>
+  <Card title="What is data provenance?" icon="fingerprint" href="/learn/ontologies/what-is-data-provenance">
+    Recording where every value came from, so answers can be checked.
+  </Card>
+  <Card title="What is a knowledge graph?" icon="circle-nodes" href="/learn/graph-databases/what-is-a-knowledge-graph">
+    Connected facts organized by an ontology, with their sources.
+  </Card>
+  <Card title="What are vector embeddings?" icon="vector-square" href="/learn/vector-search/what-are-vector-embeddings">
+    Numbers that capture meaning, used to find similar candidates.
+  </Card>
+  <Card title="What is GraphRAG?" icon="share-nodes" href="/learn/ai-memory/what-is-graphrag">
+    Retrieval that follows relationships, and why resolution matters to it.
+  </Card>
+  <Card title="What is AI agent memory?" icon="memory" href="/learn/ai-memory/what-is-ai-agent-memory">
+    Working, episodic, and semantic memory for LLM agents.
+  </Card>
+</CardGroup>

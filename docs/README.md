@@ -71,10 +71,12 @@ structure is fixed:
 - Link each concept another Learn page covers on its first mention, aiming for at least
   eight Learn links per 1,000 words.
 - Add one call-to-action block (`<div className="learn-cta">` wrapping a `Card` titled
-  "Try HelixDB") after the second or third section.
+  "Try HelixDB", or "Try Helix Foundry" on Ontologies and company data pages) after the
+  second or third section.
 - Teach the concept vendor-neutrally. Do not name or characterize other vendors.
-- Keep HelixDB to one `## How does HelixDB ...?` section near the end, stating only facts the
-  product docs already support, and link to the guides.
+- Keep HelixDB to one `## How does HelixDB ...?` section near the end (`## How does Helix
+  Foundry ...?` on Ontologies and company data pages), stating only facts the product docs
+  already support, and link to the guides.
 - End with `## Frequently asked questions` (question-phrased `###` headings with visible
   answers, not accordions) and `## Related topics`.
 - Add every new page as a question link on the `/learn` tile page, link it from the related

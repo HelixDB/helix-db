@@ -581,6 +581,9 @@ On a document's page, owners and admins can:
 
 ## How ontologies read documents
 
+For the ideas behind reading documents into facts, see
+[How do you extract structured data from documents?](/learn/ontologies/extract-structured-data-from-documents)
+
 An ontology doesn't read every document in the workspace. Each version reads the sets
 its generation picked:
 
@@ -1197,6 +1200,8 @@ into. A workspace can have several ontologies, one per database, and each reads 
 workspace's [data](/foundry/data/connect-data) and
 [documents](/foundry/data/documents) its versions pick.
 
+New to ontologies? Start with [What is an ontology?](/learn/ontologies/what-is-an-ontology)
+
 ## The Ontologies panel
 
 In **Ontologies**, the panel beside the sidebar lists the workspace's ontologies, each
@@ -1576,7 +1581,8 @@ A [load](/foundry/ontologies/load-data) settles most of what your documents say 
 itself. What it can't settle, it holds for a person: a claim it wasn't sure of, a value
 documents state differently, or a name it couldn't link to one record. The ontology's
 **Review** page lists all of it for the current load in one queue, so you can decide
-each item once.
+each item once. For the ideas behind linking names to records, see
+[What is entity resolution?](/learn/ontologies/what-is-entity-resolution)
 
 ## Open Review
 
@@ -1773,7 +1779,8 @@ Page type: Guide
 
 **Records** is the Explorer's table view: one type at a time, searchable and sortable,
 with every record's links and where it came from. An entity's page gathers everything
-the load knows about one record.
+the load knows about one record. For why every value names its source, see
+[What is data provenance?](/learn/ontologies/what-is-data-provenance)
 
 ## Read a type as a table
 
@@ -17910,12 +17917,28 @@ A graph database stores entities as nodes and relationships as edges, so questio
     [Why build a database on object storage?](/learn/database-architecture/object-storage-databases)
     [Do you need separate graph, vector, and text databases?](/learn/database-architecture/one-database-for-graph-vector-and-text)
 
+    An ontology gives the data spread across a company's systems one shared shape, so
+    records join into one graph whose every fact can be traced to its source.
+
+    [What is an ontology?](/learn/ontologies/what-is-an-ontology)
+    [What is data provenance?](/learn/ontologies/what-is-data-provenance)
+    [What is entity resolution?](/learn/ontologies/what-is-entity-resolution)
+    [How do you extract structured data from documents?](/learn/ontologies/extract-structured-data-from-documents)
+    [What is a semantic layer?](/learn/ontologies/what-is-a-semantic-layer)
+
     HelixDB is an open-source graph database with native vector search and BM25
     full-text search, built on object storage.
 
     [Get started in a few commands](/database/helix-db/start-here/quickstart)
     [Read the introduction](/database/helix-db/start-here/introduction)
     [Understand the data model](/database/helix-db/core-concepts/data-model)
+
+    Helix Foundry connects your company's databases, apps, and documents, drafts an
+    ontology over them, and loads them into HelixDB as one cited graph.
+
+    [Read what Foundry is](/foundry/start-here/introduction)
+    [Go from sign-in to a first answer](/foundry/start-here/quickstart)
+    [Try the sample company](/foundry/start-here/sample-company)
 
 # What is a graph database?
 
@@ -18430,7 +18453,9 @@ chatbots, in connected, checkable facts.
 
 A knowledge graph holds things (entities), the named connections between them
 (relationships), details about both (attributes), and a record of where each fact came
-from (provenance). A schema or ontology sets the rules for which types are allowed.
+from ([provenance](/learn/ontologies/what-is-data-provenance)). A schema or
+[ontology](/learn/ontologies/what-is-an-ontology) sets the rules for which types are
+allowed.
 
 | Part | What it is | Example |
 | --- | --- | --- |
@@ -18498,7 +18523,8 @@ database.
     entities and relationships it finds in a fixed format that matches the ontology,
     and rejects output that does not validate against the schema.
 
-    Entity resolution decides when two mentions refer to the same thing. One ticket
+    [Entity resolution](/learn/ontologies/what-is-entity-resolution) decides when two
+    mentions refer to the same thing. One ticket
     says "the billing page" and another says "the invoices screen"; both may mean one
     feature. Typical techniques combine exact identifiers, normalized names,
     [embedding](/learn/vector-search/what-are-vector-embeddings) similarity to find
@@ -18587,8 +18613,9 @@ the same write batch. Start with the
 
 ### What is the difference between a knowledge graph and an ontology?
 
-An ontology is a formal specification of a domain: the types of entities and
-relationships and the rules that govern them, such as class hierarchies and constraints.
+An [ontology](/learn/ontologies/what-is-an-ontology) is a formal specification of a
+domain: the types of entities and relationships and the rules that govern them, such as
+class hierarchies and constraints.
 The knowledge graph's instance data, its entities and facts, follows the ontology, and
 many systems store the ontology in the graph alongside that data. One ontology can
 describe many knowledge graphs.
@@ -18624,7 +18651,7 @@ points, and the graph to follow facts from there.
 
     Retrieval that follows relationships, compared with vector RAG.
 
-    Working, episodic, and semantic memory for LLM agents.
+    Shared types, links, and rules for data from many systems.
 
 # What is a property graph?
 
@@ -21433,8 +21460,9 @@ Under the hood, common patterns include:
   language-processing pipeline reads each chunk and lists its entities, such as people,
   products, services, and contracts, plus typed relationships between them. Each chunk
   links to the entities it mentions.
-- **Entity resolution.** Mentions that refer to the same thing, such as "the billing
-  service" and "billing-svc", are merged into one node so the facts about it connect.
+- **[Entity resolution](/learn/ontologies/what-is-entity-resolution).** Mentions that
+  refer to the same thing, such as "the billing service" and "billing-svc", are merged
+  into one node so the facts about it connect.
 - **Graph expansion from retrieved nodes.** Vector or
   [keyword search](/learn/full-text-search/what-is-full-text-search) finds entry points,
   and a bounded traversal (a walk along edges with a depth limit) collects neighboring
@@ -22508,4 +22536,861 @@ specific need later. It means you add the seams only when a workload justifies t
     Nodes, edges, and traversals for connected data.
 
     Separating storage from compute, and what it means for cost.
+
+# What is an ontology?
+
+Page type: Concept
+
+An ontology is a shared definition of the kinds of things a domain contains, how they
+connect, and the rules they follow. Think of it as the legend on a map: it says what
+each symbol means, so everyone reading the map reads it the same way. In data work, an
+ontology names types such as `Customer`, `Contract`, and `Invoice`, the links allowed
+between them, and the rules the data must pass, so records from many systems land in
+one consistent [knowledge graph](/learn/graph-databases/what-is-a-knowledge-graph).
+
+    After reading this article you will be able to:
+
+    - Name the parts of an ontology: types, properties, links, identifiers, and rules
+    - Explain how an ontology differs from a database schema
+    - Describe why an ontology helps when data lives in many systems
+    - Outline how to build and version an ontology over real data
+
+## What is in an ontology?
+
+An ontology lists types of things, the properties each type has, the links between
+types, how to tell two records of a type apart, and rules the data should follow.
+
+| Part | What it is | Example |
+| --- | --- | --- |
+| Type | A kind of thing the domain contains | `Customer`, `Contract`, `SupportTicket` |
+| Property | A typed value every record of a type can carry | A contract's `startDate`, a customer's `plan` |
+| Link | A named, directed connection between two types | A `Contract` is `SIGNED_BY` a `Customer` |
+| Identifier | The values that pick out one record of a type | A customer's account ID or email domain |
+| Rule or constraint | A condition the data must pass, or a fact derived from others | "Every invoice belongs to exactly one customer" |
+
+For example, a software company's ontology might connect customers, the contracts they
+sign, the invoices billed against those contracts, and the tickets they open:
+
+```mermaid
+flowchart LR
+    cust["Customer"] -->|SIGNED| contract["Contract"]
+    invoice["Invoice"] -->|BILLED_UNDER| contract
+    cust -->|OPENED| ticket["SupportTicket"]
+    ticket -->|ABOUT| product["Product"]
+    contract -->|COVERS| product
+```
+
+The ontology describes shapes, not instances. `Customer` is in the ontology; a
+particular customer is a record in the graph that follows it. Stored in a
+[graph database](/learn/graph-databases/what-is-a-graph-database), types usually become
+node labels and links become edge labels, as in a
+[property graph](/learn/graph-databases/what-is-a-property-graph).
+
+## What is the difference between an ontology and a schema?
+
+A schema says how data is stored; an ontology says what the data means. A schema is
+like a filing cabinet's drawer labels, and an ontology is the company glossary that
+explains what each label refers to and how the files relate.
+
+| | Database schema | Ontology |
+| --- | --- | --- |
+| Main concern | Tables, columns, types, and keys for one system | Concepts, their links, and their meaning across systems |
+| Scope | Usually one database | A whole domain, spanning many sources |
+| Relationships | Foreign keys, often unnamed | Named, directed links such as `SIGNED_BY` |
+| Rules | Storage constraints such as `NOT NULL` | Business rules, and sometimes facts derived from other facts |
+| Hierarchies | Rare | Common: a `Laptop` is a kind of `Product` |
+
+The two are complementary. A mapping connects them: it says which table and columns
+fill each type and link, so the same `Customer` can be filled from a billing system and
+a CRM at once. Formal ontology languages, such as OWL in the RDF world, add precise
+semantics and automated inference; see
+[property graph vs RDF](/learn/graph-databases/property-graph-vs-rdf). Application
+ontologies over a property graph tend to be lighter: types, links, identifiers, and
+rules the data is checked against.
+
+    Connect your company's data, let an agent draft an ontology over it, and load it into HelixDB as one graph.
+
+## Why does a business need an ontology?
+
+Because the same thing is described differently in every system. Billing calls it an
+account, the CRM calls it a company, and a contract PDF calls it "the Client". An
+ontology gives them one name and one shape, so a question about customers means the
+same thing whichever system the answer comes from.
+
+That pays off in three places:
+
+- **Questions across systems.** "Which customers with open support tickets have a
+  contract renewing this quarter?" needs tickets, contracts, and customers joined by
+  meaning, not by whichever IDs each system happens to use.
+- **AI grounding.** A language model answers better from typed, connected facts than
+  from loose text. Retrieval that follows links, often called
+  [GraphRAG](/learn/ai-memory/what-is-graphrag), needs an ontology to know which links
+  exist. It also gives [retrieval-augmented generation (RAG)](/learn/ai-memory/what-is-rag)
+  and [agent memory](/learn/ai-memory/what-is-ai-agent-memory) a fixed shape to store
+  facts in.
+- **Trust.** Rules catch records that break expectations, and identifiers decide when
+  two records are the same thing, the job of
+  [entity resolution](/learn/ontologies/what-is-entity-resolution). Each fact can
+  carry its source, its [provenance](/learn/ontologies/what-is-data-provenance), so a
+  person can check it.
+
+## How do you build an ontology?
+
+Start from the questions you want answered, look at the data you already have, draft
+the smallest set of types and links that answers them, then test the draft against the
+data and revise.
+
+    List the questions the ontology must answer, in plain words. They decide which
+    types and links earn a place; anything no question needs can wait.
+
+    Inventory the tables, apps, and documents that hold the answers. Structured tables
+    map onto types almost directly. Documents such as contracts or call notes hold
+    facts that need [extraction](/learn/ontologies/extract-structured-data-from-documents).
+
+    Name each type and link, list each type's properties, and choose identifiers that
+    pick out one record. An LLM can draft this from samples of your data and your
+    questions, but a person should read the draft.
+
+    Say which table and columns fill each type and link, and which documents may fill
+    which types. Mappings let the ontology stay stable while sources change.
+
+    Add constraints the data should pass, such as cardinality ("one customer per
+    contract"), and rules that derive new facts from existing ones.
+
+    Load real data, look at what breaks the rules or fails to link, and revise. Keep
+    each revision as a new version rather than editing in place.
+
+## How do you change an ontology over time?
+
+Treat it like code: make each change a new, immutable version, review it, choose which
+version is current, and roll back by making an older one current.
+
+- **Version, don't edit.** A version that never changes can be compared, cited, and
+  restored. Loads record which version they followed.
+- **Reload after a change.** A new type or link only holds data once the sources are
+  loaded through it again. Keeping the previous load alongside the new one lets you
+  compare them before switching.
+- **Grow with the questions.** When a new question needs a link the ontology lacks, add
+  the link in a new version instead of forcing the data into an existing one.
+
+## How does Helix Foundry build an ontology?
+
+[Helix Foundry](/foundry/start-here/introduction) drafts and versions ontologies over a
+company's data and loads them into a HelixDB database:
+
+- **An agent drafts each version.** A
+  [generation](/foundry/ontologies/generate-and-version) reads the synced tables, API
+  sources, and document sets you choose, plus the questions you write, and drafts types,
+  links, mappings, document routes, rules, and the questions the version should answer.
+  The agent may stop to ask what only you can answer.
+- **Versions never change.** Each draft is stored beside the others, with tabs for its
+  types (with their keys and identifiers), links, mappings, sources, rules, and its
+  `ontology.toml` and `mappings.toml`. Edits to routes, identifiers, rules, and
+  constraints make a new version. You choose the current version and roll back by
+  making an older one current.
+- **Loads follow the current version.** A [load](/foundry/ontologies/load-data) writes
+  the current version's tables and documents into the ontology's HelixDB database, and
+  lists the records that break its constraints. Rules can derive facts that an entity's
+  page shows, worked out when read and never stored.
+
+Start with the [Foundry quickstart](/foundry/start-here/quickstart) or the
+[sample company](/foundry/start-here/sample-company).
+
+## Frequently asked questions
+
+### Is an ontology the same as a knowledge graph?
+
+No. The ontology defines the types, links, and rules; the
+[knowledge graph](/learn/graph-databases/what-is-a-knowledge-graph) is the data that
+follows them. One ontology can describe many graphs, such as a test load and a
+production load.
+
+### Do you need OWL or RDF to have an ontology?
+
+No. OWL and RDF are standards suited to publishing and reasoning over shared
+vocabularies. An application ontology over a
+[property graph](/learn/graph-databases/what-is-a-property-graph) works well when the
+goal is querying and grounding AI on your own data.
+
+### Can an LLM write an ontology?
+
+An LLM can draft one quickly from data samples and your questions, and it is good at
+naming types and spotting links. It can also invent links the data does not support or
+miss a rule only your team knows, so review each draft and test it against real data.
+
+### What is the difference between an ontology and a semantic layer?
+
+A [semantic layer](/learn/ontologies/what-is-a-semantic-layer) defines metrics, such as
+monthly revenue, so every report computes them the same way from warehouse tables. An
+ontology defines entities and how they connect across every system and document. Many
+companies use both.
+
+### How big should an ontology be?
+
+As small as the questions allow. A few dozen types answer most business questions; a
+large ontology nobody loads data into is harder to maintain than a small one that is
+used every day.
+
+## Related topics
+
+    The connected facts an ontology organizes.
+
+    Deciding when records and mentions refer to the same thing.
+
+    Recording where every value came from, so answers can be checked.
+
+    Labeled nodes and edges with typed properties on both.
+
+    Two ways to model a knowledge graph, compared side by side.
+
+    Retrieval that follows relationships, compared with vector RAG.
+
+# What is data provenance?
+
+Page type: Concept
+
+Data provenance is the record of where a piece of data came from and how it got there.
+Think of it as a footnote on every fact: a customer's renewal date points to the table
+row that holds it, and a contract term points to the sentence in the PDF that states
+it. With provenance, a person or an AI answer can cite each claim, a wrong value can be
+traced to its source, and deleting a source tells you exactly which facts to remove.
+
+    After reading this article you will be able to:
+
+    - Describe what a provenance record holds, from source to method
+    - Explain how provenance differs from data lineage
+    - Describe how to model provenance in a graph
+    - Explain how provenance makes AI answers checkable
+
+## What does provenance record?
+
+A provenance record says which source a value came from, where in that source, when it
+was read, and how it was produced. For values pulled out of text, it also records how
+confident the extraction was.
+
+| Field | What it says | Example |
+| --- | --- | --- |
+| Source | The system or file the value came from | The billing database, `contract-0142.pdf` |
+| Location | Where in the source | Row `cus_81` of the `customers` table, page 3 of the PDF |
+| Evidence | The exact text or value read | "The term renews annually on March 1" |
+| Time | When it was read, and when the source said it | Synced on May 2; document dated April 28 |
+| Method | How it was produced | Copied from a column, extracted by an LLM, derived by a rule |
+| Confidence | How sure the method was | A verifier's score of 0.92 |
+
+Provenance can attach at different grains: a whole record, one property, or one
+relationship. Property-level provenance matters most when one entity is filled from
+several sources, for example a customer whose name comes from the CRM and whose plan
+comes from billing.
+
+## What is the difference between data provenance and data lineage?
+
+Provenance is about one value: where did this fact come from? Lineage is about the
+pipeline: which jobs and tables does data flow through on its way to this report?
+Provenance is the receipt for one purchase; lineage is the supply chain.
+
+| | Data provenance | Data lineage |
+| --- | --- | --- |
+| Question | Where did this value come from? | How does data move between systems? |
+| Grain | A record, a value, or a single fact | Datasets, tables, columns, and jobs |
+| Typical use | Citations, audits, corrections, deletion | Impact analysis, debugging pipelines |
+| Stored | Next to the data, often per fact | In a catalog or pipeline metadata |
+
+Many teams use both. Lineage tells you a dashboard depends on the billing table;
+provenance tells you which row in that table produced the number you are looking at.
+
+    Load your company's data into HelixDB with every value linked to the row or quote it came from.
+
+## Why does provenance matter for AI answers?
+
+Because an answer you cannot check is hard to trust. When each fact carries its source,
+an AI application can cite the row or quote behind every claim, and a person can open
+it and see whether the claim holds.
+
+[Retrieval-augmented generation (RAG)](/learn/ai-memory/what-is-rag) already cites the
+passages it retrieved. A [knowledge graph](/learn/graph-databases/what-is-a-knowledge-graph)
+with provenance goes further: an answer assembled from several connected facts, as in
+[GraphRAG](/learn/ai-memory/what-is-graphrag), can cite each fact separately.
+Provenance also helps when facts are wrong:
+
+- **Debugging.** A bad answer traces back to the fact it used, and that fact traces back
+  to a source row or an extraction that misread a sentence.
+- **Confidence.** Facts an LLM extracted can carry a score, so low-confidence facts can
+  be held for a person instead of shown as settled.
+- **Deletion and freshness.** When a document is removed or replaced, provenance names
+  every fact it produced, which is how
+  [long-term agent memory](/learn/ai-memory/long-term-memory-for-ai-agents) honors a
+  deletion request.
+
+## How do you model provenance in a graph?
+
+Store each source as a node and connect facts to it, or store the source details as
+properties on the relationship the fact describes. A
+[property graph](/learn/graph-databases/what-is-a-property-graph) suits both because
+nodes and edges carry their own properties.
+
+```mermaid
+flowchart LR
+    cust["Customer<br/>customer-a"] -->|SIGNED| contract["Contract<br/>MSA 2026"]
+    contract -->|STATED_IN| quote["Quote<br/>'renews annually on March 1'"]
+    quote -->|FROM| doc["Document<br/>contract-0142.pdf"]
+    cust -->|FROM_ROW| row["Row<br/>customers / cus_81"]
+```
+
+Two common patterns:
+
+- **Source nodes.** Documents, chunks, quotes, and table rows become nodes, and facts
+  link to them with edges such as `STATED_IN` or `FROM_ROW`. This suits facts many
+  sources support, and makes "what came from this document?" a one-hop query.
+- **Edge properties.** A relationship carries `source`, `extractedAt`, and
+  `confidence` as properties. This keeps the graph smaller when each fact has one
+  source.
+
+Either way, index the fields you filter on, such as the source ID or extraction time, so
+retracting a source or showing only recent facts stays fast.
+
+## What happens when sources disagree?
+
+Pick a rule, apply it the same way every time, and keep both claims' provenance. A
+common rule is to trust a system of record, such as the billing table, over text, and
+to let a newer dated document win over an older one. Values that no rule settles go to
+a person.
+
+Disagreement is often a symptom of an [entity resolution](/learn/ontologies/what-is-entity-resolution)
+problem: two records were merged that should not have been. Keeping provenance per
+value lets you see which source said what before deciding, and the
+[ontology](/learn/ontologies/what-is-an-ontology) can mark which properties may hold
+only one value.
+
+## How does Helix Foundry record provenance?
+
+[Helix Foundry](/foundry/start-here/introduction) keeps where every value came from
+when it loads a company's data into HelixDB:
+
+- **Rows and quotes.** In the Explorer's
+  [records view](/foundry/explore/records-and-entities), a record or link that came
+  from a table names its source and row; one that came from a document shows the quote,
+  linked to its place in the document. An entity's page shows each property with the
+  row or quote that states it.
+- **Cited answers.** [Questions](/foundry/ask/ask-questions) about a load are answered
+  with numbered citations to each record, table row, document quote, and rule used.
+- **Held claims and disagreements.** A link a document states but the load was not sure
+  of is held with its verifier score, and values documents state differently wait on
+  the [Review](/foundry/ontologies/review) page. When a table and documents disagree,
+  the table's value is kept unless a person chooses the document's.
+- **Removed sources.** When a connection's document is removed at the source, Foundry
+  takes it out of the current load.
+
+## Frequently asked questions
+
+### Is provenance the same as metadata?
+
+Provenance is one kind of metadata. Metadata describes data in general, such as its
+type, owner, or size; provenance specifically records origin and how the data was
+produced.
+
+### Does provenance make a graph much bigger?
+
+It adds nodes or properties, often one source link per fact. Storing sources once and
+linking to them, rather than copying text into every fact, keeps the overhead modest,
+and the ability to cite and retract usually outweighs it.
+
+### Can you add provenance after loading data?
+
+Only partly. The source, location, and method are easiest to capture at load time; once
+values from several sources are merged without it, the link back is lost. Record
+provenance as data is written.
+
+### How does provenance help with compliance?
+
+It answers "where did this come from?" and "what did this source produce?" directly.
+That supports audits and requests to correct or delete data tied to one source.
+
+## Related topics
+
+    Shared types, links, and rules for data from many systems.
+
+    Deciding when records and mentions refer to the same thing.
+
+    Connected facts organized by an ontology, with their sources.
+
+    Grounding a model's answer in data retrieved at query time.
+
+    Retrieval that follows relationships, compared with vector RAG.
+
+    Storing, updating, and deleting what an agent remembers.
+
+# What is entity resolution?
+
+Page type: Concept
+
+Entity resolution is the work of deciding when different records or mentions refer to
+the same real-world thing. Think of a receptionist who knows that "J. Smith", "Jane
+Smith", and "jane@example.com" are one visitor. In data, it joins a customer in the
+billing system, the same company in the CRM, and "the Client" in a contract into one
+entity, so every fact about it lands in one place in the
+[knowledge graph](/learn/graph-databases/what-is-a-knowledge-graph).
+
+    After reading this article you will be able to:
+
+    - Explain what entity resolution does and the two ways it can fail
+    - Describe the main matching techniques, from exact keys to embeddings
+    - Outline a resolution pipeline with blocking, scoring, and review
+    - Describe how to keep resolution decisions across reloads
+
+## Why is entity resolution needed?
+
+Because every system names things its own way. Billing knows a customer by account ID,
+the CRM by company name, support by email domain, and a contract by whatever the
+lawyers wrote. Without resolution, a question such as "how much has this customer paid,
+and what did they complain about?" sees four strangers instead of one customer.
+
+It goes by other names depending on the field: record linkage, deduplication, identity
+resolution, or entity matching. When the input is free text, linking a mention to a
+known record is also called entity linking.
+
+## How can entity resolution go wrong?
+
+It fails in two directions, and both corrupt answers:
+
+| Failure | What happens | Example |
+| --- | --- | --- |
+| False merge | Two different things become one entity | Two companies named "Acme" share contracts and invoices |
+| Missed match | One thing stays split across several entities | "Northwind Ltd" and "Northwind Limited" each hold half the history |
+
+A false merge is usually worse: it attaches facts to the wrong entity, and an AI answer
+built on it, as in [GraphRAG](/learn/ai-memory/what-is-graphrag), confidently reports
+the wrong customer. A missed match makes answers incomplete. Good pipelines prefer to
+hold an uncertain match for a person rather than guess.
+
+    Link your tables and documents into one graph in HelixDB, and review the matches a load is unsure of.
+
+## How does entity resolution match records?
+
+Start with the strongest evidence and fall back to weaker signals: shared identifiers
+first, then normalized names and attributes, then similarity of meaning.
+
+- **Exact identifiers.** Shared keys such as a tax ID, an email address, or a domain
+  match records with near certainty. An
+  [ontology](/learn/ontologies/what-is-an-ontology) usually names each type's
+  identifiers.
+- **Normalized values.** Lowercasing, stripping suffixes such as "Inc." or "Ltd", and
+  standardizing phone numbers turn near-duplicates into exact matches.
+- **Fuzzy string similarity.** Edit distance or token overlap scores names that differ
+  by typos or word order.
+- **Embedding similarity.** [Vector embeddings](/learn/vector-search/what-are-vector-embeddings)
+  of names and descriptions find candidates that mean the same thing in different
+  words, such as "the billing page" and "the invoices screen". A
+  [vector search](/learn/vector-search/what-is-vector-search) returns the nearest
+  existing entities to compare against.
+- **Context.** Two mentions that share neighbors, such as the same contact person or
+  the same address, are likelier to be the same entity. A
+  [graph database](/learn/graph-databases/what-is-a-graph-database) makes these
+  neighbor checks a short traversal.
+
+An LLM can judge hard candidates by reading both records and their context, but treat
+its verdict as one score among several, not as the final word.
+
+## What are the steps of an entity resolution pipeline?
+
+Narrow the candidates, score each pair, decide automatically where the evidence is
+strong, and send the rest to a person.
+
+    Normalize names, addresses, and identifiers so equal things look equal.
+
+    Comparing every record with every other grows with the square of the data. Blocking
+    compares only records that share a cheap key, such as the same domain or the same
+    first letters of a name, or that are nearest neighbors in an embedding index.
+
+    Combine the signals for each candidate pair into a match score.
+
+    Merge above a high threshold, keep apart below a low one, and hold everything in
+    between for review.
+
+    A person settles held pairs, and each decision is stored so it applies again next
+    time instead of being asked twice.
+
+## How do you keep entity resolution correct over time?
+
+Treat matches as decisions with a history, not as a one-time merge.
+
+- **Keep the evidence.** Record why two records were linked, with the
+  [provenance](/learn/ontologies/what-is-data-provenance) of each, so a bad merge can be
+  found and undone.
+- **Link, don't overwrite.** Keep source records intact and link them to one resolved
+  entity. Splitting a false merge is then a matter of removing links.
+- **Store human decisions.** A person's "these are the same" or "these are different"
+  should survive every reload and outrank automatic scores.
+- **Re-resolve as data arrives.** A new record can reveal that two existing entities are
+  one, or that one should be split. The same applies to
+  [AI agent memory](/learn/ai-memory/what-is-ai-agent-memory), where facts about one
+  user arrive over many conversations.
+
+## How does Helix Foundry resolve entities?
+
+[Helix Foundry](/foundry/start-here/introduction) links what documents mention to the
+records its tables load into HelixDB, and holds what it is unsure of for a person:
+
+- **Identifiers in the ontology.** Each type in a version lists its keys and
+  identifiers, and an [edit](/foundry/ontologies/generate-and-version#edit-a-version)
+  can change a type's identifiers as a new version.
+- **Names in documents.** A [load](/foundry/ontologies/load-data) links the names a
+  document mentions to records. A name it matched to no record, to several, or only
+  loosely waits on the [Review](/foundry/ontologies/review) page, grouped under reasons
+  such as **Could mean more than one entity**.
+- **Saved decisions.** **Link this name to** a record applies here and in other
+  documents where nothing else links that name; **Not in data** says no record is meant,
+  for that document only. Decisions are saved for the ontology, so later loads read
+  them too, and **Undo link** takes a loose link back from the next load.
+
+## Frequently asked questions
+
+### Is entity resolution the same as deduplication?
+
+Deduplication is entity resolution within one dataset: finding repeated records and
+keeping one. Entity resolution also links records across datasets and links text
+mentions to records.
+
+### Can embeddings alone resolve entities?
+
+No. Embeddings are good at finding candidates that mean the same thing, but two
+different companies in the same industry can have very similar embeddings. Combine them
+with identifiers, attributes, and review.
+
+### How accurate does entity resolution need to be?
+
+It depends on the cost of each failure. For billing or compliance, prefer holding
+uncertain matches over guessing. For exploratory search, a few missed matches may be
+acceptable.
+
+### Should entity resolution happen before or after loading a graph?
+
+Both. Resolve what you can while loading, using identifiers and normalized values, then
+keep resolving as new records and documents arrive, because new evidence changes old
+decisions.
+
+## Related topics
+
+    Shared types, links, identifiers, and rules for data from many systems.
+
+    Recording where every value came from, so answers can be checked.
+
+    Connected facts organized by an ontology, with their sources.
+
+    Numbers that capture meaning, used to find similar candidates.
+
+    Retrieval that follows relationships, and why resolution matters to it.
+
+    Working, episodic, and semantic memory for LLM agents.
+
+# How do you extract structured data from documents?
+
+Page type: Concept
+
+To extract structured data from documents, define the shape you want, such as a
+contract's customer, start date, and renewal terms, then have a model read each document
+and fill that shape, keeping the quote behind every value. Check each extracted fact
+against its quote, link the names it mentions to records you already hold, and send what
+the checks cannot settle to a person. Think of it as turning a pile of paperwork into rows
+in a spreadsheet, with a footnote on every cell.
+
+    After reading this article you will be able to:
+
+    - Explain what document extraction produces: entities, facts, and their quotes
+    - Describe why a target shape, such as an ontology, comes first
+    - Outline an extraction pipeline from parsing to review
+    - Describe how to verify extracted facts and control cost
+
+## What does document extraction produce?
+
+It produces three things: the entities a document names, the facts it states about
+them, and the evidence for each fact. A sentence such as "Northwind signed the services
+agreement on March 1, 2026" yields a `Customer` named Northwind, a `Contract`, a `SIGNED`
+link between them with a `signedOn` date, and the quote that states it.
+
+| Output | What it is | Example |
+| --- | --- | --- |
+| Entity mention | A name the document uses for a thing | "Northwind", "the Client" |
+| Property value | A typed value about an entity | `signedOn = 2026-03-01` |
+| Relationship | A typed link between two entities | `Customer -[SIGNED]-> Contract` |
+| Evidence | The exact quote, and where it is | Page 2, "signed the services agreement on March 1, 2026" |
+| Confidence | How sure the check was | A verifier's score of 0.94 |
+
+Together they become part of a
+[knowledge graph](/learn/graph-databases/what-is-a-knowledge-graph): structured facts
+that can be queried, joined with tables, and cited.
+
+## Why do you need a target shape first?
+
+Because a model asked to "pull out everything important" returns something different
+for every document. A fixed shape, the types, properties, and links you want, makes
+every document's output comparable and lets you reject output that does not fit.
+
+That shape is usually an [ontology](/learn/ontologies/what-is-an-ontology). It also
+says which documents may fill which types: a contract can name a customer and a renewal
+date, while call notes can name a product and a complaint. Narrow targets extract more
+accurately than broad ones, because the model has fewer places to put a wrong answer.
+
+    Read your documents into the same HelixDB graph as your tables, with the quote behind every fact.
+
+## How does an extraction pipeline work?
+
+Parse the document into text, extract candidate facts in the target shape, verify each
+one against its quote, link names to known records, and store the result with its
+evidence.
+
+    Turn PDFs, Markdown, and text into clean text with its structure: sections, pages,
+    and tables. Table files such as CSV are better loaded as tables than read as prose.
+
+    Give a language model the target shape and a section of the document, and ask for
+    entities, properties, and relationships in a fixed format, each with the quote it
+    came from. Reject output that does not validate against the shape.
+
+    Check that each quote really appears in the document and really states the fact.
+    A second model call or rule can score each claim, so weak claims are held rather
+    than stored as settled.
+
+    Link each name to an existing record, so "the Client" in a contract becomes the
+    customer already in your billing table. This is
+    [entity resolution](/learn/ontologies/what-is-entity-resolution), and it decides
+    whether the new facts join the right entity.
+
+    Write the facts with their quotes, document, and confidence, the
+    [provenance](/learn/ontologies/what-is-data-provenance) that lets anyone check
+    them later.
+
+Extraction is a different job from chunking for
+[retrieval-augmented generation (RAG)](/learn/ai-memory/what-is-rag). RAG keeps passages
+of text and finds them with [vector search](/learn/vector-search/what-is-vector-search)
+at question time; extraction turns the text into facts ahead of time, so questions such
+as "which contracts renew next quarter?" become a query, not a search.
+
+## How do you know extracted facts are right?
+
+You check them in layers: validate the shape, verify each quote, compare with your
+tables, and have a person look at what the checks cannot settle.
+
+- **Quote verification.** A fact whose quote is missing or does not say what the fact
+  claims is dropped or held.
+- **Cross-checks with tables.** When a document disagrees with a system of record, such
+  as a different renewal date than billing holds, flag the conflict instead of picking
+  one silently.
+- **Unresolved names.** A name that matches no record, or several, is held for a person
+  rather than creating a duplicate entity.
+- **Sampling.** Reviewing a random sample of accepted claims measures how often the
+  pipeline is right at each confidence score, which tells you where to set thresholds.
+
+## How do you control the cost of extraction?
+
+Model calls are the main cost, so read each document once and only re-read what changed.
+
+- **Cache by extraction inputs.** Key results by document content, model, target shape,
+  and extraction instructions, so unchanged inputs can reuse an earlier result instead
+  of paying for a new model call.
+- **Extract incrementally.** When a document is replaced or a new one arrives, read only
+  that document. When one is deleted, its provenance says which facts to remove.
+- **Route documents.** Only read a document for the types it can fill, and skip sets no
+  question needs.
+- **Cap spend.** Set a budget per run and per month, and let a run stop partway rather
+  than overspend.
+
+## How does Helix Foundry extract data from documents?
+
+[Helix Foundry](/foundry/start-here/introduction) reads documents into the same HelixDB
+graph as a company's tables:
+
+- **Routes.** A [generation](/foundry/ontologies/generate-and-version) reads up to five
+  of the newest documents in each set it picks and drafts routes: what each set's
+  documents may fill, such as a contract's signing date and the customer it was signed
+  with.
+- **Names, facts, and quotes.** A [load](/foundry/ontologies/load-data) reads every text
+  document and PDF in the version's sets for its sections, the names it mentions, and
+  the facts it states, each with the quote it came from. AI models find the names and
+  facts and check them. Table files are loaded as tables.
+- **Review instead of guessing.** A name the database doesn't hold, an ambiguous name, a
+  quote that couldn't be verified, or a fact that conflicts with the tables waits on the
+  [Review](/foundry/ontologies/review) page instead of becoming a record. About one card
+  in ten there is a random check that measures how often claims at each score are
+  right.
+- **Paying once.** Reading the same text with the same models again costs nothing, and
+  a document added to a set the current load reads is read as it arrives. See
+  [Documents](/foundry/data/documents).
+
+## Frequently asked questions
+
+### Is document extraction the same as OCR?
+
+No. OCR (optical character recognition) turns an image of a page into text. Extraction
+starts from text and turns it into typed facts. Scanned documents need OCR first.
+
+### Can a language model extract data reliably?
+
+Reliably enough when the target shape is narrow, every fact carries its quote, and the
+quotes are checked. Without those, models can invent plausible values that no sentence
+states.
+
+### Should you extract or just use RAG?
+
+Use [RAG](/learn/ai-memory/what-is-rag) for open-ended questions over prose, and
+extraction for facts you will filter, count, or join with tables. Many applications do
+both, and a [hybrid search](/learn/full-text-search/hybrid-search) over the original
+text is still useful for finding passages.
+
+### How do you handle documents that disagree?
+
+Keep both claims with their provenance, prefer a system of record or the newer dated
+document by a fixed rule, and send what no rule settles to a person. See
+[what happens when sources disagree](/learn/ontologies/what-is-data-provenance#what-happens-when-sources-disagree).
+
+## Related topics
+
+    The target shape extraction fills.
+
+    Linking extracted names to the records you already hold.
+
+    Keeping the quote behind every extracted fact.
+
+    Where extracted facts end up, connected to everything else.
+
+    Retrieving passages at question time instead of extracting ahead.
+
+    Answering questions by following extracted facts.
+
+# What is a semantic layer?
+
+Page type: Concept
+
+A semantic layer is a set of shared definitions, such as "active customer" or "monthly
+revenue", that sits between raw tables and the tools that query them. Think of it as a
+company recipe book: everyone who bakes "monthly revenue" follows the same recipe, so
+every dashboard, spreadsheet, and AI assistant gets the same number. It translates
+business terms into the joins, filters, and sums the tables need.
+
+    After reading this article you will be able to:
+
+    - Describe what a semantic layer defines: entities, dimensions, and metrics
+    - Explain the problem it solves for reports and AI tools
+    - Compare a semantic layer with an ontology
+    - Decide when you need one, the other, or both
+
+## What does a semantic layer define?
+
+It defines the business entities the tables describe, the attributes you group and
+filter by, and the metrics you compute, each as a reusable, named definition.
+
+| Part | What it is | Example |
+| --- | --- | --- |
+| Entity | A business concept backed by one or more tables | `Customer`, backed by the `accounts` table |
+| Dimension | An attribute to group or filter by | Plan, region, signup month |
+| Measure | A raw aggregation over a column | Sum of `invoices.amount` |
+| Metric | A named business calculation built from measures | Monthly recurring revenue, churn rate |
+| Join path | How entities connect in the tables | `invoices.account_id` → `accounts.id` |
+
+A query tool asks for "monthly recurring revenue by plan for last quarter", and the
+semantic layer turns that into the SQL that joins, filters, and aggregates the right
+tables.
+
+## Why do companies use a semantic layer?
+
+Because without one, every team writes its own version of each metric. Finance counts
+revenue when an invoice is paid, sales when a contract is signed, and two dashboards
+disagree in the board meeting. A semantic layer defines the metric once, so every tool
+computes it the same way.
+
+It also helps AI. A language model asked to write SQL against raw tables has to guess
+what "active customer" means and how tables join. Giving it named metrics and join paths
+instead makes its answers consistent with the company's own reports, a form of
+grounding similar in spirit to
+[retrieval-augmented generation (RAG)](/learn/ai-memory/what-is-rag).
+
+    Connect your company's data into one ontology in HelixDB, and ask it questions with cited answers.
+
+## What is the difference between a semantic layer and an ontology?
+
+A semantic layer is about numbers: how to compute metrics consistently from tables. An
+[ontology](/learn/ontologies/what-is-an-ontology) is about things and how they connect:
+which entities exist across every system, how they link, and the rules they follow. One
+answers "what was revenue last quarter?"; the other answers "which customers with an
+open complaint have a contract renewing soon, and where does each fact come from?"
+
+| | Semantic layer | Ontology |
+| --- | --- | --- |
+| Main concern | Consistent metrics and dimensions | Entities, links, and their meaning |
+| Typical sources | Tables in one warehouse | Databases, apps, and documents |
+| Data stays | In the warehouse; the layer compiles queries | Often loaded into a [knowledge graph](/learn/graph-databases/what-is-a-knowledge-graph) |
+| Relationships | Join paths between tables | Named, directed links such as `SIGNED_BY` |
+| Documents | Out of scope | Can be read for facts, with their quotes |
+| Typical query | Aggregations: sums, counts, ratios over time | Traversals: follow links, find connected records |
+| Identity across sources | Assumes keys already line up | Uses identifiers and [entity resolution](/learn/ontologies/what-is-entity-resolution) |
+
+They overlap. Both name business entities and hide table details from the people and
+tools that ask questions. Some ontologies define metrics, and some semantic layers model
+entity relationships. The difference is emphasis: aggregation over clean tables versus
+connection across messy sources.
+
+## When do you need a semantic layer, an ontology, or both?
+
+Choose by the questions you ask most.
+
+- **A semantic layer** suits teams whose data already sits in one warehouse with clean
+  keys, and whose main questions are metrics: revenue, retention, usage over time.
+- **An ontology** suits data spread across many systems and documents, where the hard
+  part is knowing that records refer to the same customer, following connections, and
+  citing sources. It is also the shape that
+  [GraphRAG](/learn/ai-memory/what-is-graphrag) and
+  [AI agent memory](/learn/ai-memory/what-is-ai-agent-memory) build on.
+- **Both** suit companies that need consistent reporting and connected, cited answers.
+  The ontology resolves who is who and what links to what; metrics are then computed
+  over its entities.
+
+## How does Helix Foundry relate to a semantic layer?
+
+[Helix Foundry](/foundry/start-here/introduction) builds an ontology, not a semantic
+layer, but covers some of the same ground:
+
+- **One shape across sources.** An ontology's types, links, and rules span the
+  databases, apps, and documents you connect, and its
+  [loads](/foundry/ontologies/load-data) write them into a HelixDB database, with every
+  value naming the row or quote it came from.
+- **Questions in plain words.** [Founder](/foundry/ask/ask-questions) answers questions
+  about a load step by step and cites each record, table row, quote, and rule it used.
+- **Saved queries.** A [dashboard](/foundry/automate/dashboards) is a page of tiles, each
+  one saved query over an ontology's load, read live by whoever opens it, so it never
+  shows anyone more than they may read.
+
+## Frequently asked questions
+
+### Is a semantic layer the same as a data model?
+
+Not quite. A data model describes how tables are structured. A semantic layer adds
+business meaning on top: named metrics, dimensions, and the joins between them.
+
+### Is a semantic layer the same as a metrics layer?
+
+A metrics layer is the part of a semantic layer that defines metrics. The terms are
+often used interchangeably, though a semantic layer usually also covers entities and
+dimensions.
+
+### Does a semantic layer store data?
+
+Usually not. It stores definitions and compiles queries that run where the data lives.
+Some add caching or pre-aggregated tables for speed.
+
+### Can an ontology replace a semantic layer?
+
+For connected questions and cited answers, often yes. For heavy metric reporting over a
+warehouse, a semantic layer is usually the better fit, and the two can work together.
+
+## Related topics
+
+    Shared types, links, and rules for data from many systems.
+
+    Deciding when records from different systems are the same thing.
+
+    Connected facts organized by an ontology, with their sources.
+
+    When connected questions outgrow joins.
+
+    Recording where every value came from, so answers can be checked.
+
+    Retrieval that follows relationships, compared with vector RAG.
 
