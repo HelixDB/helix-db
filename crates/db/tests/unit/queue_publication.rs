@@ -766,17 +766,21 @@ async fn uncertain_acknowledgements_reconcile() {
         .begin(slatedb::IsolationLevel::SerializableSnapshot)
         .await
         .expect("acknowledgement transaction opens");
+    let mut changes = crate::index_lifecycle::queue::shared::QueueChanges::default();
     publisher
         .store
         .stage_acknowledge(
             &transaction,
             db.index_operation_backlog(),
+            &mut changes,
             target,
             &stored,
             &[operations[0].id()],
         )
         .expect("acknowledgement stages");
+    let queue = publisher.store.shared().begin_commit(changes);
     transaction.commit().await.expect("acknowledgement commits");
+    queue.uncertain();
     db.index_operation_backlog()
         .mark_acknowledgement_uncertain(operations.iter().map(QueuedOperation::id));
     assert_eq!(pending(), (2, 2));

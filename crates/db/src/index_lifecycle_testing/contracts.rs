@@ -2876,6 +2876,7 @@ async fn enqueue_search_mutation(
         )?;
     }
     let staged = collector.finalize(db.index_operand_limit(), db.active_text_mutation_limits())?;
+    let mut queue_changes = crate::index_lifecycle::queue::shared::QueueChanges::default();
     let mut reservation = if staged.is_empty() {
         None
     } else {
@@ -2885,6 +2886,7 @@ async fn enqueue_search_mutation(
         for staged in staged.operands {
             db.index_queue_store().stage_enqueue(
                 &transaction,
+                &mut queue_changes,
                 staged.target,
                 staged.operand,
                 &staged.operations,
@@ -2904,7 +2906,15 @@ async fn enqueue_search_mutation(
     if let Some(reservation) = reservation.as_mut() {
         reservation.begin_commit();
     }
-    match (transaction.commit().await, reservation) {
+    let queue = db.index_queue_store().shared().begin_commit(queue_changes);
+    let committed = transaction.commit().await;
+    match &committed {
+        Ok(Some(handle)) => queue.applied(handle.seqnum()),
+        Ok(None) => queue.aborted(),
+        Err(error) if error.kind() == slatedb::ErrorKind::Transaction => queue.aborted(),
+        Err(_) => queue.uncertain(),
+    }
+    match (committed, reservation) {
         (Ok(_), Some(reservation)) => reservation.committed(),
         (Ok(_), None) => {}
         (Err(error), Some(reservation)) => {

@@ -33,6 +33,7 @@ use crate::encoding::v2::keys::IndexEntity;
 use crate::encoding::v2::values::indexes::operation_queue::{
     QueueFamily, QueuedOperationId, QueuedPayload,
 };
+use crate::execution::interpreter::read_view::StableRequestReadView;
 use crate::index_lifecycle::queue::producer::PendingEntityState;
 use crate::index_lifecycle::queue::QueueTarget;
 use crate::index_lifecycle::work::TextPartition;
@@ -136,6 +137,17 @@ enum CommittedRead {
     /// selection reached `reached` retained bytes, past `limit`, when it
     /// stopped.
     PastStrongVectorBound { reached: u64, limit: u64 },
+}
+
+/// Where a search reads the committed queue.
+#[derive(Clone, Copy)]
+enum QueueSource<'a> {
+    /// A write transaction's serializable read, which must stay a read
+    /// dependency, so it reads storage.
+    Transaction(&'a crate::transaction::Owned),
+    /// A read request's pinned view: a writer snapshot selects from the
+    /// shared view (see [`crate::index_lifecycle::queue::shared`]).
+    View(&'a StableRequestReadView),
 }
 
 /// One committed pending set, read once by whichever search needs it first.
@@ -755,7 +767,12 @@ impl<'db> ExecutionContext<'db> {
             let target =
                 QueueTarget::new(self.tenant_scope, handle.index_id(), handle.generation());
             let read = self
-                .committed_pending(&active.txn, target, family, SearchConsistency::Strong)
+                .committed_pending(
+                    QueueSource::Transaction(&active.txn),
+                    target,
+                    family,
+                    SearchConsistency::Strong,
+                )
                 .await?;
             (target, SearchConsistency::Strong, read)
         } else if let Some(view) = self.request_read_view() {
@@ -771,7 +788,12 @@ impl<'db> ExecutionContext<'db> {
             let target =
                 QueueTarget::new(self.tenant_scope, handle.index_id(), handle.generation());
             let read = self
-                .committed_pending(view, target, family, self.search_consistency)
+                .committed_pending(
+                    QueueSource::View(view),
+                    target,
+                    family,
+                    self.search_consistency,
+                )
                 .await?;
             (target, self.search_consistency, read)
         } else {
@@ -813,7 +835,7 @@ impl<'db> ExecutionContext<'db> {
     /// everything; an eventual search decodes within its source-input budget.
     async fn committed_pending(
         &self,
-        read: &(impl slatedb::DbReadOps + Sync),
+        source: QueueSource<'_>,
         target: QueueTarget,
         family: QueueFamily,
         consistency: SearchConsistency,
@@ -828,20 +850,41 @@ impl<'db> ExecutionContext<'db> {
         };
         let load = async move {
             let read_at = self.db.pending_text_analyses().now();
-            let Some(bytes) = self
-                .db
-                .index_queue_store()
-                .read_latest(read, target)
-                .await?
-            else {
-                return Ok(CommittedRead::Selected(CommittedPending::new(
-                    Vec::new(),
-                    read_at,
-                )));
+            let store = self.db.index_queue_store();
+            let pending = match source {
+                QueueSource::Transaction(transaction) => {
+                    store
+                        .read_pending_stored(transaction, transaction.snapshot_sequence(), target)
+                        .await?
+                }
+                QueueSource::View(view) => match (view, self.db.storage()) {
+                    (
+                        StableRequestReadView::WriterSnapshot { .. },
+                        crate::HelixStorage::Writer(writer),
+                    ) => {
+                        store
+                            .read_pending(writer.db(), view, view.comparable_sequence(), target)
+                            .await?
+                    }
+                    (
+                        StableRequestReadView::ReaderSnapshot { .. }
+                        | StableRequestReadView::WriterSnapshot { .. },
+                        _,
+                    ) => {
+                        store
+                            .read_pending_stored(view, view.comparable_sequence(), target)
+                            .await?
+                    }
+                },
             };
             super::blocking::run_blocking(&self.execution_control, move |probe| {
                 probe.check()?;
-                let latest = bytes.decode_latest(budget)?;
+                let Some(latest) = pending.select(budget)? else {
+                    return Ok(CommittedRead::Selected(CommittedPending::new(
+                        Vec::new(),
+                        read_at,
+                    )));
+                };
                 if latest.family() != family {
                     return Err(HelixDbError::IndexCatalogCorruption(
                         "search overlay read another family's operation queue".to_string(),
@@ -2443,3 +2486,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "pending_shared_tests.rs"]
+mod shared_tests;

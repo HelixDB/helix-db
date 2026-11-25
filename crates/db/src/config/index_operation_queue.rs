@@ -10,6 +10,17 @@
 //! many small operations, such as deletes, reaches it long before its encoded
 //! bytes would. The heap an index's backlog holds in admission accounting,
 //! one decoded copy, and one merge resolution stays within twice the limit.
+//! A writer whose searches overlay the index also keeps one shared decoded
+//! copy for them however many search at once (see
+//! `index_lifecycle::queue::shared`), at most about one and a half times the
+//! backlog's payloads while request snapshots keep up: at the default limit,
+//! a backlog at its limit measured 1.13 GB of shared view beside the 1.0 GB
+//! the ledger charges, and 32 concurrent strong searches of it raised the
+//! server's resident memory by under 2 GB. The views of all indexes stay
+//! within this limit times the publication tasks, the ceiling publication's
+//! retained queues have, beside the view a search is using; searches that
+//! read a queue from storage instead hold at most as many resolutions at
+//! once as fit an eighth of the memory ceiling at twice this limit each.
 //!
 //! # Usage
 //!

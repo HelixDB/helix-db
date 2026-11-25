@@ -176,7 +176,12 @@ async fn build(store: Arc<dyn ObjectStore>) {
             )))
         })
         .await;
-    let queues = QueueStore::new(QueueLayout::Map, db.index_operand_limit(), 0);
+    let queues = QueueStore::new(
+        QueueLayout::Map,
+        db.index_operand_limit(),
+        0,
+        crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+    );
     let per_operand =
         usize::try_from((db.index_operand_limit() - 64) / vector_operation(1, 0).retained_bytes())
             .unwrap();
@@ -198,15 +203,22 @@ async fn build(store: Arc<dyn ObjectStore>) {
                 .begin(IsolationLevel::SerializableSnapshot)
                 .await
                 .unwrap();
+            let mut changes = crate::index_lifecycle::queue::shared::QueueChanges::default();
             queues
                 .stage_enqueue(
                     &transaction,
+                    &mut changes,
                     target,
                     QueueOperand::enqueue(&batch).unwrap(),
                     &batch,
                 )
                 .unwrap();
-            transaction.commit().await.unwrap();
+            crate::index_lifecycle::queue::shared::commit_recorded(
+                transaction,
+                queues.shared().begin_commit(changes),
+            )
+            .await
+            .unwrap();
         }
     }
     storage
@@ -266,7 +278,12 @@ async fn measure_writer_open_over_a_large_backlog() {
                 },
                 crate::index_lifecycle::worker::IndexWorkerWakeHandle::default(),
             );
-            let store = QueueStore::new(QueueLayout::Map, 8 * MIB, 0);
+            let store = QueueStore::new(
+                QueueLayout::Map,
+                8 * MIB,
+                0,
+                crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+            );
             let loading = Instant::now();
             let summary = super::recovery::load_backlog(&db, &store, &backlog)
                 .await

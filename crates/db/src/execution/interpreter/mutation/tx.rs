@@ -306,6 +306,7 @@ impl<'db> ExecutionContext<'db> {
         // operand per queue key in the same transaction as the graph change.
         // A request dropped before the commit starts drops the reservation,
         // which releases it as aborted.
+        let mut queue_changes = crate::index_lifecycle::queue::shared::QueueChanges::default();
         let mut reservation = if staged_queue.is_empty() {
             None
         } else {
@@ -315,6 +316,7 @@ impl<'db> ExecutionContext<'db> {
             for staged in staged_queue.operands {
                 self.db.index_queue_store().stage_enqueue(
                     &txn,
+                    &mut queue_changes,
                     staged.target,
                     staged.operand,
                     &staged.operations,
@@ -340,18 +342,26 @@ impl<'db> ExecutionContext<'db> {
             if let Some(reservation) = reservation.as_mut() {
                 reservation.begin_commit();
             }
+            // Registered right before the commit, so a search whose snapshot
+            // may hold it waits until its changes are recorded.
+            let queue = db.index_queue_store().shared().begin_commit(queue_changes);
             let committed = match txn.commit(CommitDurability::Applied).await {
                 Ok(committed) => committed,
                 Err(error) => {
                     // Only a definite conflict proves nothing committed; any
                     // other failure keeps the capacity charged until
-                    // reconciliation.
-                    if let Some(reservation) = reservation {
-                        if error.kind() == slatedb::ErrorKind::Transaction {
+                    // reconciliation, and the shared views unsettled until
+                    // then (marked after the ledger, which settles them).
+                    if error.kind() == slatedb::ErrorKind::Transaction {
+                        if let Some(reservation) = reservation {
                             reservation.aborted();
-                        } else {
+                        }
+                        queue.aborted();
+                    } else {
+                        if let Some(reservation) = reservation {
                             reservation.uncertain();
                         }
+                        queue.uncertain();
                     }
                     return Err(prepared_index_context
                         .classify_commit_error(writer.db(), error)
@@ -359,6 +369,11 @@ impl<'db> ExecutionContext<'db> {
                 }
             };
             let sequence = committed.map(|handle| handle.seqnum());
+            match sequence {
+                Some(sequence) => queue.applied(sequence),
+                // Nothing to write applied nothing.
+                None => queue.aborted(),
+            }
             let Some(reservation) = reservation else {
                 return Ok(sequence);
             };

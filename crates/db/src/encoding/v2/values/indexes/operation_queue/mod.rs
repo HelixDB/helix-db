@@ -622,6 +622,20 @@ pub(crate) struct LatestOperations {
 }
 
 impl LatestOperations {
+    /// A selection made from operations already decoded, in selection order,
+    /// one per entity, with the reach of the first entity left out.
+    pub(crate) const fn new(
+        family: QueueFamily,
+        operations: Vec<QueuedOperation>,
+        refused: Option<u64>,
+    ) -> Self {
+        Self {
+            family,
+            operations,
+            refused,
+        }
+    }
+
     /// Selects from one resolved queue value within `budget`.
     pub(crate) fn decode(value: &[u8], budget: u64) -> Result<Self, EncodingError> {
         let (family, records) = resolved_records(value)?;

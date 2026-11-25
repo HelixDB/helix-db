@@ -580,7 +580,9 @@ async fn exercise_stable_restricted_metric<D: Distance>(db: &Db, name: &str) {
         transaction.commit().await.unwrap();
     }
 
+    let shared = Arc::new(crate::index_lifecycle::queue::shared::SharedQueues::default());
     let view = read_view::StableRequestReadView::WriterSnapshot {
+        _pin: shared.pin(),
         snapshot: db.snapshot().await.unwrap(),
         compatibility: crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
     };

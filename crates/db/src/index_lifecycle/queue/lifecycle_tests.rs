@@ -3926,10 +3926,12 @@ async fn a_retry_or_abort_committed_after_a_blocker_repair_reserves_fails_the_re
             .expect("the blocker's first repair is admitted beyond the member cap");
         let admitted = ledger();
         assert_eq!((admitted.members, admitted.operations), (3, 3));
+        let mut changes = crate::index_lifecycle::queue::shared::QueueChanges::default();
         for staged in staged.operands {
             db.index_queue_store()
                 .stage_enqueue(
                     &transaction,
+                    &mut changes,
                     staged.target,
                     staged.operand,
                     &staged.operations,
@@ -3956,10 +3958,12 @@ async fn a_retry_or_abort_committed_after_a_blocker_repair_reserves_fails_the_re
             }
         }
         reservation.begin_commit();
-        let error = transaction
-            .commit()
-            .await
-            .expect_err("the build changed after the repair read it blocked");
+        let error = crate::index_lifecycle::queue::shared::commit_recorded(
+            transaction,
+            db.index_queue_store().shared().begin_commit(changes),
+        )
+        .await
+        .expect_err("the build changed after the repair read it blocked");
         assert_eq!(
             error.kind(),
             slatedb::ErrorKind::Transaction,

@@ -2233,13 +2233,18 @@ impl HelixDB {
         );
         // Publishers retain between attempts at most one logical index's
         // backlog ceiling per publication task, as much as the attempts
-        // themselves may hold at once.
+        // themselves may hold at once; the shared search views stay within
+        // the same ceiling.
         let index_queue_store = Arc::new(index_lifecycle::queue::storage::QueueStore::new(
             queue_tuning.layout(),
             queue_tuning.max_operand_bytes().get(),
             queue_tuning.max_retained_bytes().get().saturating_mul(
                 u64::try_from(lifecycle_throughput.concurrency().publication_tasks().get())
                     .unwrap_or(u64::MAX),
+            ),
+            index_lifecycle::queue::resolutions::ResolutionBudget::for_host(
+                config::memory_ceiling_bytes(),
+                queue_tuning.max_retained_bytes().get(),
             ),
         ));
         let pending_text_analyses = Arc::new(search::text::pending::PendingTextAnalyses::new(
@@ -4631,7 +4636,10 @@ impl HelixDB {
     /// `strong_text_search_rejections` reads zero.
     pub fn index_operation_queue_stats(&self) -> IndexOperationQueueStats {
         let backlog = self.inner.index_operation_backlog.totals();
+        let (shared_view_bytes, search_queue_reads) = self.inner.index_queue_store.shared().stats();
         let stats = IndexOperationQueueStats {
+            shared_view_bytes,
+            search_queue_reads,
             retained_bytes: backlog.usage.retained_bytes,
             pending_members: backlog.usage.members,
             pending_operations: backlog.usage.operations,
@@ -4853,7 +4861,13 @@ impl HelixDB {
             operations = summary.operations,
             "HelixDB index operation backlog loaded"
         );
-        // Before any graph write is admitted, so no producer can race it.
+        // Before any graph write is admitted, so no producer can race it, and
+        // before any search, so no shared queue view needs it recorded (see
+        // `index_lifecycle::queue::shared`, "Deleting a queue key").
+        assert!(
+            !self.inner.index_queue_store.shared().searched(),
+            "drained index operation queues are tombstoned before any search"
+        );
         match loaded
             .tombstone_drained(writer.db(), &self.inner.index_operation_backlog)
             .await?
