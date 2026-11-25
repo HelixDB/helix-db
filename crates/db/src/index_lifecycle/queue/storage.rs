@@ -1,7 +1,9 @@
 //! Storage layouts for immutable index-operation queues.
 //!
 //! [`QueueLayout::Map`] keeps one merge-backed value per generation; producers
-//! and acknowledgements stage blind merge operands. [`QueueLayout::Rows`]
+//! and acknowledgements stage blind merge operands, except that an
+//! acknowledgement that drains its queue deletes the key
+//! ([`QueueStore::stage_acknowledge`]). [`QueueLayout::Rows`]
 //! stores one row per operation under a writer-allocated sequence and
 //! acknowledges by deleting that row; it is the baseline for queue-layout
 //! benchmarks. Both layouts read into the same [`StoredQueue`] for
@@ -34,8 +36,20 @@ use crate::encoding::v2::values::indexes::operation_queue::{
 };
 use crate::error::{HelixDbError, Result};
 
-use super::backlog::{charged_bytes, Admission};
+use super::backlog::{charged_bytes, Admission, IndexOperationBacklog, Remainder};
 use super::{OutputBudget, QueueTarget};
+
+/// The write one acknowledgement staged for its queue
+/// ([`QueueStore::stage_acknowledge`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StagedAcknowledgement {
+    /// A map-layout removal operand naming the acknowledged IDs.
+    Removal,
+    /// A delete of the map-layout queue key: the acknowledgement drains it.
+    QueueDelete,
+    /// One row delete per acknowledged ID (row layout).
+    RowDeletes,
+}
 
 /// Exact writes one acknowledgement stages in a publication transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -498,7 +512,6 @@ impl QueueStore {
     }
 
     /// Returns the configured layout.
-    #[cfg(test)]
     pub(crate) const fn layout(&self) -> QueueLayout {
         self.layout
     }
@@ -586,8 +599,9 @@ impl QueueStore {
     /// Stages one transaction's operations for `target`.
     ///
     /// Map operands are blind merges; rows are fresh keys. Neither reads the
-    /// queue, so concurrent producers and acknowledgements never conflict on
-    /// it.
+    /// queue, so concurrent producers never conflict on it, nor with an
+    /// acknowledgement: a draining acknowledgement's delete aborts only
+    /// itself (see [`stage_queue_delete`]).
     pub(crate) fn stage_enqueue(
         &self,
         transaction: &impl crate::transaction::Mutation,
@@ -616,20 +630,51 @@ impl QueueStore {
         Ok(())
     }
 
-    /// Stages acknowledgements of exact operation IDs read in `stored`.
+    /// Stages, in `transaction`, the acknowledgement of exact operation IDs
+    /// read in `stored`, each of `stored`'s oldest outstanding operations of
+    /// its entity, and returns the write it staged.
+    ///
+    /// # Delete on drain
+    ///
+    /// In the map layout, an acknowledgement that names every operation
+    /// outstanding in `stored` while `backlog` charges `target` nothing else
+    /// ([`Remainder::Drained`]) deletes the queue key instead of merging a
+    /// removal: the tombstone shadows every operand and resolved value below
+    /// it, so no later read merges the queue's history. The ledger is asked
+    /// here, after `transaction` began, and any enqueue that commits after
+    /// `transaction` began aborts it, so nothing of the attempt commits (see
+    /// [`stage_queue_delete`] and [`IndexOperationBacklog::remainder`]); an
+    /// enqueue that commits after it lands above the tombstone. Absence is
+    /// the empty queue, so
+    /// a committed delete releases exactly the acknowledged operations, as
+    /// the removal would, and reconciliation reads an uncertain one the same
+    /// way. A queue read before a later enqueue committed (a retained queue)
+    /// never deletes it: the ledger still charges that enqueue.
+    ///
+    /// The delete writes the key alone, never more than the removal operand
+    /// [`Self::acknowledgement_output`] budgets.
     pub(crate) fn stage_acknowledge(
         &self,
         transaction: &DbTransaction,
+        backlog: &IndexOperationBacklog,
         target: QueueTarget,
         stored: &StoredQueue,
         ids: &[QueuedOperationId],
-    ) -> Result<()> {
+    ) -> Result<StagedAcknowledgement> {
         match self.layout {
+            QueueLayout::Map
+                if ids.len() == stored.outstanding.get()
+                    && backlog.remainder(target, ids) == Remainder::Drained =>
+            {
+                stage_queue_delete(transaction, target)?;
+                Ok(StagedAcknowledgement::QueueDelete)
+            }
             QueueLayout::Map => {
                 let (bytes, tokens) = QueueOperand::acknowledge(stored.family, ids.iter().copied())
                     .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?
                     .into_parts();
                 transaction.merge_disjoint_tokens(target.key(), tokens, bytes)?;
+                Ok(StagedAcknowledgement::Removal)
             }
             QueueLayout::Rows => {
                 for id in ids {
@@ -640,9 +685,9 @@ impl QueueStore {
                     };
                     transaction.delete(key)?;
                 }
+                Ok(StagedAcknowledgement::RowDeletes)
             }
         }
-        Ok(())
     }
 
     /// Returns the exact writes one acknowledgement of `ids` stages, so
@@ -711,6 +756,25 @@ impl QueueStore {
             pending: None,
         }
     }
+}
+
+/// Stages, in `transaction`, the delete of `target`'s map-layout queue key,
+/// which its caller found drained once `transaction` began.
+///
+/// # Contract
+///
+/// The key is marked read, so any write to it that commits after
+/// `transaction` began aborts `transaction`: the delete never erases an
+/// operation enqueued meanwhile. The delete itself is left out of every
+/// transaction's conflict checks, so an enqueue that began before it
+/// committed still commits, above the tombstone: no producer ever aborts
+/// because a queue drained.
+pub(crate) fn stage_queue_delete(transaction: &DbTransaction, target: QueueTarget) -> Result<()> {
+    let key = target.key();
+    transaction.delete(&key)?;
+    transaction.unmark_write([&key])?;
+    transaction.mark_read([&key])?;
+    Ok(())
 }
 
 /// Every queue key of `scope` in either layout.

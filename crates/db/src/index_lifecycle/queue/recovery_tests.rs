@@ -24,6 +24,7 @@ use slatedb::{Db, DbReadOps, IsolationLevel};
 
 use super::backlog::{BacklogLimits, IndexOperationBacklog};
 use super::codec_storage_tests::{compact_l0, manual_compaction_settings};
+use super::drain_delete_tests::{history, newest, Stored};
 use super::lifecycle_tests::{config, create, drop_index, vector_spec, wait_terminal};
 use super::overlay_tests::{add, delete, update};
 use super::publication::PublicationOutcome;
@@ -52,7 +53,7 @@ use crate::HelixDB;
 
 const PATH: &str = "queue-recovery";
 
-fn ledger() -> Arc<IndexOperationBacklog> {
+pub(super) fn ledger() -> Arc<IndexOperationBacklog> {
     IndexOperationBacklog::new(
         BacklogLimits {
             max_retained_bytes: u64::MAX,
@@ -66,7 +67,7 @@ fn tenant(id: u128) -> DataScope {
     DataScope::Tenant(TenantId::from_u128(id))
 }
 
-fn queue_target(scope: DataScope, index: u64, generation: u64) -> QueueTarget {
+pub(super) fn queue_target(scope: DataScope, index: u64, generation: u64) -> QueueTarget {
     QueueTarget::new(
         scope,
         IndexId::new(index).unwrap(),
@@ -81,7 +82,7 @@ fn node(id: u64) -> IndexEntity {
     }
 }
 
-fn text(entity: u64, body: &str) -> QueuedOperation {
+pub(super) fn text(entity: u64, body: &str) -> QueuedOperation {
     QueuedOperation::new(
         QueuedOperationId::generate(),
         node(entity),
@@ -94,7 +95,7 @@ fn text(entity: u64, body: &str) -> QueuedOperation {
     )
 }
 
-fn vector(entity: u64, components: &[f32]) -> QueuedOperation {
+pub(super) fn vector(entity: u64, components: &[f32]) -> QueuedOperation {
     QueuedOperation::new(
         QueuedOperationId::generate(),
         node(entity),
@@ -191,20 +192,21 @@ fn assert_same_ledger(actual: &IndexOperationBacklog, expected: &IndexOperationB
 
 /// Loads `reader` into a fresh ledger and asserts it equals the reference.
 async fn assert_loads_like_the_reference(
-    reader: &(impl DbReadOps + Sync),
+    reader: &Db,
     layout: QueueLayout,
 ) -> (Arc<IndexOperationBacklog>, LoadedQueueSummary) {
     let (expected, expected_summary) = reference(reader, layout).await;
     let backlog = ledger();
     let summary = load_backlog(reader, &QueueStore::new(layout, u64::MAX, 0), &backlog)
         .await
-        .unwrap();
+        .unwrap()
+        .summary;
     assert_eq!(summary, expected_summary);
     assert_same_ledger(&backlog, &expected);
     (backlog, summary)
 }
 
-async fn raw_db(store: Arc<dyn ObjectStore>) -> Db {
+pub(super) async fn raw_db(store: Arc<dyn ObjectStore>) -> Db {
     Db::builder(PATH, store)
         .with_settings(manual_compaction_settings())
         .with_merge_operator(Arc::new(HelixMergeOperator::new()))
@@ -214,7 +216,7 @@ async fn raw_db(store: Arc<dyn ObjectStore>) -> Db {
         .unwrap()
 }
 
-async fn flush(db: &Db) {
+pub(super) async fn flush(db: &Db) {
     db.flush_with_options(slatedb::config::FlushOptions {
         flush_type: slatedb::config::FlushType::MemTable,
     })
@@ -222,7 +224,7 @@ async fn flush(db: &Db) {
     .unwrap();
 }
 
-async fn enqueue(
+pub(super) async fn enqueue(
     db: &Db,
     queues: &QueueStore,
     target: QueueTarget,
@@ -255,8 +257,9 @@ async fn acknowledge(db: &Db, queues: &QueueStore, target: QueueTarget, count: u
         .begin(IsolationLevel::SerializableSnapshot)
         .await
         .unwrap();
+    // An empty ledger charges nothing, so this always stages a removal.
     queues
-        .stage_acknowledge(&transaction, target, &stored, &ids)
+        .stage_acknowledge(&transaction, &ledger(), target, &stored, &ids)
         .unwrap();
     transaction.commit().await.unwrap();
 }
@@ -306,11 +309,16 @@ fn queued_scopes() -> [DataScope; 5] {
 
 /// Map-layout queues across scopes, generations, families, and storage
 /// tiers (a compacted run, L0, and the memtable), with partial and full
-/// acknowledgements, between keys a load must skip.
-async fn map_fixture(db: &Db, admin: &slatedb::admin::Admin) -> BTreeSet<QueueTarget> {
+/// acknowledgements, between keys a load must skip, plus `queueless`
+/// tenants that hold only such keys.
+async fn map_fixture(
+    db: &Db,
+    admin: &slatedb::admin::Admin,
+    queueless: std::ops::Range<u128>,
+) -> BTreeSet<QueueTarget> {
     let queues = QueueStore::new(QueueLayout::Map, u64::MAX, 0);
     let mut expected = BTreeSet::new();
-    for scope in queued_scopes().into_iter().chain((100..140).map(tenant)) {
+    for scope in queued_scopes().into_iter().chain(queueless.map(tenant)) {
         surround(db, scope).await;
     }
     for (ordinal, scope) in queued_scopes().into_iter().enumerate() {
@@ -527,7 +535,7 @@ async fn one_pass_charges_exactly_what_full_decodes_charged_across_scopes_and_ti
     let store = Arc::new(InMemory::new());
     let db = raw_db(store.clone()).await;
     let admin = slatedb::admin::Admin::builder(PATH, store.clone()).build();
-    let expected = map_fixture(&db, &admin).await;
+    let expected = map_fixture(&db, &admin, 100..140).await;
 
     let (backlog, summary) = assert_loads_like_the_reference(&db, QueueLayout::Map).await;
     assert_eq!(
@@ -588,7 +596,7 @@ async fn the_row_layout_groups_each_generation_and_resumes_its_sequence() {
     let (expected, expected_summary) = reference(&db, QueueLayout::Rows).await;
     let loaded = QueueStore::new(QueueLayout::Rows, u64::MAX, 0);
     let backlog = ledger();
-    let summary = load_backlog(&db, &loaded, &backlog).await.unwrap();
+    let summary = load_backlog(&db, &loaded, &backlog).await.unwrap().summary;
     assert_eq!(summary, expected_summary);
     assert_eq!(
         summary,
@@ -650,7 +658,9 @@ async fn a_queue_of_the_other_layout_fails_closed_in_every_scope() {
             )
             .await;
             let Err(HelixDbError::Config(message)) =
-                load_backlog(&db, &QueueStore::new(reader, u64::MAX, 0), &ledger()).await
+                load_backlog(&db, &QueueStore::new(reader, u64::MAX, 0), &ledger())
+                    .await
+                    .map(|loaded| loaded.summary)
             else {
                 panic!("{reader:?} must refuse {writer:?} queues in {scope:?}");
             };
@@ -722,7 +732,10 @@ async fn corrupt_keys_values_and_envelopes_fail_closed() {
         )
         .await;
         db.put(&key, &value).await.unwrap();
-        let error = load_backlog(&db, &queues, &ledger()).await.expect_err(name);
+        let error = load_backlog(&db, &queues, &ledger())
+            .await
+            .map(|loaded| loaded.summary)
+            .expect_err(name);
         assert!(error.to_string().contains(expected), "{name}: {error}");
         db.close().await.unwrap();
     }
@@ -808,7 +821,9 @@ async fn a_load_interrupted_at_any_read_reloads_the_same_ledger() {
     let memory = Arc::new(InMemory::new());
     let db = raw_db(memory.clone()).await;
     let admin = slatedb::admin::Admin::builder(PATH, memory.clone()).build();
-    map_fixture(&db, &admin).await;
+    // Every read of a load is interrupted once, so the test costs the
+    // square of its reads: a few queueless tenants walk the same paths.
+    map_fixture(&db, &admin, 100..103).await;
     flush(&db).await;
     let (expected, _) = reference(&db, QueueLayout::Map).await;
     let stored = snapshot(&db).await;
@@ -830,7 +845,8 @@ async fn a_load_interrupted_at_any_read_reloads_the_same_ledger() {
             &QueueStore::new(QueueLayout::Map, u64::MAX, 0),
             &partial,
         )
-        .await;
+        .await
+        .map(|loaded| loaded.summary);
         let crashed = !store.armed.swap(false, Ordering::SeqCst);
         // The writer dies with whatever it charged, however its storage
         // handle closes; the next one starts over.
@@ -1248,4 +1264,486 @@ async fn a_corrupt_record_fails_the_open_only_in_a_scope_with_a_queue() {
             (Err(error), false) => panic!("{scope:?}: a queueless scope failed the open: {error}"),
         }
     }
+}
+
+/// A raw storage handle over a closed writer's objects at `path`.
+async fn raw_db_at(path: &str, store: Arc<dyn ObjectStore>) -> Db {
+    Db::builder(path, store)
+        .with_settings(manual_compaction_settings())
+        .with_merge_operator(Arc::new(HelixMergeOperator::new()))
+        .with_db_cache_disabled()
+        .build()
+        .await
+        .unwrap()
+}
+
+/// Stages one removal operand acknowledging `ids` of `target`, as an
+/// acknowledgement that does not drain the queue does.
+async fn remove(db: &Db, target: QueueTarget, family: QueueFamily, ids: &[QueuedOperationId]) {
+    let (bytes, tokens) = QueueOperand::acknowledge(family, ids.iter().copied())
+        .unwrap()
+        .into_parts();
+    let transaction = db
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+    transaction
+        .merge_disjoint_tokens(target.key(), tokens, bytes)
+        .unwrap();
+    transaction.commit().await.unwrap();
+}
+
+/// The owner fixture plus queue states a load and its tombstones must tell
+/// apart: a queue with work (the legacy vector index), a queue drained by
+/// removals (tenant 0x41's vector index), a queue whose history a tombstone
+/// shadows from a compacted run (tenant 0x42's vector index), and queues no
+/// record names: tenant 0x41's orphan index 999 and a generation above
+/// tenant 0x42's record.
+async fn drained_fixture() -> (InMemory, QueueTarget, QueueTarget, QueueTarget) {
+    let fixture = owner_fixture().await;
+    let db = open(OWNERS, Arc::new(fixture.clone()), config()).await;
+    let (_, drained) = scoped_owner(&db, tenant(0x41), is_vector).await;
+    let (_, shadowed) = scoped_owner(&db, tenant(0x42), is_vector).await;
+    db.close().await.unwrap();
+    let raw = raw_db_at(OWNERS, Arc::new(fixture.clone())).await;
+    let queues = QueueStore::new(QueueLayout::Map, u64::MAX, 0);
+    let drained_operations = [vector(5, &[1.0, 1.0]), vector(6, &[2.0, 2.0])];
+    enqueue(&raw, &queues, drained, &drained_operations).await;
+    enqueue(&raw, &queues, shadowed, &[vector(7, &[3.0, 3.0])]).await;
+    let above = QueueTarget::new(
+        shadowed.scope,
+        shadowed.index_id,
+        shadowed.generation.checked_next().unwrap(),
+    );
+    enqueue(&raw, &queues, above, &[vector(8, &[4.0, 4.0])]).await;
+    flush(&raw).await;
+    let admin = slatedb::admin::Admin::builder(OWNERS, Arc::new(fixture.clone())).build();
+    compact_l0(&admin, 0).await;
+    remove(
+        &raw,
+        drained,
+        QueueFamily::Vector,
+        &drained_operations
+            .iter()
+            .map(QueuedOperation::id)
+            .collect::<Vec<_>>(),
+    )
+    .await;
+    raw.delete(shadowed.key()).await.unwrap();
+    flush(&raw).await;
+    raw.close().await.unwrap();
+    (fixture, drained, shadowed, above)
+}
+
+/// The load builds the reference ledger, tombstones only the queue whose
+/// history resolved empty, not one already tombstoned, and a load after that
+/// finds nothing more to delete.
+#[tokio::test]
+async fn a_load_reads_like_the_reference_and_tombstones_only_drained_history() {
+    let (fixture, drained, shadowed, above) = drained_fixture().await;
+    let db = raw_db_at(OWNERS, Arc::new(fixture.fork())).await;
+    assert_eq!(
+        history(&db, &drained.key()).await.len(),
+        2,
+        "removal over its enqueue"
+    );
+    // The compacted run resolved the enqueue into a value, as the bottom
+    // run of a long-lived store holds a queue's resolved history.
+    assert_eq!(
+        history(&db, &shadowed.key()).await,
+        [Stored::Tombstone, Stored::Value]
+    );
+    let (expected, expected_summary) = reference(&db, QueueLayout::Map).await;
+    let backlog = ledger();
+    let loaded = load_backlog(
+        &db,
+        &QueueStore::new(QueueLayout::Map, u64::MAX, 0),
+        &backlog,
+    )
+    .await
+    .unwrap();
+    assert_eq!(loaded.summary, expected_summary);
+    assert_same_ledger(&backlog, &expected);
+    let targets = backlog.outstanding_targets();
+    assert!(
+        targets.contains(&above),
+        "a generation above its record loads"
+    );
+    assert!(targets.contains(&queue_target(tenant(0x41), 999, 1)));
+    assert!(!targets.contains(&drained) && !targets.contains(&shadowed));
+    assert_eq!(
+        loaded.tombstone_drained(&db, &backlog).await.unwrap(),
+        super::recovery::DrainedTombstones::Committed { queues: 1 }
+    );
+    assert_eq!(
+        history(&db, &drained.key()).await.first(),
+        Some(&Stored::Tombstone)
+    );
+    let before = history(&db, &shadowed.key()).await;
+    let again = ledger();
+    let loaded = load_backlog(&db, &QueueStore::new(QueueLayout::Map, u64::MAX, 0), &again)
+        .await
+        .unwrap();
+    assert_same_ledger(&again, &expected);
+    assert_eq!(
+        loaded.tombstone_drained(&db, &again).await.unwrap(),
+        super::recovery::DrainedTombstones::NothingDrained,
+        "repeating it deletes nothing"
+    );
+    assert_eq!(history(&db, &shadowed.key()).await, before);
+    db.close().await.unwrap();
+}
+
+/// The drained fixture plus a second drained queue in another scope: an
+/// orphan of tenant 0x42 (index 998) whose removal cancels its enqueue.
+/// Returns the fixture and both drained targets.
+async fn two_drained_fixture() -> (InMemory, QueueTarget, QueueTarget) {
+    let (fixture, drained, _, _) = drained_fixture().await;
+    let raw = raw_db_at(OWNERS, Arc::new(fixture.clone())).await;
+    let orphan = queue_target(tenant(0x42), 998, 1);
+    let operations = [vector(12, &[1.0, 2.0])];
+    enqueue(
+        &raw,
+        &QueueStore::new(QueueLayout::Map, u64::MAX, 0),
+        orphan,
+        &operations,
+    )
+    .await;
+    remove(
+        &raw,
+        orphan,
+        QueueFamily::Vector,
+        &operations.map(|operation| operation.id()),
+    )
+    .await;
+    flush(&raw).await;
+    raw.close().await.unwrap();
+    (fixture, drained, orphan)
+}
+
+/// Every drained key's tombstone commits in one transaction: an enqueue to
+/// any one of them committed after the transaction began aborts every
+/// delete, in either scope, and is kept for the next load, which then
+/// deletes only the queue that is still drained.
+#[tokio::test]
+async fn an_enqueue_to_one_drained_queue_aborts_every_tombstone() {
+    let (fixture, first, second) = two_drained_fixture().await;
+    let queues = QueueStore::new(QueueLayout::Map, u64::MAX, 0);
+    for (written, untouched) in [(first, second), (second, first)] {
+        let db = raw_db_at(OWNERS, Arc::new(fixture.fork())).await;
+        let backlog = ledger();
+        let loaded = load_backlog(&db, &queues, &backlog).await.unwrap();
+        let staged = loaded
+            .stage_tombstones(&db, &backlog)
+            .await
+            .unwrap()
+            .expect("both queues are still drained");
+        let late = vector(9, &[9.0, 9.0]);
+        enqueue(&db, &queues, written, std::slice::from_ref(&late)).await;
+        assert_eq!(
+            staged.commit().await.unwrap(),
+            super::recovery::DrainedTombstones::Conflicted { queues: 2 }
+        );
+        for target in [written, untouched] {
+            assert_eq!(
+                newest(&db, &target.key()).await,
+                Some(Stored::Merge),
+                "{target:?} was deleted"
+            );
+        }
+        let reloaded = ledger();
+        let loaded = load_backlog(&db, &queues, &reloaded).await.unwrap();
+        assert!(
+            reloaded.charges().contains_key(&late.id()),
+            "the late enqueue is kept"
+        );
+        assert_eq!(
+            loaded.tombstone_drained(&db, &reloaded).await.unwrap(),
+            super::recovery::DrainedTombstones::Committed { queues: 1 }
+        );
+        assert_eq!(newest(&db, &untouched.key()).await, Some(Stored::Tombstone));
+        assert_eq!(newest(&db, &written.key()).await, Some(Stored::Merge));
+        db.close().await.unwrap();
+    }
+}
+
+/// The load reads through no transaction, and the tombstones' transaction
+/// begins only after it: an enqueue to one drained queue committed between
+/// the two is seen by that transaction's point get, which keeps that queue
+/// and deletes the other.
+#[tokio::test]
+async fn an_enqueue_before_the_tombstones_began_keeps_only_its_queue() {
+    let (fixture, first, second) = two_drained_fixture().await;
+    let queues = QueueStore::new(QueueLayout::Map, u64::MAX, 0);
+    for (written, untouched) in [(first, second), (second, first)] {
+        let db = raw_db_at(OWNERS, Arc::new(fixture.fork())).await;
+        let backlog = ledger();
+        let loaded = load_backlog(&db, &queues, &backlog).await.unwrap();
+        let late = vector(9, &[9.0, 9.0]);
+        enqueue(&db, &queues, written, std::slice::from_ref(&late)).await;
+        assert_eq!(
+            loaded.tombstone_drained(&db, &backlog).await.unwrap(),
+            super::recovery::DrainedTombstones::Committed { queues: 1 }
+        );
+        assert_eq!(newest(&db, &untouched.key()).await, Some(Stored::Tombstone));
+        assert_eq!(newest(&db, &written.key()).await, Some(Stored::Merge));
+        let stored = queues.read(&db, written).await.unwrap().unwrap();
+        assert_eq!(
+            stored
+                .operations()
+                .map(QueuedOperation::id)
+                .collect::<Vec<_>>(),
+            [late.id()]
+        );
+        db.close().await.unwrap();
+    }
+}
+
+/// A write to another key after the tombstones' transaction began does not
+/// stop them, a target the ledger charges is never deleted, and a load that
+/// found no drained queue begins no transaction.
+#[tokio::test]
+async fn only_writes_to_a_drained_key_or_charges_of_its_target_keep_it() {
+    let (fixture, drained, _, _) = drained_fixture().await;
+    let db = raw_db_at(OWNERS, Arc::new(fixture.fork())).await;
+    let queues = QueueStore::new(QueueLayout::Map, u64::MAX, 0);
+    let backlog = ledger();
+    let loaded = load_backlog(&db, &queues, &backlog).await.unwrap();
+    let staged = loaded
+        .stage_tombstones(&db, &backlog)
+        .await
+        .unwrap()
+        .expect("the queue is still drained");
+    enqueue(
+        &db,
+        &queues,
+        queue_target(tenant(0x41), 999, 1),
+        &[vector(10, &[1.0, 0.0])],
+    )
+    .await;
+    assert_eq!(
+        staged.commit().await.unwrap(),
+        super::recovery::DrainedTombstones::Committed { queues: 1 }
+    );
+    let again = ledger();
+    let loaded = load_backlog(&db, &queues, &again).await.unwrap();
+    assert!(
+        loaded
+            .stage_tombstones(&db, &again)
+            .await
+            .unwrap()
+            .is_none(),
+        "nothing is left to delete"
+    );
+    db.close().await.unwrap();
+
+    let db = raw_db_at(OWNERS, Arc::new(fixture.fork())).await;
+    let charged = ledger();
+    let loaded = load_backlog(&db, &queues, &charged).await.unwrap();
+    charged.load_durable(drained, [(vector(11, &[0.0, 1.0]).id(), node(11), 10)]);
+    assert_eq!(
+        loaded.tombstone_drained(&db, &charged).await.unwrap(),
+        super::recovery::DrainedTombstones::NothingDrained
+    );
+    assert_eq!(
+        history(&db, &drained.key()).await.first(),
+        Some(&Stored::Merge)
+    );
+    db.close().await.unwrap();
+}
+
+/// The tombstones commit in one transaction: they apply together, and a
+/// crash with them applied but not durable, or a commit whose WAL upload
+/// fails, leaves every key's history, which the restarted load finds and
+/// deletes.
+#[tokio::test]
+async fn a_crash_during_the_tombstones_leaves_them_to_the_next_load() {
+    use crate::search::vector::gated_wal::{GatedWalStore, WalUploads};
+    let (fixture, first, second) = two_drained_fixture().await;
+    // Every gate outlives the test: a crashed handle's upload waits on it.
+    let mut gates = Vec::new();
+    for uploads in [WalUploads::Held, WalUploads::Failing] {
+        let gate = Arc::new(GatedWalStore::from_memory(fixture.fork()));
+        gates.push(Arc::clone(&gate));
+        let db = raw_db_at(OWNERS, Arc::clone(&gate) as Arc<dyn ObjectStore>).await;
+        let queues = QueueStore::new(QueueLayout::Map, u64::MAX, 0);
+        let backlog = ledger();
+        let loaded = load_backlog(&db, &queues, &backlog).await.unwrap();
+        gate.uploads.send_replace(uploads);
+        match uploads {
+            WalUploads::Held => {
+                let writer = db.clone();
+                let tombstoning =
+                    tokio::spawn(async move { loaded.tombstone_drained(&writer, &backlog).await });
+                tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    while newest(&db, &first.key()).await != Some(Stored::Tombstone) {
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .expect("the tombstone applies while its upload is held");
+                assert_eq!(
+                    newest(&db, &second.key()).await,
+                    Some(Stored::Tombstone),
+                    "the tombstones apply together"
+                );
+                tombstoning.abort();
+            }
+            WalUploads::Failing => {
+                assert!(loaded.tombstone_drained(&db, &backlog).await.is_err());
+            }
+            WalUploads::Open => unreachable!("only failures are injected"),
+        }
+        // The held or failed upload never lands: this is the crash.
+        drop(db);
+        let db = raw_db_at(OWNERS, Arc::new(gate.restarted()) as Arc<dyn ObjectStore>).await;
+        for target in [first, second] {
+            assert_eq!(
+                newest(&db, &target.key()).await,
+                Some(Stored::Merge),
+                "{uploads:?}: {target:?}'s tombstone was lost with the WAL tail"
+            );
+        }
+        let reloaded = ledger();
+        let loaded = load_backlog(&db, &queues, &reloaded).await.unwrap();
+        assert_eq!(
+            loaded.tombstone_drained(&db, &reloaded).await.unwrap(),
+            super::recovery::DrainedTombstones::Committed { queues: 2 },
+            "{uploads:?}"
+        );
+        db.close().await.unwrap();
+    }
+}
+
+/// Only a merge resolution the observed read performs to the empty queue is
+/// reported: not an absent key, not a tombstoned one, not one with work, and
+/// not a resolution outside the observed read.
+#[tokio::test]
+async fn only_the_observed_reads_empty_resolutions_are_reported() {
+    let db = raw_db(Arc::new(InMemory::new())).await;
+    let queues = QueueStore::new(QueueLayout::Map, u64::MAX, 0);
+    let [drained, tombstoned, working, absent] =
+        [1, 2, 3, 4].map(|index| queue_target(DataScope::LegacyUnscoped, index, 1));
+    for target in [drained, tombstoned, working] {
+        enqueue(&db, &queues, target, &[text(target.index_id.get(), "x")]).await;
+    }
+    let stored = queues.read(&db, drained).await.unwrap().unwrap();
+    let ids = stored
+        .operations()
+        .map(QueuedOperation::id)
+        .collect::<Vec<_>>();
+    remove(&db, drained, QueueFamily::Text, &ids).await;
+    db.delete(tombstoned.key()).await.unwrap();
+    // Unobserved resolutions record nothing, and do not fail.
+    assert!(db.get(drained.key()).await.unwrap().is_none());
+    for (target, expected) in [
+        (drained, vec![drained.key()]),
+        (tombstoned, vec![]),
+        (working, vec![]),
+        (absent, vec![]),
+    ] {
+        let (value, empty) =
+            crate::merge_operator::observe_empty_queue_resolutions(db.get(target.key())).await;
+        assert_eq!(value.unwrap().is_some(), target == working);
+        assert_eq!(
+            empty.into_iter().collect::<Vec<_>>(),
+            expected,
+            "{target:?}"
+        );
+    }
+    let (_, empty) = crate::merge_operator::observe_empty_queue_resolutions(async {
+        let mut rows = db
+            .scan(discovery_range(DataScope::LegacyUnscoped))
+            .await
+            .unwrap();
+        while rows.next().await.unwrap().is_some() {}
+    })
+    .await;
+    assert_eq!(empty.into_iter().collect::<Vec<_>>(), [drained.key()]);
+    db.close().await.unwrap();
+}
+
+/// Another layout's rows and any other key fail the load closed, right
+/// before or after a queue key, tombstoned or not.
+#[tokio::test]
+async fn keys_beside_queue_keys_fail_closed() {
+    let (fixture, drained, shadowed, _) = drained_fixture().await;
+    let mut extended = shadowed.key().to_vec();
+    extended.push(0);
+    let rows = QueueStore::new(QueueLayout::Rows, u64::MAX, 0);
+    for (name, case) in [("row", 0_u8), ("extension", 1), ("before", 2)] {
+        let db = raw_db_at(OWNERS, Arc::new(fixture.fork())).await;
+        match case {
+            0 => enqueue(&db, &rows, drained, &[vector(12, &[1.0, 1.0])]).await,
+            1 => {
+                db.put(&extended, b"x").await.unwrap();
+            }
+            _ => {
+                let mut before = drained.key().to_vec();
+                *before.last_mut().unwrap() -= 1;
+                before.push(0xFF);
+                db.put(&before, b"x").await.unwrap();
+            }
+        }
+        let error = load_backlog(
+            &db,
+            &QueueStore::new(QueueLayout::Map, u64::MAX, 0),
+            &ledger(),
+        )
+        .await
+        .map(|loaded| loaded.summary)
+        .expect_err(name);
+        match case {
+            0 => assert!(matches!(error, HelixDbError::Config(_)), "{name}: {error}"),
+            _ => assert!(
+                error
+                    .to_string()
+                    .contains("operation queue prefix holds another key")
+                    || matches!(error, HelixDbError::Encoding(_)),
+                "{name}: {error}"
+            ),
+        }
+        db.close().await.unwrap();
+    }
+}
+
+/// Each way a tenant's first row can fall against its queue range: before it
+/// (the walk scans the range), inside it (the walk continues through it and
+/// stops at the first row past it, which may be a merged row), and past it
+/// (the tenant holds no queue), with adjacent tenants on either side.
+#[tokio::test]
+async fn every_tenant_first_row_reads_like_the_reference() {
+    let db = raw_db(Arc::new(InMemory::new())).await;
+    let queues = QueueStore::new(QueueLayout::Map, u64::MAX, 0);
+    let past = tenant(0x60);
+    let mut above = discovery_range(past).end.to_vec();
+    above.push(0x01);
+    db.put(&above, b"past the queue range").await.unwrap();
+    // Inside: the tenant's first row is its queue, and a merged queue row of
+    // the next generation and a key past the range follow it.
+    let inside = tenant(0x61);
+    enqueue(&db, &queues, queue_target(inside, 1, 1), &[text(1, "a")]).await;
+    enqueue(&db, &queues, queue_target(inside, 1, 2), &[text(2, "b")]).await;
+    enqueue(&db, &queues, queue_target(inside, 1, 2), &[text(3, "c")]).await;
+    let mut after = discovery_range(inside).end.to_vec();
+    after.push(0x02);
+    db.put(&after, b"past the queue range").await.unwrap();
+    // Before: a key below the range, then a queue.
+    let before = tenant(0x62);
+    surround(&db, before).await;
+    enqueue(&db, &queues, queue_target(before, 4, 1), &[text(4, "d")]).await;
+    // A tenant whose only row is a queue, right after one with a queue.
+    let only = tenant(0x63);
+    enqueue(&db, &queues, queue_target(only, 5, 1), &[text(5, "e")]).await;
+    let (backlog, summary) = assert_loads_like_the_reference(&db, QueueLayout::Map).await;
+    assert_eq!(summary.queues, 4);
+    assert_eq!(
+        backlog
+            .outstanding_targets()
+            .into_iter()
+            .map(|target| target.scope)
+            .collect::<BTreeSet<_>>(),
+        [inside, before, only].into_iter().collect()
+    );
+    db.close().await.unwrap();
 }

@@ -76,7 +76,7 @@ use crate::index_lifecycle::{
 use crate::search::vector::{self, SimHasherRegistry, VectorCacheRegistry};
 
 use super::backlog::{Admission, IndexOperationBacklog};
-use super::storage::{QueueStore, StoredQueue};
+use super::storage::{QueueStore, StagedAcknowledgement, StoredQueue};
 use super::{OutputBudget, QueueTarget};
 
 /// Minimum delay before retrying a generation that made no progress.
@@ -142,6 +142,8 @@ pub(crate) struct QueuePublicationMetrics {
     pub(crate) output_retries: AtomicU64,
     pub(crate) blocked_attempts: AtomicU64,
     pub(crate) discarded_operations: AtomicU64,
+    pub(crate) drained_queue_deletes: AtomicU64,
+    pub(crate) open_drained_queue_tombstones: AtomicU64,
     pub(crate) queue_reads: AtomicU64,
     pub(crate) queue_read_bytes: AtomicU64,
     pub(crate) queue_read_micros: AtomicU64,
@@ -393,6 +395,14 @@ pub(crate) struct QueuePublisher {
     attempts: Mutex<HashSet<QueueTarget>>,
     /// Sequence numbers handed to vector commits, never reused.
     vector_commits: AtomicU64,
+    /// One acknowledged ID of each target whose draining delete
+    /// ([`StagedAcknowledgement::QueueDelete`]) had an uncertain commit
+    /// outcome, until reconciliation settles it: the delete committed exactly
+    /// when that ID is absent from the flushed read, since it acknowledged
+    /// every operation of the queue and the attempt is the queue's only
+    /// acknowledger. Reconciliation runs before any later attempt of the
+    /// target, so a target holds at most one.
+    uncertain_deletes: Mutex<HashMap<QueueTarget, QueuedOperationId>>,
     metrics: QueuePublicationMetrics,
     #[cfg(test)]
     hooks: test_hooks::PublicationHooks,
@@ -446,9 +456,12 @@ pub(crate) mod test_hooks {
         /// Fails the next vector attempt after its commit, as a post-commit
         /// cache invariant violation would.
         pub(crate) fail_after_commit: AtomicBool,
-        /// Reports the next text attempt's successful commit as uncertain, as
-        /// a commit whose response was lost would be.
+        /// Reports the next text or discard attempt's successful commit as
+        /// uncertain, as a commit whose response was lost would be.
         pub(crate) uncertain_after_commit: AtomicBool,
+        /// Reports the next text attempt as an uncertain commit without
+        /// committing it, as a commit whose write was lost would be.
+        pub(crate) uncertain_without_commit: AtomicBool,
         /// Row-batch fetch policy of the last staged vector attempt's
         /// mutation indexes.
         pub(crate) batch_reads: Mutex<Option<crate::batch_reads::BatchReads>>,
@@ -588,6 +601,7 @@ impl QueuePublisher {
             drained_commits: Mutex::new(VecDeque::new()),
             cursor: Mutex::new(None),
             attempts: Mutex::new(HashSet::new()),
+            uncertain_deletes: Mutex::new(HashMap::new()),
             vector_commits: AtomicU64::new(0),
             metrics: QueuePublicationMetrics::default(),
             #[cfg(test)]
@@ -1012,8 +1026,13 @@ impl QueuePublisher {
             .map(QueuedOperation::id)
             .collect::<Vec<_>>();
         let transaction = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
-        self.store
-            .stage_acknowledge(&transaction, target, &stored, &discarded)?;
+        let staged = self.store.stage_acknowledge(
+            &transaction,
+            &self.backlog,
+            target,
+            &stored,
+            &discarded,
+        )?;
         match transaction.commit().await {
             Ok(_) => {}
             // A definite conflict committed nothing.
@@ -1032,12 +1051,31 @@ impl QueuePublisher {
                 self.metrics
                     .uncertain_commits
                     .fetch_add(1, Ordering::Relaxed);
+                self.record_uncertain_delete(target, staged, &discarded);
                 self.backlog
                     .mark_acknowledgement_uncertain(discarded.iter().copied());
                 tracing::warn!(%error, "retired queue discard outcome is uncertain");
                 return Ok(PublicationOutcome::Retry);
             }
         }
+        #[cfg(test)]
+        if self
+            .hooks
+            .uncertain_after_commit
+            .swap(false, Ordering::SeqCst)
+        {
+            self.metrics
+                .uncertain_commits
+                .fetch_add(1, Ordering::Relaxed);
+            self.record_uncertain_delete(target, staged, &discarded);
+            self.backlog
+                .mark_acknowledgement_uncertain(discarded.iter().copied());
+            return Ok(PublicationOutcome::Retry);
+        }
+        self.metrics.drained_queue_deletes.fetch_add(
+            u64::from(staged == StagedAcknowledgement::QueueDelete),
+            Ordering::Relaxed,
+        );
         self.backlog.acknowledge(discarded.iter().copied());
         self.store.retained().retain(target, stored, &discarded);
         let operations = discarded.len() as u64;
@@ -1058,7 +1096,9 @@ impl QueuePublisher {
     /// A writer flush after the uncertainty was recorded makes any commit that
     /// was in flight durable and visible. An uncertain enqueue absent from the
     /// following read never committed and is released; an uncertain
-    /// acknowledgement whose ID is absent committed and is counted as one.
+    /// acknowledgement whose ID is absent committed and is counted as one,
+    /// and so is the draining delete it staged, if any (see
+    /// `uncertain_deletes`).
     ///
     /// It reads only the queue, so it needs no generation ownership. It does
     /// need this attempt to be the queue's only acknowledger: an operation
@@ -1068,6 +1108,16 @@ impl QueuePublisher {
         let ticket = self.backlog.begin_reconciliation();
         self.db.flush().await?;
         let stored = self.read_queue(target, None).await?;
+        let uncertain_delete = self.uncertain_deletes.lock().remove(&target);
+        let deleted = uncertain_delete.is_some_and(|id| {
+            !stored
+                .iter()
+                .flat_map(StoredQueue::operations)
+                .any(|operation| operation.id() == id)
+        });
+        self.metrics
+            .drained_queue_deletes
+            .fetch_add(u64::from(deleted), Ordering::Relaxed);
         let present = stored
             .iter()
             .flat_map(StoredQueue::operations)
@@ -1245,8 +1295,13 @@ impl QueuePublisher {
             .iter()
             .flat_map(|selected| selected.operations.iter().map(|operation| operation.id()))
             .collect::<Vec<_>>();
-        self.store
-            .stage_acknowledge(&transaction, target, &stored, &acknowledged)?;
+        let staged = self.store.stage_acknowledge(
+            &transaction,
+            &self.backlog,
+            target,
+            &stored,
+            &acknowledged,
+        )?;
         let cache_effects = cache_writes.entries();
         let retirements = cache_effects
             .iter()
@@ -1283,7 +1338,13 @@ impl QueuePublisher {
             .collect::<Vec<_>>();
         let fenced = !pending_cache.is_empty();
         let committed = match vector::commit_fenced(transaction, pending_cache).await {
-            Ok(committed) => committed,
+            Ok(committed) => {
+                self.metrics.drained_queue_deletes.fetch_add(
+                    u64::from(staged == StagedAcknowledgement::QueueDelete),
+                    Ordering::Relaxed,
+                );
+                committed
+            }
             // A definite conflict committed nothing.
             Err(error) if error.kind() == slatedb::ErrorKind::Transaction => {
                 self.metrics
@@ -1297,7 +1358,7 @@ impl QueuePublisher {
                 if FailureKind::of(&error) == FailureKind::Fatal {
                     return Err(error);
                 }
-                self.record_uncertain_commit(target, selection, &acknowledged);
+                self.record_uncertain_commit(target, selection, &acknowledged, staged);
                 tracing::warn!(%error, "queued vector publication outcome is uncertain");
                 return Ok(PublicationOutcome::Retry);
             }
@@ -1645,13 +1706,30 @@ impl QueuePublisher {
         target: QueueTarget,
         selection: &[SelectedEntity<'_>],
         acknowledged: &[QueuedOperationId],
+        staged: StagedAcknowledgement,
     ) {
         self.metrics
             .uncertain_commits
             .fetch_add(1, Ordering::Relaxed);
+        self.record_uncertain_delete(target, staged, acknowledged);
         self.backlog
             .mark_acknowledgement_uncertain(acknowledged.iter().copied());
         self.advance_past(target, selection);
+    }
+
+    /// Remembers a draining delete whose commit outcome is unknown, for
+    /// reconciliation to count once it finds the delete committed (see
+    /// `uncertain_deletes`).
+    fn record_uncertain_delete(
+        &self,
+        target: QueueTarget,
+        staged: StagedAcknowledgement,
+        acknowledged: &[QueuedOperationId],
+    ) {
+        let (StagedAcknowledgement::QueueDelete, Some(id)) = (staged, acknowledged.first()) else {
+            return;
+        };
+        self.uncertain_deletes.lock().insert(target, *id);
     }
 
     /// Starts `target`'s next batch after `selection`, whose entities are no
@@ -1810,8 +1888,13 @@ impl QueuePublisher {
             &transaction,
             &published,
         )?;
-        self.store
-            .stage_acknowledge(&transaction, target, &stored, &acknowledged)?;
+        let staged = self.store.stage_acknowledge(
+            &transaction,
+            &self.backlog,
+            target,
+            &stored,
+            &acknowledged,
+        )?;
         #[cfg(test)]
         {
             let barrier = self.hooks.before_commit.lock().take();
@@ -1823,6 +1906,15 @@ impl QueuePublisher {
                 return Err(HelixDbError::InvariantViolation(
                     "injected publication failure before commit".to_string(),
                 ));
+            }
+            if self
+                .hooks
+                .uncertain_without_commit
+                .swap(false, Ordering::SeqCst)
+            {
+                drop(transaction);
+                self.record_uncertain_commit(target, &selection, &acknowledged, staged);
+                return Ok(PublicationOutcome::Retry);
             }
         }
         match transaction.commit().await {
@@ -1840,7 +1932,7 @@ impl QueuePublisher {
                 if FailureKind::of(&error) == FailureKind::Fatal {
                     return Err(error);
                 }
-                self.record_uncertain_commit(target, &selection, &acknowledged);
+                self.record_uncertain_commit(target, &selection, &acknowledged, staged);
                 tracing::warn!(%error, "queued text publication outcome is uncertain");
                 return Ok(PublicationOutcome::Retry);
             }
@@ -1851,9 +1943,13 @@ impl QueuePublisher {
             .uncertain_after_commit
             .swap(false, Ordering::SeqCst)
         {
-            self.record_uncertain_commit(target, &selection, &acknowledged);
+            self.record_uncertain_commit(target, &selection, &acknowledged, staged);
             return Ok(PublicationOutcome::Retry);
         }
+        self.metrics.drained_queue_deletes.fetch_add(
+            u64::from(staged == StagedAcknowledgement::QueueDelete),
+            Ordering::Relaxed,
+        );
         self.backlog.acknowledge(acknowledged.iter().copied());
         let operations = acknowledged.len() as u64;
         let entities = selection.len() as u64;

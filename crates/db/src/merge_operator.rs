@@ -695,6 +695,41 @@ impl QueueMerges {
 /// while compaction and reads share the stored queues.
 static QUEUE_MERGES: QueueMerges = QueueMerges::new();
 
+tokio::task_local! {
+    /// Queue keys whose stored history a resolution inside
+    /// [`observe_empty_queue_resolutions`] found logically empty.
+    static EMPTY_QUEUE_RESOLUTIONS: std::cell::RefCell<std::collections::BTreeSet<Bytes>>;
+}
+
+/// Runs `read` and returns, beside its output, every operation-queue key one
+/// of its merge resolutions found logically empty: stored history (operands,
+/// possibly over a resolved value) that cancels out, which a read returns as
+/// absent.
+///
+/// # Contract
+///
+/// SlateDB resolves merges inside the read future that polls its iterators,
+/// so a resolution counts only when `read` itself performs it: compactions
+/// and other tasks' reads never do. A key the result names is present in
+/// storage below every newer write `read` observed and resolves to the empty
+/// queue there. A key read as absent because nothing is stored, or because
+/// its newest entry is a tombstone, is never named. Were a future SlateDB
+/// to resolve merges on another task, the result would only be empty, never
+/// wrong.
+pub(crate) async fn observe_empty_queue_resolutions<F: std::future::Future>(
+    read: F,
+) -> (F::Output, std::collections::BTreeSet<Bytes>) {
+    EMPTY_QUEUE_RESOLUTIONS
+        .scope(std::cell::RefCell::default(), async {
+            let output = read.await;
+            (
+                output,
+                EMPTY_QUEUE_RESOLUTIONS.with(std::cell::RefCell::take),
+            )
+        })
+        .await
+}
+
 /// Immutable index-operation queue algebra.
 ///
 /// Partial merges cancel each acknowledgement against its own enqueue and
@@ -753,7 +788,7 @@ impl MergeOperator for OperationQueueMergeOperator {
 
     fn merge_batch_with_base(
         &self,
-        _key: &Bytes,
+        key: &Bytes,
         existing_value: Option<Bytes>,
         operands: &[Bytes],
     ) -> Result<MergeResult, MergeOperatorError> {
@@ -762,7 +797,12 @@ impl MergeOperator for OperationQueueMergeOperator {
             .map_err(merge_decode_error)?
         {
             operation_queue::QueueMergeResult::Value(value) => MergeResult::Value(value),
-            operation_queue::QueueMergeResult::Empty => MergeResult::Tombstone,
+            operation_queue::QueueMergeResult::Empty => {
+                // Outside an observed read there is nothing to record.
+                let _ =
+                    EMPTY_QUEUE_RESOLUTIONS.try_with(|keys| keys.borrow_mut().insert(key.clone()));
+                MergeResult::Tombstone
+            }
         };
         let output = match &resolved {
             MergeResult::Value(value) => value.len(),

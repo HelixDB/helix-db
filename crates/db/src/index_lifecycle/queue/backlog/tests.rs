@@ -1458,3 +1458,97 @@ fn an_uncertain_acknowledgement_of_an_uncertain_enqueue_counts_one_discovery() {
         );
     }
 }
+
+/// An acknowledgement drains its target only when it names every charge of
+/// that target, whatever the charge's state, and none is uncertain.
+#[test]
+fn an_acknowledgement_drains_only_when_it_names_every_certain_charge_of_its_target() {
+    let backlog = ledger(u64::MAX, u64::MAX);
+    let drained = target(1, 1);
+    // No charge at all: nothing proves the queue holds only the named IDs.
+    assert_eq!(backlog.remainder(drained, &[]), Remainder::Outstanding);
+    assert_eq!(backlog.remainder(drained, &[id(1)]), Remainder::Outstanding);
+    backlog
+        .reserve(&[charge(drained, 1, 1, 10)], &[])
+        .unwrap()
+        .committed();
+    backlog.load_durable(drained, [(id(2), entity(2), 10)]);
+    // Another generation of the same index and another index are separate.
+    backlog
+        .reserve(&[charge(target(1, 2), 3, 3, 10)], &[])
+        .unwrap()
+        .committed();
+    backlog
+        .reserve(&[charge(target(2, 1), 4, 4, 10)], &[])
+        .unwrap()
+        .committed();
+    assert_eq!(
+        backlog.remainder(drained, &[id(1), id(2)]),
+        Remainder::Drained
+    );
+    assert_eq!(backlog.remainder(drained, &[id(1)]), Remainder::Outstanding);
+    assert_eq!(backlog.remainder(drained, &[id(2)]), Remainder::Outstanding);
+    // IDs charged to other targets name nothing of this one.
+    assert_eq!(
+        backlog.remainder(drained, &[id(1), id(3)]),
+        Remainder::Outstanding
+    );
+    assert_eq!(
+        backlog.remainder(drained, &[id(1), id(4)]),
+        Remainder::Outstanding
+    );
+    assert_eq!(
+        backlog.remainder(drained, &[id(1), id(2), id(3)]),
+        Remainder::Drained,
+        "an extra ID of another target removes nothing of this one"
+    );
+    // A producer that reserved and has not returned holds the queue open.
+    let mut reservation = backlog.reserve(&[charge(drained, 5, 5, 10)], &[]).unwrap();
+    assert_eq!(
+        backlog.remainder(drained, &[id(1), id(2)]),
+        Remainder::Outstanding
+    );
+    assert_eq!(
+        backlog.remainder(drained, &[id(1), id(2), id(5)]),
+        Remainder::Drained,
+        "a reserved operation read durable may be acknowledged"
+    );
+    reservation.begin_commit();
+    reservation.aborted();
+    assert_eq!(
+        backlog.remainder(drained, &[id(1), id(2)]),
+        Remainder::Drained
+    );
+}
+
+/// Any uncertain charge of the target, named or not, keeps it outstanding,
+/// and one of another target does not.
+#[test]
+fn an_uncertain_charge_keeps_its_target_outstanding() {
+    let backlog = ledger(u64::MAX, u64::MAX);
+    let drained = target(1, 1);
+    backlog.load_durable(drained, [(id(1), entity(1), 10), (id(2), entity(2), 10)]);
+    backlog.load_durable(target(2, 1), [(id(3), entity(3), 10)]);
+    backlog.mark_acknowledgement_uncertain([id(3)]);
+    assert_eq!(
+        backlog.remainder(drained, &[id(1), id(2)]),
+        Remainder::Drained
+    );
+    backlog.mark_acknowledgement_uncertain([id(2)]);
+    assert_eq!(
+        backlog.remainder(drained, &[id(1), id(2)]),
+        Remainder::Outstanding
+    );
+    assert_eq!(backlog.remainder(drained, &[id(1)]), Remainder::Outstanding);
+    // An uncertain enqueue that is never named keeps it outstanding too.
+    let other = target(4, 1);
+    backlog.load_durable(other, [(id(6), entity(6), 10)]);
+    backlog
+        .reserve(&[charge(other, 7, 7, 10)], &[])
+        .unwrap()
+        .uncertain();
+    assert_eq!(
+        backlog.remainder(other, &[id(6), id(7)]),
+        Remainder::Outstanding
+    );
+}

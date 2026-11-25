@@ -4664,6 +4664,8 @@ impl HelixDB {
             blocked_attempts: load(&metrics.blocked_attempts),
             blocked_entities: publisher.blocked_entity_count() as u64,
             discarded_operations: load(&metrics.discarded_operations),
+            drained_queue_deletes: load(&metrics.drained_queue_deletes),
+            open_drained_queue_tombstones: load(&metrics.open_drained_queue_tombstones),
             queue_reads: load(&metrics.queue_reads),
             queue_read_bytes: load(&metrics.queue_read_bytes),
             queue_read_micros: load(&metrics.queue_read_micros),
@@ -4835,20 +4837,48 @@ impl HelixDB {
     /// Writers run this before returning from open so the first graph write is
     /// admitted against exact durable usage.
     async fn load_index_operation_backlog(&self) -> Result<()> {
+        use index_lifecycle::queue::recovery::{self, DrainedTombstones};
         let HelixStorage::Writer(writer) = self.storage() else {
             return Ok(());
         };
-        let summary = index_lifecycle::queue::recovery::load_backlog(
+        let loaded = recovery::load_backlog(
             writer.db(),
             &self.inner.index_queue_store,
             &self.inner.index_operation_backlog,
         )
         .await?;
+        let summary = loaded.summary;
         tracing::info!(
             queues = summary.queues,
             operations = summary.operations,
             "HelixDB index operation backlog loaded"
         );
+        // Before any graph write is admitted, so no producer can race it.
+        match loaded
+            .tombstone_drained(writer.db(), &self.inner.index_operation_backlog)
+            .await?
+        {
+            DrainedTombstones::NothingDrained => {}
+            DrainedTombstones::Committed { queues } => {
+                self.inner
+                    .index_queue_publisher
+                    .iter()
+                    .for_each(|publisher| {
+                        publisher
+                            .metrics()
+                            .open_drained_queue_tombstones
+                            .fetch_add(queues, std::sync::atomic::Ordering::Relaxed);
+                    });
+                tracing::info!(queues, "HelixDB deleted drained index operation queues");
+            }
+            DrainedTombstones::Conflicted { queues } => {
+                tracing::info!(
+                    queues,
+                    "HelixDB left drained index operation queues to a later open: a write \
+                     to one committed during the load"
+                );
+            }
+        }
         if summary.operations > 0 {
             self.notify_index_worker();
         }

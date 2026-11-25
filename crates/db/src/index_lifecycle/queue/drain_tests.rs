@@ -664,7 +664,9 @@ async fn a_drain_restarted_midway_publishes_the_rest_once() {
 
 /// Writes, rewrites, and deletes committed while a backlog drains each
 /// publish exactly once, in order: the drain continues from its retained
-/// queue and reads storage again only once that is exhausted.
+/// queue and reads storage again only once that is exhausted. An attempt
+/// that drained the queue and deletes its key retries when a write commits
+/// during it.
 #[tokio::test]
 async fn writes_committed_during_a_drain_publish_once_in_order() {
     let db = open("drain-concurrent", Arc::new(InMemory::new()), config()).await;
@@ -701,12 +703,11 @@ async fn writes_committed_during_a_drain_publish_once_in_order() {
             let outcome = publishing.publish_once(target).await.unwrap();
             outcomes.push(outcome);
             match outcome {
-                PublicationOutcome::Published { .. } => {}
+                PublicationOutcome::Published { .. } | PublicationOutcome::Retry => {}
                 PublicationOutcome::Empty if done.load(Ordering::SeqCst) => return outcomes,
                 PublicationOutcome::Empty => tokio::task::yield_now().await,
                 outcome @ (PublicationOutcome::Discarded { .. }
                 | PublicationOutcome::Deferred
-                | PublicationOutcome::Retry
                 | PublicationOutcome::Trimmed
                 | PublicationOutcome::Blocked
                 | PublicationOutcome::Stalled) => panic!("the drain stopped: {outcome:?}"),

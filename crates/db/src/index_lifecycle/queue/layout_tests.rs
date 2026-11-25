@@ -396,7 +396,13 @@ async fn corrupt_row_queues_fail_closed() {
         .unwrap();
     let unread = QueuedOperationId::try_from_u128(2).unwrap();
     assert!(matches!(
-        store.stage_acknowledge(&transaction, text, &stored, &[unread]),
+        store.stage_acknowledge(
+            &transaction,
+            db.index_operation_backlog(),
+            text,
+            &stored,
+            &[unread]
+        ),
         Err(HelixDbError::InvariantViolation(_))
     ));
     drop(transaction);
@@ -428,7 +434,9 @@ async fn corrupt_row_queues_fail_closed() {
         IndexWorkerWakeHandle::default(),
     );
     assert!(matches!(
-        load_backlog(storage.as_ref(), &store, &backlog).await,
+        load_backlog(storage.as_ref(), &store, &backlog)
+            .await
+            .map(|loaded| loaded.summary),
         Err(HelixDbError::IndexCatalogCorruption(_))
     ));
 
@@ -443,7 +451,9 @@ async fn corrupt_row_queues_fail_closed() {
         .await
         .unwrap();
     assert!(matches!(
-        load_backlog(storage.as_ref(), &store, &backlog).await,
+        load_backlog(storage.as_ref(), &store, &backlog)
+            .await
+            .map(|loaded| loaded.summary),
         Err(HelixDbError::IndexCatalogCorruption(_))
     ));
     db.close().await.unwrap();

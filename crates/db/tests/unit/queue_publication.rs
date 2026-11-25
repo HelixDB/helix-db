@@ -768,7 +768,13 @@ async fn uncertain_acknowledgements_reconcile() {
         .expect("acknowledgement transaction opens");
     publisher
         .store
-        .stage_acknowledge(&transaction, target, &stored, &[operations[0].id()])
+        .stage_acknowledge(
+            &transaction,
+            db.index_operation_backlog(),
+            target,
+            &stored,
+            &[operations[0].id()],
+        )
         .expect("acknowledgement stages");
     transaction.commit().await.expect("acknowledgement commits");
     db.index_operation_backlog()
