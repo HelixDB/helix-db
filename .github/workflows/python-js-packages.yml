@@ -128,7 +128,7 @@ jobs:
       matrix:
         include:
           - name: macos-universal2
-            runner: macos-14
+            runner: macos-15
             target: universal2-apple-darwin
             manylinux: "off"
           - name: windows-x86_64
