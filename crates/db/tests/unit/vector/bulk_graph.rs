@@ -1058,6 +1058,42 @@ fn an_orphan_between_two_clusters_is_linked_into_both() {
     assert_eq!(graph.row(0, 4).iter().collect::<Vec<_>>(), [1, 2, 5, 6]);
 }
 
+/// A node on layer 0 alone starts layer 0 from what a beam of layer 1 as wide
+/// as the upper degree finds from the entry point, not from where a greedy
+/// walk of layer 1 ends nor from a beam started there.
+///
+/// Seen from node 5, at 0, the entry point E at 10 links A at 5 and B at
+/// -5.2; A links A2 at 5.5, and B links C at -1. A greedy walk moves to A
+/// and stops: A2 is further. A beam of two from A keeps A and A2 and stops,
+/// as E is further than both. From E, the beam keeps A and B, ahead of A2,
+/// and B leads it to C.
+#[test]
+fn a_layer_0_insert_starts_from_a_layer_1_beam_from_the_entry() {
+    let points = [
+        (10.0, 1),
+        (5.0, 1),
+        (5.5, 1),
+        (-5.2, 1),
+        (-1.0, 1),
+        (0.0, 0),
+    ];
+    let graph = line_graph(&points, &[(1, 0, 1), (1, 0, 3), (1, 1, 2), (1, 3, 4)]);
+    let entry = *graph.entry.read();
+    assert_eq!((entry.node, entry.layer), (0, 1));
+    let mut seeds = Vec::new();
+    graph
+        .descend(
+            &graph.vectors.item(5),
+            5,
+            0,
+            entry,
+            &mut seeds,
+            &mut Scratch::default(),
+        )
+        .unwrap();
+    assert_eq!(seeds, [4, 1], "C and A, nearest first");
+}
+
 /// An insert above layer 0 starts each lower layer's beam from the nearest
 /// nodes the beam above found, not from the nearest alone.
 ///
