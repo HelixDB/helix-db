@@ -1602,7 +1602,8 @@ async fn health_counts_the_index_entities_the_worker_holds_back() {
             "blocked_index_entity_count",
             "index_runtime",
             "mode",
-            "ready"
+            "ready",
+            "storage"
         ]
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>(),
