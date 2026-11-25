@@ -1911,12 +1911,19 @@ func (t *Traversal) ProjectDistinctBindings(projections ...BindingProjection) *T
 }
 func (t *Traversal) EdgeProperties() *Traversal { return t.addTerminal(unitStep("EdgeProperties")) }
 func (t *Traversal) AddN(label string, props Props) *Traversal {
+	// The server requires `properties`, and a nil slice would encode as null.
+	if props == nil {
+		props = Props{}
+	}
 	return t.addWrite(step("AddN", struct {
 		Label      string `json:"label"`
 		Properties Props  `json:"properties"`
 	}{label, props}))
 }
 func (t *Traversal) AddE(label string, to NodeRef, props Props) *Traversal {
+	if props == nil {
+		props = Props{}
+	}
 	return t.addWrite(step("AddE", struct {
 		Label      string  `json:"label"`
 		To         NodeRef `json:"to"`
