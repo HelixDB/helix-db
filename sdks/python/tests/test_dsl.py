@@ -601,6 +601,7 @@ class DslAstTests(unittest.TestCase):
             self.assertEqual(parsed(PropertyValue.i64(value)), {"i64": value})
             self.assertEqual(parsed(PropertyValue.from_value(i64(value))), {"i64": value})
             self.assertEqual(QueryValue.i64(value), value)
+            QueryRequest.read(read_batch()).with_untyped_parameter("value", value)
         for value in (i64_min - 1, i64_max + 1):
             with self.assertRaisesRegex(TypeError, "signed 64-bit range"):
                 i64(value)
@@ -616,6 +617,17 @@ class DslAstTests(unittest.TestCase):
                 )
             with self.assertRaisesRegex(TypeError, "signed 64-bit range"):
                 read_batch().to_query_json(define_params({"value": param.i64()}), {"value": value})
+            # The server reads an integer past i64 as a float, so JSON-shaped params refuse it too.
+            with self.assertRaisesRegex(TypeError, "signed 64-bit range"):
+                QueryRequest.read(read_batch()).with_untyped_parameter("value", value)
+            with self.assertRaisesRegex(TypeError, "signed 64-bit range"):
+                QueryRequest.read(read_batch()).with_typed_parameter(
+                    "value", QueryParamType.value(), value
+                )
+            with self.assertRaisesRegex(TypeError, "signed 64-bit range"):
+                QueryRequest.read(read_batch()).with_typed_parameter(
+                    "value", QueryParamType.object(), {"nested": [value]}
+                )
         self.assertEqual(
             DateTime.parse_rfc3339("1969-12-31T23:59:59.999-00:00").to_rfc3339(),
             "1969-12-31T23:59:59.999Z",
