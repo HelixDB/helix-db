@@ -532,11 +532,13 @@ async fn unreachable_or_failing_servers_fail_the_reachability_check() {
         Some("Check `helix logs dev`, then `helix restart dev`.")
     );
 
-    // Nothing listens on a port that was just released.
-    let closed = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        format!("http://{}", listener.local_addr().unwrap())
-    };
+    // A port held by a socket that never listens refuses every connection, and
+    // no other test can bind it meanwhile. A port released after listening is
+    // not enough: another test can take it, or a child process another test
+    // starts can still hold the listener until its `exec`.
+    let reserved = tokio::net::TcpSocket::new_v4().unwrap();
+    reserved.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let closed = format!("http://{}", reserved.local_addr().unwrap());
     let mut checks = Vec::new();
     assert_eq!(server_checks(&closed, None, &mut checks).await, None);
     let [unreachable] = checks.as_slice() else {
