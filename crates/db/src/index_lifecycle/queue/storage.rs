@@ -512,7 +512,6 @@ impl QueueStore {
     }
 
     /// Returns the configured layout.
-    #[cfg(test)]
     pub(crate) const fn layout(&self) -> QueueLayout {
         self.layout
     }

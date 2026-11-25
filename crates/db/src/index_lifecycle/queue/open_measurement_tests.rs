@@ -270,7 +270,8 @@ async fn measure_writer_open_over_a_large_backlog() {
             let loading = Instant::now();
             let summary = super::recovery::load_backlog(&db, &store, &backlog)
                 .await
-                .unwrap();
+                .unwrap()
+                .summary;
             let elapsed = loading.elapsed();
             let (_, peak) = memory();
             println!(

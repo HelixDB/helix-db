@@ -4,20 +4,28 @@
 //! committed-but-unpublished operation for that generation. Producers append
 //! with blind [`slatedb::DbTransaction::merge_disjoint_tokens`] operands and
 //! never read the key. The publication worker removes exact operation IDs
-//! with acknowledgement operands, blind too, except in the case below, where
-//! it writes a SlateDB tombstone of the key instead.
+//! with acknowledgement operands, blind too, except in the two cases below,
+//! where it writes a SlateDB tombstone of the key instead.
 //!
 //! # Tombstones of drained queues
 //!
-//! **Delete on drain.** An acknowledgement that names every operation it
-//! read, while the writer's ledger (asked after its transaction began)
-//! charges the generation nothing else and nothing uncertain, deletes the key.
-//! The key is marked read and the delete is left out of conflict checks, so an
-//! enqueue that commits after the acknowledgement's transaction began aborts
-//! that acknowledgement alone, and an enqueue committed after it lands above
-//! the tombstone. The tombstone holds exactly what the history resolved to,
-//! so the logical queue is unchanged; it only stops later reads from merging
-//! the shadowed history again.
+//! - **Delete on drain.** An acknowledgement that names every operation it
+//!   read, while the writer's ledger (asked after its transaction began)
+//!   charges the generation nothing else and nothing uncertain, deletes the
+//!   key. The key is marked read and the delete is left out of conflict
+//!   checks, so an enqueue that commits after the acknowledgement's
+//!   transaction began aborts that acknowledgement alone, and an enqueue
+//!   committed after it lands above the tombstone.
+//! - **At writer open.** The backlog load notes each key whose stored
+//!   history (operands, possibly over a resolved value) resolves to the empty
+//!   queue. Before the open accepts writes, one transaction re-checks each
+//!   with a point get and the ledger, marks it read, and deletes it: all of
+//!   them commit or none do, and a write to any of them after that
+//!   transaction began aborts every delete.
+//!
+//! Either way the tombstone holds exactly what the history resolved to, so
+//! the logical queue is unchanged; it only stops later reads from merging the
+//! shadowed history again.
 //!
 //! **Older binaries.** A tombstoned queue key is not a new stored state:
 //! compaction already writes one whenever a queue resolves to empty against

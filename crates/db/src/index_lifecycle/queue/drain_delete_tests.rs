@@ -794,3 +794,82 @@ async fn storage_deletes_only_when_the_read_and_the_ledger_both_drain() {
     drop(transaction);
     db.close().await.unwrap();
 }
+
+/// Queues an earlier version drained with removal operands (vector and
+/// text) are deleted by the next writer open, before it admits any write;
+/// the open after that writes nothing more.
+#[tokio::test]
+async fn a_writer_open_tombstones_queues_drained_by_removals() {
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let config = || queued(IndexOperationQueueTuning::default());
+    let db = open("drain-open", Arc::clone(&store), config()).await;
+    super::tests::install_vector_and_text(&db).await;
+    add_doc(&db, vec![0.0, 0.0], "alpha").await.unwrap();
+    add_doc(&db, vec![1.0, 1.0], "beta").await.unwrap();
+    let targets = [QueueFamily::Vector, QueueFamily::Text];
+    let mut drained = Vec::new();
+    for family in targets {
+        let target = super::tests::target(&db, family).await;
+        let ids = queue(&db, family)
+            .await
+            .unwrap()
+            .into_operations()
+            .iter()
+            .map(QueuedOperation::id)
+            .collect::<Vec<_>>();
+        // What an earlier version's acknowledgement staged.
+        let (bytes, tokens) = QueueOperand::acknowledge(family, ids).unwrap().into_parts();
+        let transaction = db
+            .inner_db()
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        transaction
+            .merge_disjoint_tokens(target.key(), tokens, bytes)
+            .unwrap();
+        transaction.commit().await.unwrap();
+        assert!(queue(&db, family).await.is_none());
+        assert_eq!(
+            newest(&db.inner_db(), &target.key()).await,
+            Some(Stored::Merge)
+        );
+        drained.push(target);
+    }
+    db.close().await.unwrap();
+
+    let db = open("drain-open", Arc::clone(&store), config()).await;
+    let stats = db.index_operation_queue_stats();
+    assert_eq!(
+        (
+            stats.open_drained_queue_tombstones,
+            stats.drained_queue_deletes
+        ),
+        (2, 0)
+    );
+    let mut kept = Vec::new();
+    for target in &drained {
+        let entries = history(&db.inner_db(), &target.key()).await;
+        assert_eq!(entries.first(), Some(&Stored::Tombstone), "{target:?}");
+        kept.push(entries);
+    }
+    assert!(db
+        .index_operation_backlog()
+        .outstanding_targets()
+        .is_empty());
+    db.close().await.unwrap();
+
+    let db = open("drain-open", store, config()).await;
+    assert_eq!(
+        db.index_operation_queue_stats()
+            .open_drained_queue_tombstones,
+        0
+    );
+    for (target, entries) in drained.iter().zip(kept) {
+        assert_eq!(
+            history(&db.inner_db(), &target.key()).await,
+            entries,
+            "a second open writes nothing"
+        );
+    }
+    db.close().await.unwrap();
+}

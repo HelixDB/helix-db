@@ -434,7 +434,9 @@ async fn corrupt_row_queues_fail_closed() {
         IndexWorkerWakeHandle::default(),
     );
     assert!(matches!(
-        load_backlog(storage.as_ref(), &store, &backlog).await,
+        load_backlog(storage.as_ref(), &store, &backlog)
+            .await
+            .map(|loaded| loaded.summary),
         Err(HelixDbError::IndexCatalogCorruption(_))
     ));
 
@@ -449,7 +451,9 @@ async fn corrupt_row_queues_fail_closed() {
         .await
         .unwrap();
     assert!(matches!(
-        load_backlog(storage.as_ref(), &store, &backlog).await,
+        load_backlog(storage.as_ref(), &store, &backlog)
+            .await
+            .map(|loaded| loaded.summary),
         Err(HelixDbError::IndexCatalogCorruption(_))
     ));
     db.close().await.unwrap();

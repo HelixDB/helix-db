@@ -143,6 +143,7 @@ pub(crate) struct QueuePublicationMetrics {
     pub(crate) blocked_attempts: AtomicU64,
     pub(crate) discarded_operations: AtomicU64,
     pub(crate) drained_queue_deletes: AtomicU64,
+    pub(crate) open_drained_queue_tombstones: AtomicU64,
     pub(crate) queue_reads: AtomicU64,
     pub(crate) queue_read_bytes: AtomicU64,
     pub(crate) queue_read_micros: AtomicU64,

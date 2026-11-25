@@ -297,6 +297,14 @@ pub(crate) mod gated_wal {
             }
         }
 
+        /// A store over `memory`'s objects whose WAL uploads are open.
+        pub(crate) fn from_memory(memory: InMemory) -> Self {
+            Self {
+                inner: Arc::new(memory),
+                uploads: watch::Sender::new(WalUploads::Open),
+            }
+        }
+
         /// The same objects as a restarted process sees them, with open
         /// uploads. Uploads this store holds never land, so a database it
         /// served loses its WAL tail as a crash would.

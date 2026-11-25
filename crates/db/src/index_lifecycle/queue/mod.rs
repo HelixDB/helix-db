@@ -108,6 +108,9 @@ pub struct IndexOperationQueueStats {
     /// committed: when its commit returns, or when reconciliation finds that
     /// one whose outcome was uncertain committed.
     pub drained_queue_deletes: u64,
+    /// Queue keys this writer's open found drained (stored history that
+    /// resolves to the empty queue) and tombstoned before accepting writes.
+    pub open_drained_queue_tombstones: u64,
     /// Storage reads of a generation queue by publication, including reads
     /// that find it empty, retired-generation discards, and uncertain-commit
     /// reconciliation. An attempt that continues from the queue its target's
