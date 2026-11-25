@@ -25,13 +25,20 @@ full-text search, built in Rust on object storage. Store entities, relationships
 and text in one transactional engine and query them together from Rust, TypeScript, Go, or
 Python.
 
-Want a graph of your business without writing the schema? [Helix Foundry](https://foundry.helix-db.com/login?return_to=%2Fontology%2Fsample&utm_source=helixdb_readme&utm_medium=readme&utm_campaign=intro)
-builds an ontology over your databases, apps and documents and loads it into HelixDB. Try it
-on a sample company.
-
 | Graph | Vector | Full-text |
 | --- | --- | --- |
 | Model entities, relationships, and typed properties as a labeled property graph. | Approximate nearest-neighbor search, prefiltered by graph traversal. | BM25 keyword search over node and edge properties. |
+
+## Helix Foundry
+
+<p align="center">
+  <a href="https://foundry.helix-db.com/login?return_to=%2Fontology%2Fsample&utm_source=helixdb_readme&utm_medium=readme&utm_campaign=banner"><img src="https://raw.githubusercontent.com/HelixDB/helix-foundry/main/.github/assets/explorer.png" width="800" alt="The Helix Foundry Explorer: customers, invoices and contracts as one connected graph in HelixDB"></a>
+</p>
+
+**Helix Foundry** connects your databases, apps and documents, has an agent draft an
+ontology over them, and loads it into HelixDB as one graph you can explore and ask questions of, with
+every value traced to the row or quote it came from. [Try it on a sample company](https://foundry.helix-db.com/login?return_to=%2Fontology%2Fsample&utm_source=helixdb_readme&utm_medium=readme&utm_campaign=banner), free
+with no install, or run it yourself from [HelixDB/helix-foundry](https://github.com/HelixDB/helix-foundry) (Apache 2.0).
 
 ## Getting started
 
