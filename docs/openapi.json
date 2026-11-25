@@ -244,7 +244,7 @@
       "get": {
         "operationId": "getHealth",
         "summary": "Get process health",
-        "description": "Reports process liveness and the current database, storage and index-runtime state. Liveness returns 200 even when ready is false, including for a writer a newer writer fenced: restarting it would fence that writer in turn. It returns 503 only once storage failed or closed, when a restart may help.",
+        "description": "Reports process liveness and the current database, storage and index-runtime state. Liveness returns 200 even when ready is false, including for a writer a newer writer fenced: restarting it would fence that writer in turn. It returns 503 only once storage failed, when a restart may help.",
         "tags": [
           "Health"
         ],
@@ -261,7 +261,7 @@
             }
           },
           "503": {
-            "description": "Storage failed (`storage` is `failed`) or closed while shutting down (`closed`). Restart the process.",
+            "description": "Storage failed (`storage` is `failed`). Restart the process.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1909,7 +1909,7 @@
               "failed",
               "closed"
             ],
-            "description": "Whether storage still serves. `fenced`: a newer writer opened the same store, so this writer fails every request with `writer_fenced_commit_outcome_unknown` until it is restarted. `failed`: a storage task failed. `closed`: the server is shutting down. Every state but `open` is final for the process."
+            "description": "Whether storage still serves. `fenced`: a newer writer opened the same store, so this writer fails every request with `writer_fenced_commit_outcome_unknown` until it is restarted. `failed`: a storage task failed. `closed`: storage was closed; the server stops accepting requests before it closes storage, so its probes do not report this state. Every state but `open` is final for the process."
           },
           "index_runtime": {
             "type": "string",

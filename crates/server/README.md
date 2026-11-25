@@ -14,7 +14,7 @@ HTTP endpoints:
 - `GET /healthz` reports process liveness, storage state (`storage`) and index
   readiness, and counts the index entities the writer's index worker holds back
   (`blocked_index_entity_count`); the writer's logs name each one. It is 503
-  only once storage failed or closed, when a restart may help.
+  only once storage failed, when a restart may help.
 - `GET /readyz` is 200 while storage is open and indexes are ready. A writer
   that a newer writer fenced turns 503 (`"storage": "fenced"`) for good, but
   stays live: restarting it would fence the newer writer in turn. It fails
