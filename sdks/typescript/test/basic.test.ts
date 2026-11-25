@@ -485,6 +485,27 @@ assert.throws(
   /outside the f32 range/,
 );
 assert.throws(() => QueryRequest.read(readBatch()).withTypedParameter("score", QueryParamType.f64(), Number.NaN), /must be finite/);
+// Untyped, value and object params rebuild objects from their own fields, which scrambles bytes and class instances.
+for (const payload of [new Uint8Array([1, 2, 3]), Buffer.from([1, 2, 3])]) {
+  assert.throws(() => QueryRequest.read(readBatch()).withUntypedParameter("payload", payload), QueryError);
+  assert.throws(() => QueryRequest.read(readBatch()).withTypedParameter("payload", QueryParamType.value(), payload), QueryError);
+  assert.throws(() => QueryRequest.read(readBatch()).withTypedParameter("row", QueryParamType.object(), { payload }), QueryError);
+}
+for (const value of [DateTime.fromMillis(1000), PropertyValue.i64(5), new Map([["a", 1]]), new Float32Array([0.5])]) {
+  assert.throws(() => QueryRequest.read(readBatch()).withUntypedParameter("value", value), /parameter 'value' must be JSON-compatible/);
+  assert.throws(
+    () => QueryRequest.read(readBatch()).withTypedParameter("row", QueryParamType.object(), { nested: [value] }),
+    /parameter 'row\.nested\[0\]' must be JSON-compatible/,
+  );
+}
+assert.deepEqual(
+  JSON.parse(
+    QueryRequest.read(readBatch())
+      .withUntypedParameter("value", { a: 1, b: Object.assign(Object.create(null) as object, { c: [true] }) })
+      .toJsonString(),
+  ).parameters.value,
+  { a: 1, b: { c: [true] } },
+);
 assert.throws(
   () => QueryRequest.read(readBatch()).withUntypedParameter("raw", true).withTypedParameter("typed", QueryParamType.bool(), true),
   /cannot be mixed/,
