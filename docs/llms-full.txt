@@ -581,6 +581,9 @@ On a document's page, owners and admins can:
 
 ## How ontologies read documents
 
+For the ideas behind reading documents into facts, see
+[How do you extract structured data from documents?](/learn/ontologies/extract-structured-data-from-documents)
+
 An ontology doesn't read every document in the workspace. Each version reads the sets
 its generation picked:
 
@@ -17920,6 +17923,8 @@ A graph database stores entities as nodes and relationships as edges, so questio
     [What is an ontology?](/learn/ontologies/what-is-an-ontology)
     [What is data provenance?](/learn/ontologies/what-is-data-provenance)
     [What is entity resolution?](/learn/ontologies/what-is-entity-resolution)
+    [How do you extract structured data from documents?](/learn/ontologies/extract-structured-data-from-documents)
+    [What is a semantic layer?](/learn/ontologies/what-is-a-semantic-layer)
 
     HelixDB is an open-source graph database with native vector search and BM25
     full-text search, built on object storage.
@@ -22640,7 +22645,7 @@ data and revise.
 
     Inventory the tables, apps, and documents that hold the answers. Structured tables
     map onto types almost directly. Documents such as contracts or call notes hold
-    facts that need extraction.
+    facts that need [extraction](/learn/ontologies/extract-structured-data-from-documents).
 
     Name each type and link, list each type's properties, and choose identifiers that
     pick out one record. An LLM can draft this from samples of your data and your
@@ -22712,6 +22717,13 @@ goal is querying and grounding AI on your own data.
 An LLM can draft one quickly from data samples and your questions, and it is good at
 naming types and spotting links. It can also invent links the data does not support or
 miss a rule only your team knows, so review each draft and test it against real data.
+
+### What is the difference between an ontology and a semantic layer?
+
+A [semantic layer](/learn/ontologies/what-is-a-semantic-layer) defines metrics, such as
+monthly revenue, so every report computes them the same way from warehouse tables. An
+ontology defines entities and how they connect across every system and document. Many
+companies use both.
 
 ### How big should an ontology be?
 
@@ -23069,4 +23081,315 @@ decisions.
     Retrieval that follows relationships, and why resolution matters to it.
 
     Working, episodic, and semantic memory for LLM agents.
+
+# How do you extract structured data from documents?
+
+Page type: Concept
+
+To extract structured data from documents, define the shape you want, such as a
+contract's customer, start date, and renewal terms, then have a model read each document
+and fill that shape, keeping the quote behind every value. Check each extracted fact
+against its quote, link the names it mentions to records you already hold, and send what
+the checks cannot settle to a person. Think of it as turning a pile of paperwork into rows
+in a spreadsheet, with a footnote on every cell.
+
+    After reading this article you will be able to:
+
+    - Explain what document extraction produces: entities, facts, and their quotes
+    - Describe why a target shape, such as an ontology, comes first
+    - Outline an extraction pipeline from parsing to review
+    - Describe how to verify extracted facts and control cost
+
+## What does document extraction produce?
+
+It produces three things: the entities a document names, the facts it states about
+them, and the evidence for each fact. A sentence such as "Northwind signed the services
+agreement on March 1" yields a `Customer` named Northwind, a `Contract`, a `SIGNED`
+link between them with a `signedOn` date, and the quote that states it.
+
+| Output | What it is | Example |
+| --- | --- | --- |
+| Entity mention | A name the document uses for a thing | "Northwind", "the Client" |
+| Property value | A typed value about an entity | `signedOn = 2026-03-01` |
+| Relationship | A typed link between two entities | `Customer -[SIGNED]-> Contract` |
+| Evidence | The exact quote, and where it is | Page 2, "signed the services agreement on March 1" |
+| Confidence | How sure the check was | A verifier's score of 0.94 |
+
+Together they become part of a
+[knowledge graph](/learn/graph-databases/what-is-a-knowledge-graph): structured facts
+that can be queried, joined with tables, and cited.
+
+## Why do you need a target shape first?
+
+Because a model asked to "pull out everything important" returns something different
+for every document. A fixed shape, the types, properties, and links you want, makes
+every document's output comparable and lets you reject output that does not fit.
+
+That shape is usually an [ontology](/learn/ontologies/what-is-an-ontology). It also
+says which documents may fill which types: a contract can name a customer and a renewal
+date, while call notes can name a product and a complaint. Narrow targets extract more
+accurately than broad ones, because the model has fewer places to put a wrong answer.
+
+    Read your documents into the same HelixDB graph as your tables, with the quote behind every fact.
+
+## How does an extraction pipeline work?
+
+Parse the document into text, extract candidate facts in the target shape, verify each
+one against its quote, link names to known records, and store the result with its
+evidence.
+
+    Turn PDFs, Markdown, and text into clean text with its structure: sections, pages,
+    and tables. Table files such as CSV are better loaded as tables than read as prose.
+
+    Give a language model the target shape and a section of the document, and ask for
+    entities, properties, and relationships in a fixed format, each with the quote it
+    came from. Reject output that does not validate against the shape.
+
+    Check that each quote really appears in the document and really states the fact.
+    A second model call or rule can score each claim, so weak claims are held rather
+    than stored as settled.
+
+    Link each name to an existing record, so "the Client" in a contract becomes the
+    customer already in your billing table. This is
+    [entity resolution](/learn/ontologies/what-is-entity-resolution), and it decides
+    whether the new facts join the right entity.
+
+    Write the facts with their quotes, document, and confidence, the
+    [provenance](/learn/ontologies/what-is-data-provenance) that lets anyone check
+    them later.
+
+Extraction is a different job from chunking for
+[retrieval-augmented generation (RAG)](/learn/ai-memory/what-is-rag). RAG keeps passages
+of text and finds them with [vector search](/learn/vector-search/what-is-vector-search)
+at question time; extraction turns the text into facts ahead of time, so questions such
+as "which contracts renew next quarter?" become a query, not a search.
+
+## How do you know extracted facts are right?
+
+You check them in layers: validate the shape, verify each quote, compare with your
+tables, and have a person look at what the checks cannot settle.
+
+- **Quote verification.** A fact whose quote is missing or does not say what the fact
+  claims is dropped or held.
+- **Cross-checks with tables.** When a document disagrees with a system of record, such
+  as a different renewal date than billing holds, flag the conflict instead of picking
+  one silently.
+- **Unresolved names.** A name that matches no record, or several, is held for a person
+  rather than creating a duplicate entity.
+- **Sampling.** Reviewing a random sample of accepted claims measures how often the
+  pipeline is right at each confidence score, which tells you where to set thresholds.
+
+## How do you control the cost of extraction?
+
+Model calls are the main cost, so read each document once and only re-read what changed.
+
+- **Cache by content.** The same text read by the same model gives the same result, so
+  key results by document content and model, and reuse them.
+- **Extract incrementally.** When a document is replaced or a new one arrives, read only
+  that document. When one is deleted, its provenance says which facts to remove.
+- **Route documents.** Only read a document for the types it can fill, and skip sets no
+  question needs.
+- **Cap spend.** Set a budget per run and per month, and let a run stop partway rather
+  than overspend.
+
+## How does Helix Foundry extract data from documents?
+
+[Helix Foundry](/foundry/start-here/introduction) reads documents into the same HelixDB
+graph as a company's tables:
+
+- **Routes.** A [generation](/foundry/ontologies/generate-and-version) reads up to five
+  of the newest documents in each set it picks and drafts routes: what each set's
+  documents may fill, such as a contract's signing date and the customer it was signed
+  with.
+- **Names, facts, and quotes.** A [load](/foundry/ontologies/load-data) reads every text
+  document and PDF in the version's sets for its sections, the names it mentions, and
+  the facts it states, each with the quote it came from. AI models find the names and
+  facts and check them. Table files are loaded as tables.
+- **Review instead of guessing.** A name the database doesn't hold, an ambiguous name, a
+  quote that couldn't be verified, or a fact that conflicts with the tables waits on the
+  [Review](/foundry/ontologies/review) page instead of becoming a record. About one card
+  in ten there is a random check that measures how often claims at each score are
+  right.
+- **Paying once.** Reading the same text with the same models again costs nothing, and
+  a document added to a set the current load reads is read as it arrives. See
+  [Documents](/foundry/data/documents).
+
+## Frequently asked questions
+
+### Is document extraction the same as OCR?
+
+No. OCR (optical character recognition) turns an image of a page into text. Extraction
+starts from text and turns it into typed facts. Scanned documents need OCR first.
+
+### Can a language model extract data reliably?
+
+Reliably enough when the target shape is narrow, every fact carries its quote, and the
+quotes are checked. Without those, models can invent plausible values that no sentence
+states.
+
+### Should you extract or just use RAG?
+
+Use [RAG](/learn/ai-memory/what-is-rag) for open-ended questions over prose, and
+extraction for facts you will filter, count, or join with tables. Many applications do
+both, and a [hybrid search](/learn/full-text-search/hybrid-search) over the original
+text is still useful for finding passages.
+
+### How do you handle documents that disagree?
+
+Keep both claims with their provenance, prefer a system of record or the newer dated
+document by a fixed rule, and send what no rule settles to a person. See
+[what happens when sources disagree](/learn/ontologies/what-is-data-provenance#what-happens-when-sources-disagree).
+
+## Related topics
+
+    The target shape extraction fills.
+
+    Linking extracted names to the records you already hold.
+
+    Keeping the quote behind every extracted fact.
+
+    Where extracted facts end up, connected to everything else.
+
+    Retrieving passages at question time instead of extracting ahead.
+
+    Answering questions by following extracted facts.
+
+# What is a semantic layer?
+
+Page type: Concept
+
+A semantic layer is a set of shared definitions, such as "active customer" or "monthly
+revenue", that sits between raw tables and the tools that query them. Think of it as a
+company recipe book: everyone who bakes "monthly revenue" follows the same recipe, so
+every dashboard, spreadsheet, and AI assistant gets the same number. It translates
+business terms into the joins, filters, and sums the tables need.
+
+    After reading this article you will be able to:
+
+    - Describe what a semantic layer defines: entities, dimensions, and metrics
+    - Explain the problem it solves for reports and AI tools
+    - Compare a semantic layer with an ontology
+    - Decide when you need one, the other, or both
+
+## What does a semantic layer define?
+
+It defines the business entities the tables describe, the attributes you group and
+filter by, and the metrics you compute, each as a reusable, named definition.
+
+| Part | What it is | Example |
+| --- | --- | --- |
+| Entity | A business concept backed by one or more tables | `Customer`, backed by the `accounts` table |
+| Dimension | An attribute to group or filter by | Plan, region, signup month |
+| Measure | A raw aggregation over a column | Sum of `invoices.amount` |
+| Metric | A named business calculation built from measures | Monthly recurring revenue, churn rate |
+| Join path | How entities connect in the tables | `invoices.account_id` → `accounts.id` |
+
+A query tool asks for "monthly recurring revenue by plan for last quarter", and the
+semantic layer turns that into the SQL that joins, filters, and aggregates the right
+tables.
+
+## Why do companies use a semantic layer?
+
+Because without one, every team writes its own version of each metric. Finance counts
+revenue when an invoice is paid, sales when a contract is signed, and two dashboards
+disagree in the board meeting. A semantic layer defines the metric once, so every tool
+computes it the same way.
+
+It also helps AI. A language model asked to write SQL against raw tables has to guess
+what "active customer" means and how tables join. Giving it named metrics and join paths
+instead makes its answers consistent with the company's own reports, a form of
+grounding similar in spirit to
+[retrieval-augmented generation (RAG)](/learn/ai-memory/what-is-rag).
+
+    Connect your company's data into one ontology in HelixDB, and ask it questions with cited answers.
+
+## What is the difference between a semantic layer and an ontology?
+
+A semantic layer is about numbers: how to compute metrics consistently from tables. An
+[ontology](/learn/ontologies/what-is-an-ontology) is about things and how they connect:
+which entities exist across every system, how they link, and the rules they follow. One
+answers "what was revenue last quarter?"; the other answers "which customers with an
+open complaint have a contract renewing soon, and where does each fact come from?"
+
+| | Semantic layer | Ontology |
+| --- | --- | --- |
+| Main concern | Consistent metrics and dimensions | Entities, links, and their meaning |
+| Typical sources | Tables in one warehouse | Databases, apps, and documents |
+| Data stays | In the warehouse; the layer compiles queries | Often loaded into a [knowledge graph](/learn/graph-databases/what-is-a-knowledge-graph) |
+| Relationships | Join paths between tables | Named, directed links such as `SIGNED_BY` |
+| Documents | Out of scope | Can be read for facts, with their quotes |
+| Typical query | Aggregations: sums, counts, ratios over time | Traversals: follow links, find connected records |
+| Identity across sources | Assumes keys already line up | Uses identifiers and [entity resolution](/learn/ontologies/what-is-entity-resolution) |
+
+They overlap. Both name business entities and hide table details from the people and
+tools that ask questions. Some ontologies define metrics, and some semantic layers model
+entity relationships. The difference is emphasis: aggregation over clean tables versus
+connection across messy sources.
+
+## When do you need a semantic layer, an ontology, or both?
+
+Choose by the questions you ask most.
+
+- **A semantic layer** suits teams whose data already sits in one warehouse with clean
+  keys, and whose main questions are metrics: revenue, retention, usage over time.
+- **An ontology** suits data spread across many systems and documents, where the hard
+  part is knowing that records refer to the same customer, following connections, and
+  citing sources. It is also the shape that
+  [GraphRAG](/learn/ai-memory/what-is-graphrag) and
+  [AI agent memory](/learn/ai-memory/what-is-ai-agent-memory) build on.
+- **Both** suit companies that need consistent reporting and connected, cited answers.
+  The ontology resolves who is who and what links to what; metrics are then computed
+  over its entities.
+
+## How does Helix Foundry relate to a semantic layer?
+
+[Helix Foundry](/foundry/start-here/introduction) builds an ontology, not a semantic
+layer, but covers some of the same ground:
+
+- **One shape across sources.** An ontology's types, links, and rules span the
+  databases, apps, and documents you connect, and its
+  [loads](/foundry/ontologies/load-data) write them into a HelixDB database, with every
+  value naming the row or quote it came from.
+- **Questions in plain words.** [Founder](/foundry/ask/ask-questions) answers questions
+  about a load step by step and cites each record, table row, quote, and rule it used.
+- **Saved queries.** A [dashboard](/foundry/automate/dashboards) is a page of tiles, each
+  one saved query over an ontology's load, read live by whoever opens it, so it never
+  shows anyone more than they may read.
+
+## Frequently asked questions
+
+### Is a semantic layer the same as a data model?
+
+Not quite. A data model describes how tables are structured. A semantic layer adds
+business meaning on top: named metrics, dimensions, and the joins between them.
+
+### Is a semantic layer the same as a metrics layer?
+
+A metrics layer is the part of a semantic layer that defines metrics. The terms are
+often used interchangeably, though a semantic layer usually also covers entities and
+dimensions.
+
+### Does a semantic layer store data?
+
+Usually not. It stores definitions and compiles queries that run where the data lives.
+Some add caching or pre-aggregated tables for speed.
+
+### Can an ontology replace a semantic layer?
+
+For connected questions and cited answers, often yes. For heavy metric reporting over a
+warehouse, a semantic layer is usually the better fit, and the two can work together.
+
+## Related topics
+
+    Shared types, links, and rules for data from many systems.
+
+    Deciding when records from different systems are the same thing.
+
+    Connected facts organized by an ontology, with their sources.
+
+    When connected questions outgrow joins.
+
+    Recording where every value came from, so answers can be checked.
+
+    Retrieval that follows relationships, compared with vector RAG.
 

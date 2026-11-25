@@ -403,7 +403,9 @@
             "pages": [
               "learn/ontologies/what-is-an-ontology",
               "learn/ontologies/what-is-data-provenance",
-              "learn/ontologies/what-is-entity-resolution"
+              "learn/ontologies/what-is-entity-resolution",
+              "learn/ontologies/extract-structured-data-from-documents",
+              "learn/ontologies/what-is-a-semantic-layer"
             ]
           }
         ]
@@ -1479,6 +1481,30 @@
     {
       "source": "/entity-matching",
       "destination": "/learn/ontologies/what-is-entity-resolution"
+    },
+    {
+      "source": "/document-extraction",
+      "destination": "/learn/ontologies/extract-structured-data-from-documents"
+    },
+    {
+      "source": "/data-extraction",
+      "destination": "/learn/ontologies/extract-structured-data-from-documents"
+    },
+    {
+      "source": "/information-extraction",
+      "destination": "/learn/ontologies/extract-structured-data-from-documents"
+    },
+    {
+      "source": "/semantic-layer",
+      "destination": "/learn/ontologies/what-is-a-semantic-layer"
+    },
+    {
+      "source": "/metrics-layer",
+      "destination": "/learn/ontologies/what-is-a-semantic-layer"
+    },
+    {
+      "source": "/semantic-layer-vs-ontology",
+      "destination": "/learn/ontologies/what-is-a-semantic-layer"
     },
     {
       "source": "/property-graph",

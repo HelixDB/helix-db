@@ -1,0 +1,201 @@
+---
+title: "How do you extract structured data from documents?"
+description: "Turn contracts, notes, and reports into typed records and facts by defining a target shape, extracting with a model, verifying each claim against its quote, and reviewing the rest."
+sidebarTitle: "Extracting data from documents"
+pageType: "Concept"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="purple" size="sm">Concept</Badge></div>
+
+To extract structured data from documents, define the shape you want, such as a
+contract's customer, start date, and renewal terms, then have a model read each document
+and fill that shape, keeping the quote behind every value. Check each extracted fact
+against its quote, link the names it mentions to records you already hold, and send what
+the checks cannot settle to a person. Think of it as turning a pile of paperwork into rows
+in a spreadsheet, with a footnote on every cell.
+
+<div className="learn-objectives">
+  <Card title="Learning objectives" icon="graduation-cap">
+    After reading this article you will be able to:
+
+    - Explain what document extraction produces: entities, facts, and their quotes
+    - Describe why a target shape, such as an ontology, comes first
+    - Outline an extraction pipeline from parsing to review
+    - Describe how to verify extracted facts and control cost
+  </Card>
+</div>
+
+## What does document extraction produce?
+
+It produces three things: the entities a document names, the facts it states about
+them, and the evidence for each fact. A sentence such as "Northwind signed the services
+agreement on March 1" yields a `Customer` named Northwind, a `Contract`, a `SIGNED`
+link between them with a `signedOn` date, and the quote that states it.
+
+| Output | What it is | Example |
+| --- | --- | --- |
+| Entity mention | A name the document uses for a thing | "Northwind", "the Client" |
+| Property value | A typed value about an entity | `signedOn = 2026-03-01` |
+| Relationship | A typed link between two entities | `Customer -[SIGNED]-> Contract` |
+| Evidence | The exact quote, and where it is | Page 2, "signed the services agreement on March 1" |
+| Confidence | How sure the check was | A verifier's score of 0.94 |
+
+Together they become part of a
+[knowledge graph](/learn/graph-databases/what-is-a-knowledge-graph): structured facts
+that can be queried, joined with tables, and cited.
+
+## Why do you need a target shape first?
+
+Because a model asked to "pull out everything important" returns something different
+for every document. A fixed shape, the types, properties, and links you want, makes
+every document's output comparable and lets you reject output that does not fit.
+
+That shape is usually an [ontology](/learn/ontologies/what-is-an-ontology). It also
+says which documents may fill which types: a contract can name a customer and a renewal
+date, while call notes can name a product and a complaint. Narrow targets extract more
+accurately than broad ones, because the model has fewer places to put a wrong answer.
+
+<div className="learn-cta">
+  <Card title="Try Helix Foundry" icon="rocket" href="/foundry/start-here/quickstart" cta="Get started">
+    Read your documents into the same HelixDB graph as your tables, with the quote behind every fact.
+  </Card>
+</div>
+
+## How does an extraction pipeline work?
+
+Parse the document into text, extract candidate facts in the target shape, verify each
+one against its quote, link names to known records, and store the result with its
+evidence.
+
+<Steps>
+  <Step title="Parse">
+    Turn PDFs, Markdown, and text into clean text with its structure: sections, pages,
+    and tables. Table files such as CSV are better loaded as tables than read as prose.
+  </Step>
+  <Step title="Extract">
+    Give a language model the target shape and a section of the document, and ask for
+    entities, properties, and relationships in a fixed format, each with the quote it
+    came from. Reject output that does not validate against the shape.
+  </Step>
+  <Step title="Verify">
+    Check that each quote really appears in the document and really states the fact.
+    A second model call or rule can score each claim, so weak claims are held rather
+    than stored as settled.
+  </Step>
+  <Step title="Resolve">
+    Link each name to an existing record, so "the Client" in a contract becomes the
+    customer already in your billing table. This is
+    [entity resolution](/learn/ontologies/what-is-entity-resolution), and it decides
+    whether the new facts join the right entity.
+  </Step>
+  <Step title="Store with provenance">
+    Write the facts with their quotes, document, and confidence, the
+    [provenance](/learn/ontologies/what-is-data-provenance) that lets anyone check
+    them later.
+  </Step>
+</Steps>
+
+Extraction is a different job from chunking for
+[retrieval-augmented generation (RAG)](/learn/ai-memory/what-is-rag). RAG keeps passages
+of text and finds them with [vector search](/learn/vector-search/what-is-vector-search)
+at question time; extraction turns the text into facts ahead of time, so questions such
+as "which contracts renew next quarter?" become a query, not a search.
+
+## How do you know extracted facts are right?
+
+You check them in layers: validate the shape, verify each quote, compare with your
+tables, and have a person look at what the checks cannot settle.
+
+- **Quote verification.** A fact whose quote is missing or does not say what the fact
+  claims is dropped or held.
+- **Cross-checks with tables.** When a document disagrees with a system of record, such
+  as a different renewal date than billing holds, flag the conflict instead of picking
+  one silently.
+- **Unresolved names.** A name that matches no record, or several, is held for a person
+  rather than creating a duplicate entity.
+- **Sampling.** Reviewing a random sample of accepted claims measures how often the
+  pipeline is right at each confidence score, which tells you where to set thresholds.
+
+## How do you control the cost of extraction?
+
+Model calls are the main cost, so read each document once and only re-read what changed.
+
+- **Cache by content.** The same text read by the same model gives the same result, so
+  key results by document content and model, and reuse them.
+- **Extract incrementally.** When a document is replaced or a new one arrives, read only
+  that document. When one is deleted, its provenance says which facts to remove.
+- **Route documents.** Only read a document for the types it can fill, and skip sets no
+  question needs.
+- **Cap spend.** Set a budget per run and per month, and let a run stop partway rather
+  than overspend.
+
+## How does Helix Foundry extract data from documents?
+
+[Helix Foundry](/foundry/start-here/introduction) reads documents into the same HelixDB
+graph as a company's tables:
+
+- **Routes.** A [generation](/foundry/ontologies/generate-and-version) reads up to five
+  of the newest documents in each set it picks and drafts routes: what each set's
+  documents may fill, such as a contract's signing date and the customer it was signed
+  with.
+- **Names, facts, and quotes.** A [load](/foundry/ontologies/load-data) reads every text
+  document and PDF in the version's sets for its sections, the names it mentions, and
+  the facts it states, each with the quote it came from. AI models find the names and
+  facts and check them. Table files are loaded as tables.
+- **Review instead of guessing.** A name the database doesn't hold, an ambiguous name, a
+  quote that couldn't be verified, or a fact that conflicts with the tables waits on the
+  [Review](/foundry/ontologies/review) page instead of becoming a record. About one card
+  in ten there is a random check that measures how often claims at each score are
+  right.
+- **Paying once.** Reading the same text with the same models again costs nothing, and
+  a document added to a set the current load reads is read as it arrives. See
+  [Documents](/foundry/data/documents).
+
+## Frequently asked questions
+
+### Is document extraction the same as OCR?
+
+No. OCR (optical character recognition) turns an image of a page into text. Extraction
+starts from text and turns it into typed facts. Scanned documents need OCR first.
+
+### Can a language model extract data reliably?
+
+Reliably enough when the target shape is narrow, every fact carries its quote, and the
+quotes are checked. Without those, models can invent plausible values that no sentence
+states.
+
+### Should you extract or just use RAG?
+
+Use [RAG](/learn/ai-memory/what-is-rag) for open-ended questions over prose, and
+extraction for facts you will filter, count, or join with tables. Many applications do
+both, and a [hybrid search](/learn/full-text-search/hybrid-search) over the original
+text is still useful for finding passages.
+
+### How do you handle documents that disagree?
+
+Keep both claims with their provenance, prefer a system of record or the newer dated
+document by a fixed rule, and send what no rule settles to a person. See
+[what happens when sources disagree](/learn/ontologies/what-is-data-provenance#what-happens-when-sources-disagree).
+
+## Related topics
+
+<CardGroup cols={2}>
+  <Card title="What is an ontology?" icon="sitemap" href="/learn/ontologies/what-is-an-ontology">
+    The target shape extraction fills.
+  </Card>
+  <Card title="What is entity resolution?" icon="object-group" href="/learn/ontologies/what-is-entity-resolution">
+    Linking extracted names to the records you already hold.
+  </Card>
+  <Card title="What is data provenance?" icon="fingerprint" href="/learn/ontologies/what-is-data-provenance">
+    Keeping the quote behind every extracted fact.
+  </Card>
+  <Card title="What is a knowledge graph?" icon="circle-nodes" href="/learn/graph-databases/what-is-a-knowledge-graph">
+    Where extracted facts end up, connected to everything else.
+  </Card>
+  <Card title="What is RAG?" icon="book-open" href="/learn/ai-memory/what-is-rag">
+    Retrieving passages at question time instead of extracting ahead.
+  </Card>
+  <Card title="What is GraphRAG?" icon="share-nodes" href="/learn/ai-memory/what-is-graphrag">
+    Answering questions by following extracted facts.
+  </Card>
+</CardGroup>

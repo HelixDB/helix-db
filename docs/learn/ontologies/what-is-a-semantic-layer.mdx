@@ -1,0 +1,160 @@
+---
+title: "What is a semantic layer?"
+description: "A semantic layer defines business metrics and terms once, on top of the tables that hold them, so every report and AI tool computes them the same way; here is how it compares with an ontology."
+sidebarTitle: "Semantic layers"
+pageType: "Concept"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="purple" size="sm">Concept</Badge></div>
+
+A semantic layer is a set of shared definitions, such as "active customer" or "monthly
+revenue", that sits between raw tables and the tools that query them. Think of it as a
+company recipe book: everyone who bakes "monthly revenue" follows the same recipe, so
+every dashboard, spreadsheet, and AI assistant gets the same number. It translates
+business terms into the joins, filters, and sums the tables need.
+
+<div className="learn-objectives">
+  <Card title="Learning objectives" icon="graduation-cap">
+    After reading this article you will be able to:
+
+    - Describe what a semantic layer defines: entities, dimensions, and metrics
+    - Explain the problem it solves for reports and AI tools
+    - Compare a semantic layer with an ontology
+    - Decide when you need one, the other, or both
+  </Card>
+</div>
+
+## What does a semantic layer define?
+
+It defines the business entities the tables describe, the attributes you group and
+filter by, and the metrics you compute, each as a reusable, named definition.
+
+| Part | What it is | Example |
+| --- | --- | --- |
+| Entity | A business concept backed by one or more tables | `Customer`, backed by the `accounts` table |
+| Dimension | An attribute to group or filter by | Plan, region, signup month |
+| Measure | A raw aggregation over a column | Sum of `invoices.amount` |
+| Metric | A named business calculation built from measures | Monthly recurring revenue, churn rate |
+| Join path | How entities connect in the tables | `invoices.account_id` → `accounts.id` |
+
+A query tool asks for "monthly recurring revenue by plan for last quarter", and the
+semantic layer turns that into the SQL that joins, filters, and aggregates the right
+tables.
+
+## Why do companies use a semantic layer?
+
+Because without one, every team writes its own version of each metric. Finance counts
+revenue when an invoice is paid, sales when a contract is signed, and two dashboards
+disagree in the board meeting. A semantic layer defines the metric once, so every tool
+computes it the same way.
+
+It also helps AI. A language model asked to write SQL against raw tables has to guess
+what "active customer" means and how tables join. Giving it named metrics and join paths
+instead makes its answers consistent with the company's own reports, a form of
+grounding similar in spirit to
+[retrieval-augmented generation (RAG)](/learn/ai-memory/what-is-rag).
+
+<div className="learn-cta">
+  <Card title="Try Helix Foundry" icon="rocket" href="/foundry/start-here/quickstart" cta="Get started">
+    Connect your company's data into one ontology in HelixDB, and ask it questions with cited answers.
+  </Card>
+</div>
+
+## What is the difference between a semantic layer and an ontology?
+
+A semantic layer is about numbers: how to compute metrics consistently from tables. An
+[ontology](/learn/ontologies/what-is-an-ontology) is about things and how they connect:
+which entities exist across every system, how they link, and the rules they follow. One
+answers "what was revenue last quarter?"; the other answers "which customers with an
+open complaint have a contract renewing soon, and where does each fact come from?"
+
+| | Semantic layer | Ontology |
+| --- | --- | --- |
+| Main concern | Consistent metrics and dimensions | Entities, links, and their meaning |
+| Typical sources | Tables in one warehouse | Databases, apps, and documents |
+| Data stays | In the warehouse; the layer compiles queries | Often loaded into a [knowledge graph](/learn/graph-databases/what-is-a-knowledge-graph) |
+| Relationships | Join paths between tables | Named, directed links such as `SIGNED_BY` |
+| Documents | Out of scope | Can be read for facts, with their quotes |
+| Typical query | Aggregations: sums, counts, ratios over time | Traversals: follow links, find connected records |
+| Identity across sources | Assumes keys already line up | Uses identifiers and [entity resolution](/learn/ontologies/what-is-entity-resolution) |
+
+They overlap. Both name business entities and hide table details from the people and
+tools that ask questions. Some ontologies define metrics, and some semantic layers model
+entity relationships. The difference is emphasis: aggregation over clean tables versus
+connection across messy sources.
+
+## When do you need a semantic layer, an ontology, or both?
+
+Choose by the questions you ask most.
+
+- **A semantic layer** suits teams whose data already sits in one warehouse with clean
+  keys, and whose main questions are metrics: revenue, retention, usage over time.
+- **An ontology** suits data spread across many systems and documents, where the hard
+  part is knowing that records refer to the same customer, following connections, and
+  citing sources. It is also the shape that
+  [GraphRAG](/learn/ai-memory/what-is-graphrag) and
+  [AI agent memory](/learn/ai-memory/what-is-ai-agent-memory) build on.
+- **Both** suit companies that need consistent reporting and connected, cited answers.
+  The ontology resolves who is who and what links to what; metrics are then computed
+  over its entities.
+
+## How does Helix Foundry relate to a semantic layer?
+
+[Helix Foundry](/foundry/start-here/introduction) builds an ontology, not a semantic
+layer, but covers some of the same ground:
+
+- **One shape across sources.** An ontology's types, links, and rules span the
+  databases, apps, and documents you connect, and its
+  [loads](/foundry/ontologies/load-data) write them into a HelixDB database, with every
+  value naming the row or quote it came from.
+- **Questions in plain words.** [Founder](/foundry/ask/ask-questions) answers questions
+  about a load step by step and cites each record, table row, quote, and rule it used.
+- **Saved queries.** A [dashboard](/foundry/automate/dashboards) is a page of tiles, each
+  one saved query over an ontology's load, read live by whoever opens it, so it never
+  shows anyone more than they may read.
+
+## Frequently asked questions
+
+### Is a semantic layer the same as a data model?
+
+Not quite. A data model describes how tables are structured. A semantic layer adds
+business meaning on top: named metrics, dimensions, and the joins between them.
+
+### Is a semantic layer the same as a metrics layer?
+
+A metrics layer is the part of a semantic layer that defines metrics. The terms are
+often used interchangeably, though a semantic layer usually also covers entities and
+dimensions.
+
+### Does a semantic layer store data?
+
+Usually not. It stores definitions and compiles queries that run where the data lives.
+Some add caching or pre-aggregated tables for speed.
+
+### Can an ontology replace a semantic layer?
+
+For connected questions and cited answers, often yes. For heavy metric reporting over a
+warehouse, a semantic layer is usually the better fit, and the two can work together.
+
+## Related topics
+
+<CardGroup cols={2}>
+  <Card title="What is an ontology?" icon="sitemap" href="/learn/ontologies/what-is-an-ontology">
+    Shared types, links, and rules for data from many systems.
+  </Card>
+  <Card title="What is entity resolution?" icon="object-group" href="/learn/ontologies/what-is-entity-resolution">
+    Deciding when records from different systems are the same thing.
+  </Card>
+  <Card title="What is a knowledge graph?" icon="circle-nodes" href="/learn/graph-databases/what-is-a-knowledge-graph">
+    Connected facts organized by an ontology, with their sources.
+  </Card>
+  <Card title="Graph vs relational database" icon="table" href="/learn/graph-databases/graph-vs-relational-database">
+    When connected questions outgrow joins.
+  </Card>
+  <Card title="What is data provenance?" icon="fingerprint" href="/learn/ontologies/what-is-data-provenance">
+    Recording where every value came from, so answers can be checked.
+  </Card>
+  <Card title="What is GraphRAG?" icon="share-nodes" href="/learn/ai-memory/what-is-graphrag">
+    Retrieval that follows relationships, compared with vector RAG.
+  </Card>
+</CardGroup>
