@@ -3099,7 +3099,10 @@ function validateJsonValue(value: JsonValue, path: string): JsonValue {
   if (value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "bigint") return value;
   if (typeof value === "number") return finiteNumber(value, path);
   if (Array.isArray(value)) return value.map((entry, index) => validateJsonValue(entry, `${path}[${index}]`));
-  if (typeof value !== "object") throw new TypeError(`parameter '${path}' must be JSON-compatible`);
+  if (value instanceof Uint8Array) throw QueryError.unsupportedBytes(path);
+  // Only plain objects: a class instance (DateTime, PropertyValue, Map, a typed array) would be sent as its own fields.
+  const prototype = typeof value === "object" ? Object.getPrototypeOf(value) : undefined;
+  if (prototype !== Object.prototype && prototype !== null) throw new TypeError(`parameter '${path}' must be JSON-compatible`);
   const out: Record<string, JsonValue> = {};
   for (const [name, entry] of Object.entries(value as Record<string, JsonValue>)) out[name] = validateJsonValue(entry, `${path}.${name}`);
   return out;
