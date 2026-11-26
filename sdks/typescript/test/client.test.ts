@@ -1058,4 +1058,49 @@ await withFakeNativeModule(async (moduleUrl) => {
   await client.close();
 });
 
+// ---- Prematurely closed response body surfaces Network or Remote errors ----
+
+async function withTruncatedResponseServer(status: number, fn: (baseUrl: string) => Promise<void>): Promise<void> {
+  const server: Server = createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(status, { "Content-Type": "application/json", "Transfer-Encoding": "chunked" });
+      res.flushHeaders();
+      res.write('{"partial":');
+      setTimeout(() => res.destroy(), 20);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const { port } = server.address() as AddressInfo;
+  try {
+    await fn(`http://127.0.0.1:${port}`);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+await withTruncatedResponseServer(200, async (baseUrl) => {
+  const client = new Client(baseUrl);
+  await assert.rejects(
+    client.query(sampleRequest()).send(),
+    (error: unknown) => error instanceof HelixError && error.kind === "Network" && error.message.includes(`${baseUrl}/v2/query`),
+  );
+  await assert.rejects(
+    client.cypher("RETURN 1 AS x"),
+    (error: unknown) => error instanceof HelixError && error.kind === "Network" && error.message.includes(`${baseUrl}/v2/cypher`),
+  );
+  await assert.rejects(
+    client.explainSql("SELECT 1"),
+    (error: unknown) => error instanceof HelixError && error.kind === "Network" && error.message.includes(`${baseUrl}/v2/sql/explain`),
+  );
+});
+
+await withTruncatedResponseServer(502, async (baseUrl) => {
+  const client = new Client(baseUrl);
+  await assert.rejects(
+    client.cypher("RETURN 1 AS x"),
+    (error: unknown) => error instanceof HelixError && error.kind === "Remote" && error.statusCode === 502,
+  );
+});
+
 console.log("client.test.ts passed");

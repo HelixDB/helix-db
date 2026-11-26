@@ -594,7 +594,11 @@ export class QueryExecutionRequest<R = unknown> {
     }
 
     if (response.status === 200 || response.status === 204) {
-      return { status: response.status, body: new Uint8Array(await response.arrayBuffer()) };
+      try {
+        return { status: response.status, body: new Uint8Array(await response.arrayBuffer()) };
+      } catch (error) {
+        throw HelixError.network(error instanceof Error ? error.message : String(error), url);
+      }
     }
 
     let body: string;
@@ -676,10 +680,16 @@ export class StatementRequest {
       // Older native packages predate these methods; call through the handle to keep its `this`.
       const run = backend.native[route.native];
       if (run === undefined) throw HelixError.embeddedUnavailable(route.unavailable);
+      let responseBytes: Uint8Array;
       try {
-        return parseJson(new TextDecoder().decode(await run.call(backend.native, new TextEncoder().encode(body))));
+        responseBytes = await run.call(backend.native, new TextEncoder().encode(body));
       } catch (error) {
         throw embeddedError(error);
+      }
+      try {
+        return parseJson(new TextDecoder().decode(responseBytes));
+      } catch (error) {
+        throw HelixError.serialization(error instanceof Error ? error.message : String(error));
       }
     }
 
@@ -691,15 +701,28 @@ export class StatementRequest {
     try {
       response = await fetch(url, { method: "POST", headers: requestHeaders, body });
     } catch (error) {
-      throw HelixError.network(String(error), url.toString());
+      throw HelixError.network(error instanceof Error ? error.message : String(error), url.toString());
     }
-    const text = await response.text();
     if (response.status === 204) return undefined;
-    if (response.status !== 200) throw HelixError.remote(response.status, text, response.statusText);
+    if (response.status !== 200) {
+      let text: string;
+      try {
+        text = await response.text();
+      } catch {
+        text = "";
+      }
+      throw HelixError.remote(response.status, text, response.statusText);
+    }
+    let text: string;
+    try {
+      text = await response.text();
+    } catch (error) {
+      throw HelixError.network(error instanceof Error ? error.message : String(error), url.toString());
+    }
     try {
       return parseJson(text);
     } catch (error) {
-      throw HelixError.serialization(String(error));
+      throw HelixError.serialization(error instanceof Error ? error.message : String(error));
     }
   }
 }
