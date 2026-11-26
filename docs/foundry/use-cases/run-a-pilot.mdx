@@ -1,0 +1,190 @@
+---
+title: "Run a Foundry pilot on your own data"
+description: "A checklist your coding agent can follow to run open-source Helix Foundry on a machine you control, connect your sources, build and review an ontology, and answer five agreed business questions with citations, ending in a short value report"
+sidebarTitle: "Run a pilot"
+pageType: "Tutorial"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="green" size="sm">Tutorial</Badge></div>
+
+A pilot answers five questions your business cares about, on your own data, with every
+answer cited to its source. This checklist runs it on open-source Foundry, on a machine
+you control, and is written so your coding agent can follow it with you. It ends with a
+short value report.
+
+Foundry's open-source install runs on one computer with Docker Compose, for one person,
+and listens on that computer's loopback only. There is no multi-user deployment for
+your own cloud yet. To run a pilot with Helix, email
+[founders@helix-db.com](mailto:founders@helix-db.com).
+
+## Before you start
+
+Agree five questions before anything is installed. Each should be tied to money or
+time, and each should need more than one system to answer. For each, write down:
+
+- **The question**, as someone would ask it.
+- **Who asks it today**, how often, and how long an answer takes them.
+- **What it's worth**: revenue kept or found, or hours saved.
+- **The sources that hold the answer**: which databases, apps and documents.
+
+[Use cases on the sample company](/foundry/use-cases/sample-company) shows four such
+questions. Then check the machine has Docker with Compose v2, ports 3000, 8333 and 8081
+free, and room for a few GB of images. To run the bundled Ollama, give Docker at least
+10 GB of memory.
+
+## The checklist
+
+<Steps>
+  <Step title="Start Foundry">
+    Paste this into your coding agent:
+
+    ```text
+    Set up Helix Foundry on this computer.
+
+    Clone https://github.com/helixdb/helix-foundry.git (or use the copy I
+    already have), then follow its README.md and local/README.md to start it
+    with Docker Compose and check that it is up. Ask me before deleting data,
+    removing Docker volumes or stopping anything that is already running.
+    When it is ready, give me the URL and tell me what to do next.
+    ```
+
+    Or run it yourself:
+
+    ```bash
+    git clone https://github.com/helixdb/helix-foundry.git
+    cd helix-foundry
+    docker compose up -d --wait
+    ```
+
+    Open `http://localhost:3000`. Foundry opens on **My workspace**, with no sign-in.
+  </Step>
+
+  <Step title="Choose where AI runs">
+    Drafting, reading documents and answering run on an AI provider. To keep your data
+    on the machine, run Ollama beside Foundry with
+    `docker compose --profile ollama up -d --wait`, and set `FOUNDRY_AI_PROVIDER=ollama`
+    in `local/.env`: otherwise a key in the shell is picked first. Small local models
+    may stop a draft early. Otherwise Foundry uses the
+    `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` of the shell that started it, or a provider
+    you choose in **Settings › AI models**. See
+    [what reaches AI model providers](/foundry/reference/security-and-data#what-reaches-ai-model-providers).
+
+    To send no usage analytics either, set `FOUNDRY_TELEMETRY=off` in `local/.env` and
+    run `docker compose up -d` again.
+  </Step>
+
+  <Step title="Connect your agent to Foundry">
+    Load the install's owner token into the agent's environment, without printing it,
+    and add the local MCP at `http://localhost:8081/mcp`. See
+    [Query from your agents](/foundry/agents/query-from-agents#on-your-own-computer).
+    In Foundry, **Set up with your agent** copies a prompt that carries the workspace
+    and the steps left.
+  </Step>
+
+  <Step title="Connect the sources">
+    For each source the questions need, create a read-only credential at the source:
+    a `SELECT`-only database user, or a read-only key. Each connector's form gives the
+    steps; see [Connectors](/foundry/data/connectors).
+
+    The person enters credentials in Foundry, never in the chat:
+    `helix_foundry_connect` gives the agent a link to the form. Once a connection is
+    saved, the agent syncs it with the `sync_connector` operation and follows
+    `helix_foundry_get_sync`. Upload documents, such as contracts and call notes, into a
+    set with `create_document_set` and `upload_document`, or select **Upload documents**
+    in Connectors.
+  </Step>
+
+  <Step title="Generate the ontology">
+    Write a goal that names the five questions, and agree which connections and document
+    sets it reads. The agent creates the ontology with `create_ontology`, then asks for a
+    draft with `generate_ontology`, and follows `helix_foundry_get_generation` until it
+    ends. Every change goes through `helix_foundry_prepare_operation`, your confirmation,
+    then `helix_foundry_execute_operation`.
+  </Step>
+
+  <Step title="Review the draft">
+    Read it with `helix_foundry_get_version`, or on the version's page. Check:
+
+    - each of the five questions has a path through its types and links;
+    - its open questions, and what it left out and why;
+    - the document sets it doesn't read.
+
+    Generate again with what you decided in the goal, or make a small edit with
+    `revise_version`. See [Generate and version](/foundry/ontologies/generate-and-version).
+  </Step>
+
+  <Step title="Make it current and load it">
+    Make the reviewed version current with `set_current_version`, then load it with
+    `create_load` and follow `helix_foundry_get_load`. Report any failed jobs, how many
+    documents were read, and how many items they left for review.
+  </Step>
+
+  <Step title="Settle the reviews">
+    `helix_foundry_list_reviews` lists what the load couldn't settle: names that match
+    no record or more than one, values documents disagree on, and claims held for a
+    person. A person decides each; the agent records it with `settle_review`, or you
+    settle them on the entity's page. See
+    [Settle a review](/foundry/explore/records-and-entities#settle-a-review).
+  </Step>
+
+  <Step title="Answer the five questions">
+    Ask each with `helix_foundry_ask` and a new `client_token`, and follow it with
+    `helix_foundry_get_question` until it's done, or ask
+    [Founder](/foundry/ask/founder). For each answer, open two or three of its
+    citations and check them against the source. An answer of **This ontology can't
+    answer that** says what the ontology lacks: generate again with that in the goal.
+  </Step>
+
+  <Step title="Write the value report">
+    Fill in the template below, and keep the threads: each answer's citations are the
+    evidence.
+  </Step>
+</Steps>
+
+## Value report template
+
+```markdown
+# Foundry pilot: <company>, <dates>
+
+## Setup
+- Sources connected: <connections, tables, document sets>
+- Ontology: <name>, version <n>, load <id>
+- AI provider: <provider and models>
+- Reviews settled: <count>; left open: <count and why>
+
+## Questions
+
+### 1. <question>
+- Answer: <one or two sentences>
+- Citations checked: <n of n correct>
+- Today: <who answers it, how often, time per answer>
+- With Foundry: <time to answer>
+- Worth: <revenue kept or found, or hours saved per month, and how you estimated it>
+
+<!-- Repeat for questions 2 to 5. -->
+
+## Summary
+- Revenue at stake found: <amount, with the answers it comes from>
+- Time saved: <hours per month, by role>
+- What the ontology couldn't answer, and what it would need
+- Next step: <decision>
+```
+
+## Clean up
+
+To keep the pilot, back it up first: see the install's
+[backup and restore](https://github.com/helixdb/helix-foundry/blob/main/local/README.md#back-up-and-restore).
+To remove everything, run `docker compose down -v` from the repository. It deletes the
+data and the key that seals every credential you gave Foundry, so revoke those
+credentials at their sources too.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Security and data handling" icon="shield" href="/foundry/reference/security-and-data">
+    What the pilot stores, and what leaves the machine.
+  </Card>
+  <Card title="Query from your agents" icon="robot" href="/foundry/agents/query-from-agents">
+    Wire the ontology into your own agents.
+  </Card>
+</CardGroup>

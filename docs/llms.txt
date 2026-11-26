@@ -32,10 +32,15 @@ Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickst
 - [HelixDB AI Catalog](https://www.helix-db.com/.well-known/ai-catalog.json): ARD catalog of HelixDB agent resources.
 
 ## Helix Foundry — Start Here
-- [What is Helix Foundry?](https://docs.helix-db.com/foundry/start-here/introduction): Helix Foundry connects your company's data, drafts an ontology across it, and loads it into a Helix database you can explore — Page type: Concept
+- [What is Helix Foundry?](https://docs.helix-db.com/foundry/start-here/introduction): Helix Foundry connects the systems your company runs into one ontology, so your people and agents answer questions across them, with every answer cited to its source — Page type: Concept
 - [Helix Foundry quickstart](https://docs.helix-db.com/foundry/start-here/quickstart): Sign in, create a workspace's first ontology from a connected source or your documents, let Foundry draft and load it into a new Helix database, then ask it a question and explore it — Page type: Tutorial
 - [Try Foundry on a sample company](https://docs.helix-db.com/foundry/start-here/sample-company): Watch Helix Foundry connect a made-up company's database and documents, build an ontology, load it into a Helix database and answer a question, before you connect your own data — Page type: Tutorial
 - [Workspaces and navigation](https://docs.helix-db.com/foundry/start-here/workspaces-and-navigation): Sign in to Helix Foundry, choose or create a workspace, find your way with the sidebar, the section panels, search and themes, and see which emails Foundry sends — Page type: Guide
+- [Why an ontology instead of RAG](https://docs.helix-db.com/foundry/start-here/ontology-vs-rag): Search finds what looks relevant; Helix Foundry's ontology follows what's connected. How matching records across sources, keeping every value's source and reviewing conflicts answer questions retrieval can't — Page type: Concept
+
+## Use cases
+- [Use cases on the sample company](https://docs.helix-db.com/foundry/use-cases/sample-company): Four questions worth money or time, answered from the Acme Corp sample ontology: renewal risk, account research before a call, support triage with the customer's full context, and ops questions without a data request — Page type: Guide
+- [Run a Foundry pilot on your own data](https://docs.helix-db.com/foundry/use-cases/run-a-pilot): A checklist your coding agent can follow to run open-source Helix Foundry on a machine you control, connect your sources, build and review an ontology, and answer five agreed business questions with citations, ending in a short value report — Page type: Tutorial
 
 ## Data
 - [Connect and sync data](https://docs.helix-db.com/foundry/data/connect-data): Find your way around Helix Foundry's Connectors section, add a source, test its credential, keep its tables synced and read what each table holds — Page type: Guide
@@ -63,6 +68,7 @@ Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickst
 
 ## Agents
 - [Use Foundry from your agent](https://docs.helix-db.com/foundry/agents/helix-mcp): Connect Claude Code, Codex or another MCP client to the Helix MCP to read and ask Helix Foundry ontologies, and to set them up with a confirmation for most changes — Page type: Guide
+- [Query Foundry from your agents](https://docs.helix-db.com/foundry/agents/query-from-agents): Have Claude Code or your own agent answer questions from a loaded Helix Foundry ontology through the Helix MCP, with every claim cited to the record, row or quote it came from — Page type: Guide
 - [Give your agent a memory](https://docs.helix-db.com/foundry/agents/agent-memory): Use a Helix Foundry API source as your agent's memory: it sends notes through the Helix MCP, reads them back by keyword with helix_foundry_recall, and your ontologies turn them into entities and facts — Page type: Guide
 
 ## Workspace
@@ -74,6 +80,7 @@ Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickst
 
 ## Reference
 - [Helix Foundry limits](https://docs.helix-db.com/foundry/reference/limits): Every Helix Foundry limit in one place: syncs, API sources, documents, generations, loads, questions, Founder, workflows, dashboards, spending, the Helix MCP and reads — Page type: Reference
+- [Security and data handling](https://docs.helix-db.com/foundry/reference/security-and-data): What Helix Foundry stores, how it seals credentials, why connectors only read, what reaches AI model providers and how to keep it local, what else it sends, who can read what, and how the local install stays on 127.0.0.1 — Page type: Reference
 - [Troubleshooting Helix Foundry](https://docs.helix-db.com/foundry/reference/troubleshooting): What Helix Foundry's sign-in, connection, sync, API source, document, generation, database, load, question, Founder, AI model and Helix MCP messages mean, and what to do — Page type: Troubleshooting
 
 ## HelixDB — Start Here

@@ -131,7 +131,15 @@
               "foundry/start-here/introduction",
               "foundry/start-here/quickstart",
               "foundry/start-here/sample-company",
-              "foundry/start-here/workspaces-and-navigation"
+              "foundry/start-here/workspaces-and-navigation",
+              "foundry/start-here/ontology-vs-rag"
+            ]
+          },
+          {
+            "group": "Use cases",
+            "pages": [
+              "foundry/use-cases/sample-company",
+              "foundry/use-cases/run-a-pilot"
             ]
           },
           {
@@ -177,6 +185,7 @@
             "group": "Agents",
             "pages": [
               "foundry/agents/helix-mcp",
+              "foundry/agents/query-from-agents",
               "foundry/agents/agent-memory"
             ]
           },
@@ -194,6 +203,7 @@
             "group": "Reference",
             "pages": [
               "foundry/reference/limits",
+              "foundry/reference/security-and-data",
               "foundry/reference/troubleshooting"
             ]
           }
@@ -1713,6 +1723,26 @@
     {
       "source": "/foundry/source-grants",
       "destination": "/foundry/workspace/access"
+    },
+    {
+      "source": "/foundry/security",
+      "destination": "/foundry/reference/security-and-data"
+    },
+    {
+      "source": "/foundry/data-handling",
+      "destination": "/foundry/reference/security-and-data"
+    },
+    {
+      "source": "/foundry/use-cases",
+      "destination": "/foundry/use-cases/sample-company"
+    },
+    {
+      "source": "/foundry/pilot",
+      "destination": "/foundry/use-cases/run-a-pilot"
+    },
+    {
+      "source": "/foundry/why-ontology",
+      "destination": "/foundry/start-here/ontology-vs-rag"
     }
   ],
   "search": {
