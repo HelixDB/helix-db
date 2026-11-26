@@ -271,3 +271,103 @@ fn unaligned_rows_reuse_released_copies_and_aligned_rows_never_copy() {
     access(&unaligned, &mut scratch).unwrap();
     assert_eq!(scratch.as_slice(), unaligned.as_ref());
 }
+
+#[test]
+fn nested_values_follow_the_full_decoders_map_order() {
+    let properties = [Property::new(
+        "meta",
+        PropertyValue::Object(BTreeMap::from([
+            ("aaa".into(), PropertyValue::I64(1)),
+            ("bbb".into(), PropertyValue::I64(2)),
+            ("ccc".into(), PropertyValue::I64(3)),
+        ])),
+    )];
+    let encoded = encode_properties(&properties);
+    let key = encoded
+        .windows(3)
+        .position(|bytes| bytes == b"bbb")
+        .unwrap();
+    // These edits retain valid archives but leave keys duplicated or out of
+    // order. Validation accepts both, and deserialization inserts in traversal
+    // order. A search that assumes sorted unique archived keys would differ.
+    for replacement in [b"aaa", b"zzz"] {
+        let mut bytes = encoded.to_vec();
+        bytes[key..key + replacement.len()].copy_from_slice(replacement);
+        for offset in 0..PROPERTY_ALIGNMENT * 2 {
+            let data = placed(&bytes, offset);
+            let decoded = decode_properties(&data).unwrap();
+            let PropertyValue::Object(values) = &decoded[0].value else {
+                panic!("meta is an object");
+            };
+            let row = Row::new(data, &mut Buffers::default()).unwrap();
+            for name in ["aaa", "bbb", "ccc", "zzz"] {
+                assert_eq!(
+                    row.value(&format!("meta.{name}")).unwrap(),
+                    values.get(name).cloned()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn nested_values_follow_the_full_decoder_with_a_missing_map_child() {
+    // The pinned rkyv B-tree has five entries per node. Six keys create an
+    // inner root with one leaf child. Mirror only its repr(C) node prefix to
+    // locate the first child pointer, which has no public mutation API.
+    #[repr(C)]
+    struct Node {
+        kind: u8,
+        keys: [rkyv::string::ArchivedString; 5],
+        values: [ArchivedPropertyValue; 5],
+    }
+    let properties = [Property::new(
+        "meta",
+        PropertyValue::Object(
+            (0..6)
+                .map(|i| (format!("k{i}"), PropertyValue::I64(i)))
+                .collect(),
+        ),
+    )];
+    let mut bytes = AlignedVec::<PROPERTY_ALIGNMENT>::new();
+    bytes.extend_from_slice(&encode_properties(&properties));
+    let (root, length) = {
+        let archived =
+            rkyv::access::<rkyv::Archived<Vec<Property>>, rancor::Error>(&bytes).unwrap();
+        let ArchivedPropertyValue::Object(values) = &archived[0].value else {
+            panic!("meta is an object");
+        };
+        let map = std::ptr::from_ref(values).cast::<rkyv::RelPtr<()>>();
+        // SAFETY: The pinned ArchivedBTreeMap is repr(C), with a relative
+        // pointer as its first field. Its pointee is not dereferenced here.
+        let root = unsafe { (*map).as_ptr() } as usize - bytes.as_ptr() as usize;
+        let length = map as usize - bytes.as_ptr() as usize + size_of::<rkyv::RelPtr<()>>();
+        (root, length)
+    };
+    assert_eq!(bytes[root], 1, "the root is an inner node");
+    let child = root + size_of::<Node>();
+    // Relative-pointer offset 1 is rkyv's absent-child sentinel. Adjust the
+    // entry count too: validation accepts the remaining five root entries,
+    // and the full decoder's visitor skips the absent child.
+    let absent = rkyv::to_bytes::<rancor::Error>(&1_isize).unwrap();
+    bytes[child..child + absent.len()].copy_from_slice(&absent);
+    let count = rkyv::to_bytes::<rancor::Error>(&5_usize).unwrap();
+    bytes[length..length + count.len()].copy_from_slice(&count);
+    for offset in 0..PROPERTY_ALIGNMENT * 2 {
+        let data = placed(&bytes, offset);
+        let decoded = decode_properties(&data).unwrap();
+        let PropertyValue::Object(values) = &decoded[0].value else {
+            panic!("meta is an object");
+        };
+        assert_eq!(values.len(), 5);
+        assert_eq!(values.get("k1"), Some(&PropertyValue::I64(1)));
+        let row = Row::new(data, &mut Buffers::default()).unwrap();
+        for i in 0..6 {
+            let name = format!("k{i}");
+            assert_eq!(
+                row.value(&format!("meta.{name}")).unwrap(),
+                values.get(&name).cloned()
+            );
+        }
+    }
+}
