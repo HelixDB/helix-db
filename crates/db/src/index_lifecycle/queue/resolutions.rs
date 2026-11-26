@@ -17,19 +17,20 @@
 //! selected. It cannot know that size before reading, so it is charged what
 //! it expects and re-charged to what it resolved as soon as it has read:
 //!
-//! - It expects the size of the newest read of its target: exact at that
-//!   read's snapshot, and off by what was enqueued or acknowledged in between
-//!   at an older one.
-//! - A read at a newer snapshot than every read of its target so far probes:
-//!   per target, one probe runs at a time, and a read that finds one waits
-//!   for it, then expects what it read. Concurrent searches mostly share a
+//! - A read at a snapshot its target was read at before is exact: a queue
+//!   resolves the same bytes at one snapshot however often it is read. Each
+//!   target keeps the sizes of its [`KNOWN_SIZES`] newest snapshots read.
+//! - A read at any other snapshot, older or newer, probes: per target, one
+//!   probe runs at a time, and a read that finds one waits for it, then
+//!   charges what it knows by then. Concurrent searches mostly share a
 //!   snapshot, so one probe serves them all.
-//! - A probe expects the size of the newest read, or, for a target never
-//!   read, the most one read can resolve, so the first read of a target is
-//!   charged for the worst case.
+//! - A probe expects the size at the nearest snapshot known (the larger of
+//!   two equally near), or, for a target never read, the most one read can
+//!   resolve, so the first read of a target is charged for the worst case.
 //! - A read that resolved more than it was charged gives back what it holds
 //!   and waits for its whole charge before it decodes, so no read holds
 //!   budget while it waits for more, and no two reads can wait on each other.
+//!   A probe ends only once its charge is granted.
 //!
 //! The budget is split in two lanes, each granted in arrival order: an
 //! eighth of it for small charges, at most a 32nd of that lane each, and the
@@ -41,28 +42,33 @@
 //!
 //! ```text
 //! target t read at 5 resolved 2 KiB (needs 4 KiB):
-//! read t@5 -> charged 4 KiB (exact)      read t@4 -> charged 4 KiB (expected)
-//! read t@6 -> probes, charged 4 KiB; read t@7 waits for it, then expects it
+//! read t@5 -> charged 4 KiB (exact)
+//! read t@4 -> probes, charged 4 KiB (nearest: 5); read t@6 waits for it,
+//!             then probes, expecting t@5's size (or t@4's, if larger)
 //! ```
 //!
 //! # Bound
 //!
-//! Charged bytes never exceed the budget. A read resolves more than it is
-//! charged only by its queue's growth between its snapshot and the snapshot
-//! its expectation was read at, and holds that excess only until its charge
-//! is granted. Per target, only one read at a time runs at a newer snapshot
-//! than its expectation, so a backlog that grew while nobody read it is
-//! found by one read, not by every search that arrives.
+//! Charged bytes never exceed the budget. Only a probe can resolve more than
+//! it is charged: by how much its queue differs between its snapshot and the
+//! nearest one known, larger or smaller, as when a queue that held a large
+//! backlog at older snapshots drained since. It holds that excess only until
+//! its charge is granted, and per target one probe runs at a time, until
+//! then. So per target at most one read at a time holds more than it is
+//! charged, and a backlog nobody read at a snapshot is found by one read,
+//! not by every search that arrives.
 //!
 //! # What does not scale
 //!
-//! - Every target ever read keeps its newest size (tens of bytes), one per
-//!   index generation read during the process's lifetime.
-//! - Reads of one target at ever newer snapshots, as write transactions'
-//!   searches under sustained writes are, probe one at a time; only their
-//!   storage reads serialize, not their decodes.
+//! - Every target ever read keeps up to [`KNOWN_SIZES`] sizes (about 12
+//!   bytes each), one set per index generation read during the process's
+//!   lifetime.
+//! - Reads of one target at snapshots not read before, as write
+//!   transactions' searches are (each at its own snapshot, newer or older
+//!   than the read requests'), probe one at a time; only their storage reads
+//!   and any wait for a larger charge serialize, not their decodes.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -76,6 +82,10 @@ const UNIT: u64 = 1 << 10;
 
 /// The small lane is this fraction of the budget (as a divisor).
 const SMALL_LANE_SHARE: u32 = 8;
+
+/// Sizes of the newest snapshots read that each target keeps: reads at
+/// them are exact. Concurrent searches mostly share a few snapshots.
+const KNOWN_SIZES: usize = 8;
 
 /// A charge is small when it is at most this fraction (as a divisor) of the
 /// small lane, so the lane holds at least this many at once.
@@ -128,9 +138,11 @@ enum LaneKind {
 /// What reads of one target expect.
 #[derive(Debug, Default)]
 struct Expected {
-    /// The newest read: its snapshot and the permits it needed.
-    newest: Option<(u64, u32)>,
-    /// A read at a newer snapshot than `newest` is running.
+    /// Permits reads at each of the [`KNOWN_SIZES`] newest snapshots read
+    /// needed, by snapshot.
+    known: BTreeMap<u64, u32>,
+    /// A read at a snapshot not in `known` runs and has not been granted
+    /// its charge.
     probing: bool,
 }
 
@@ -186,13 +198,26 @@ impl ResolutionBudget {
             {
                 let mut targets = self.targets.lock();
                 let expected = targets.entry(target).or_default();
-                match expected.newest {
-                    Some((newest, permits)) if snapshot <= newest => break (permits, false),
-                    newest if !expected.probing => {
+                match (expected.known.get(&snapshot), expected.probing) {
+                    (Some(&permits), _) => break (permits, false),
+                    (None, false) => {
                         expected.probing = true;
-                        break (newest.map_or(self.worst, |(_, permits)| permits), true);
+                        let below = expected.known.range(..snapshot).next_back();
+                        let above = expected.known.range(snapshot..).next();
+                        let nearest = match (below, above) {
+                            (Some((&older, &low)), Some((&newer, &high))) => {
+                                match (snapshot - older).cmp(&(newer - snapshot)) {
+                                    std::cmp::Ordering::Less => low,
+                                    std::cmp::Ordering::Greater => high,
+                                    std::cmp::Ordering::Equal => low.max(high),
+                                }
+                            }
+                            (Some((_, &permits)), None) | (None, Some((_, &permits))) => permits,
+                            (None, None) => self.worst,
+                        };
+                        break (nearest, true);
                     }
-                    Some(_) | None => {}
+                    (None, true) => {}
                 }
             }
             probed.await;
@@ -216,14 +241,14 @@ impl ResolutionBudget {
         units(bytes.saturating_mul(2))
     }
 
-    /// The snapshot of the newest read of `target`, for tests.
+    /// The snapshots `target`'s size is known at, oldest first, for tests.
     #[cfg(test)]
-    pub(crate) fn newest(&self, target: QueueTarget) -> Option<u64> {
+    pub(crate) fn known(&self, target: QueueTarget) -> Vec<u64> {
         self.targets
             .lock()
             .get(&target)
-            .and_then(|expected| expected.newest)
-            .map(|(snapshot, _)| snapshot)
+            .map(|expected| expected.known.keys().copied().collect())
+            .unwrap_or_default()
     }
 
     /// Permits charged right now in each lane, small then large, for tests.
@@ -259,49 +284,58 @@ pub(crate) struct Charge {
     budget: Arc<ResolutionBudget>,
     target: QueueTarget,
     snapshot: u64,
-    /// This read probes its target until it resolves or is dropped.
+    /// This read probes its target until its charge is granted after it
+    /// resolved, or it is dropped.
     probe: bool,
     /// `None` only while it waits for its lane.
     held: Option<(LaneKind, OwnedSemaphorePermit)>,
 }
 
 impl Charge {
-    /// Records that the read resolved `bytes`, ending its probe, and
-    /// re-charges it to what that needs: giving back what it does not, or
-    /// giving back what it holds and waiting for the whole charge in the lane
-    /// it now belongs in.
+    /// Records that the read resolved `bytes` and re-charges it to what that
+    /// needs: giving back what it does not, or giving back what it holds and
+    /// waiting for the whole charge in the lane it now belongs in. A probe
+    /// ends once that charge is granted.
     pub(crate) async fn resolved(&mut self, bytes: u64) {
         let need = ResolutionBudget::need(bytes);
         {
             let mut targets = self.budget.targets.lock();
-            let expected = targets.entry(self.target).or_default();
-            if expected
-                .newest
-                .is_none_or(|(newest, _)| self.snapshot >= newest)
-            {
-                expected.newest = Some((self.snapshot, need));
+            let known = &mut targets.entry(self.target).or_default().known;
+            known.insert(self.snapshot, need);
+            if known.len() > KNOWN_SIZES {
+                known.pop_first();
             }
-            if self.probe {
-                expected.probing = false;
-            }
-        }
-        if std::mem::take(&mut self.probe) {
-            self.budget.probed.notify_waiters();
         }
         let (lane, mut permit) = self.held.take().expect("a charge holds its lane");
         let need_here = need.min(self.budget.of(lane).capacity);
         let held = u32::try_from(permit.num_permits()).expect("charges fit a u32");
         let moves = lane == LaneKind::Small && self.budget.lane(need) == LaneKind::Large;
-        if !moves && need_here <= held {
+        self.held = Some(if !moves && need_here <= held {
             if need_here < held {
                 drop(permit.split((held - need_here) as usize));
             }
-            self.held = Some((lane, permit));
+            (lane, permit)
+        } else {
+            drop(permit);
+            let lane = self.budget.lane(need);
+            (lane, self.budget.of(lane).acquire(need).await)
+        });
+        self.end_probe();
+    }
+
+    /// Ends this read's probe, if it probes, and wakes the reads waiting
+    /// for it.
+    fn end_probe(&mut self) {
+        if !std::mem::take(&mut self.probe) {
             return;
         }
-        drop(permit);
-        let lane = self.budget.lane(need);
-        self.held = Some((lane, self.budget.of(lane).acquire(need).await));
+        self.budget
+            .targets
+            .lock()
+            .get_mut(&self.target)
+            .expect("a probed target keeps its record")
+            .probing = false;
+        self.budget.probed.notify_waiters();
     }
 
     /// The lane and permits this charge holds, for tests.
@@ -315,13 +349,7 @@ impl Charge {
 
 impl Drop for Charge {
     fn drop(&mut self) {
-        if !self.probe {
-            return;
-        }
-        if let Some(expected) = self.budget.targets.lock().get_mut(&self.target) {
-            expected.probing = false;
-        }
-        self.budget.probed.notify_waiters();
+        self.end_probe();
     }
 }
 

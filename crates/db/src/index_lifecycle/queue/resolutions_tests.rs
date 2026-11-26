@@ -97,24 +97,44 @@ fn a_read_is_charged_twice_what_it_resolved_in_whole_kibibytes() {
 }
 
 #[test]
-fn reads_at_or_below_the_newest_read_are_charged_its_size_at_once() {
+fn reads_at_known_snapshots_are_exact_and_others_probe_expecting_the_nearest() {
     let budget = lanes(1 << 20, 1 << 13);
-    let mut probe = charge_now(&budget, target(1), 5);
-    resolve_now(&mut probe, 2 * KIB);
+    // Known at 10 (4 units) and at 20 (40 units).
+    for (snapshot, bytes) in [(10, 2 * KIB), (20, 20 * KIB)] {
+        resolve_now(&mut charge_now(&budget, target(1), snapshot), bytes);
+    }
+    // A probe between them expects the nearer one's size.
+    let probe = charge_now(&budget, target(1), 12);
+    assert_eq!(probe.held(), Some((true, 4)));
+    // Reads at known snapshots are exact without waiting for it; reads at
+    // other snapshots, older or newer, wait for it.
+    assert_eq!(charge_now(&budget, target(1), 10).held(), Some((true, 4)));
+    assert_eq!(charge_now(&budget, target(1), 20).held(), Some((true, 40)));
+    assert!(budget.charge(target(1), 5).now_or_never().is_none());
+    assert!(budget.charge(target(1), 25).now_or_never().is_none());
     drop(probe);
-    // At the same snapshot and an older one, without probing.
-    let same = charge_now(&budget, target(1), 5);
-    let older = charge_now(&budget, target(1), 4);
-    assert_eq!(same.held(), Some((true, 4)));
-    assert_eq!(older.held(), Some((true, 4)));
-    // Nor while a newer read probes.
-    let probe = charge_now(&budget, target(1), 7);
-    assert_eq!(charge_now(&budget, target(1), 5).held(), Some((true, 4)));
-    drop(probe);
-    // An older read never replaces the newest size.
-    let mut older = older;
+    // The nearest known size, the larger of two equally near, and the only
+    // one on one side.
+    for (snapshot, permits) in [(18, 40), (13, 4), (15, 40), (5, 4), (30, 40)] {
+        assert_eq!(
+            charge_now(&budget, target(1), snapshot).held(),
+            Some((true, permits)),
+            "at {snapshot}"
+        );
+    }
+    // A read never replaces another snapshot's size.
+    let mut older = charge_now(&budget, target(1), 10);
     resolve_now(&mut older, 100 * KIB);
-    assert_eq!(charge_now(&budget, target(1), 5).held(), Some((true, 4)));
+    assert_eq!(charge_now(&budget, target(1), 20).held(), Some((true, 40)));
+    assert_eq!(charge_now(&budget, target(1), 10).held(), Some((true, 200)));
+    // Only the newest snapshots' sizes are kept.
+    for snapshot in 21..=30 {
+        resolve_now(&mut charge_now(&budget, target(1), snapshot), KIB);
+    }
+    assert_eq!(
+        budget.known(target(1)),
+        (31 - KNOWN_SIZES as u64..=30).collect::<Vec<_>>()
+    );
     // Another target knows nothing of it.
     assert_eq!(
         charge_now(&budget, target(2), 5).held(),
@@ -123,11 +143,92 @@ fn reads_at_or_below_the_newest_read_are_charged_its_size_at_once() {
 }
 
 #[tokio::test]
+async fn reads_older_than_a_drained_read_hold_more_than_charged_one_at_a_time() {
+    // Large lane 448 units, small charges at most 2.
+    let budget = lanes(8 * 64, 448);
+    // At 10 the queue held 200 KiB (400 units); at 20, drained, nothing.
+    resolve_now(&mut charge_now(&budget, target(1), 10), 200 * KIB);
+    resolve_now(&mut charge_now(&budget, target(1), 20), 0);
+    // Another target's read fills the large lane.
+    let full = charge_now(&budget, target(2), 1);
+    // Searches at 18 still see the backlog. The first probes, expecting the
+    // drained size; it reads the backlog, gives back its unit, and waits
+    // for 400 holding what it read. The rest wait for it rather than each
+    // reading the backlog on a one-unit charge.
+    let charged = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let reads = (0..8)
+        .map(|_| {
+            tokio::spawn({
+                let budget = Arc::clone(&budget);
+                let charged = Arc::clone(&charged);
+                async move {
+                    let mut charge = budget.charge(target(1), 18).await;
+                    charged.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    charge.resolved(200 * KIB).await;
+                    charge.held()
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(charged.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(budget.charged(), (0, 448));
+    // Once granted, the rest are exact, charged 400 each, one at a time.
+    drop(full);
+    for read in reads {
+        assert_eq!(soon(read).await.unwrap(), Some((false, 400)));
+    }
+    assert_eq!(charged.load(std::sync::atomic::Ordering::SeqCst), 8);
+    assert_eq!(budget.charged(), (0, 0));
+}
+
+#[tokio::test]
+async fn a_probe_that_outgrew_its_charge_probes_until_it_is_granted() {
+    let budget = lanes(8 * 64, 448);
+    resolve_now(&mut charge_now(&budget, target(1), 5), 0);
+    let full = charge_now(&budget, target(2), 1);
+    // A newer read probes on one unit, finds 200 KiB, and waits for 400 in
+    // the large lane.
+    let mut probe = charge_now(&budget, target(1), 6);
+    let mut growing = Box::pin(async move {
+        probe.resolved(200 * KIB).await;
+        probe
+    });
+    assert!((&mut growing).now_or_never().is_none());
+    // A read at a known snapshot does not wait for it; one at another
+    // unknown snapshot, which would expect a single unit, does until it is
+    // granted.
+    assert_eq!(charge_now(&budget, target(1), 5).held(), Some((true, 1)));
+    let next = tokio::spawn({
+        let budget = Arc::clone(&budget);
+        async move { budget.charge(target(1), 4).await.held() }
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(!next.is_finished());
+    drop(full);
+    let probe = soon(growing).await;
+    assert_eq!(probe.held(), Some((false, 400)));
+    assert_eq!(soon(next).await.unwrap(), Some((true, 1)));
+    drop(probe);
+    // A probe cancelled while it waits for its larger charge hands probing
+    // over too.
+    let full = charge_now(&budget, target(2), 2);
+    let mut cancelled = charge_now(&budget, target(1), 3);
+    assert_eq!(cancelled.held(), Some((true, 1)));
+    assert!(Box::pin(cancelled.resolved(300 * KIB))
+        .now_or_never()
+        .is_none());
+    drop(cancelled);
+    drop(full);
+    assert!(budget.charge(target(1), 9).now_or_never().is_some());
+}
+
+#[tokio::test]
 async fn one_read_per_target_probes_a_newer_snapshot_and_the_rest_wait_for_it() {
     let budget = lanes(1 << 20, 1 << 13);
     let mut probe = charge_now(&budget, target(1), 5);
-    // Newer reads of the same target wait for the probe; another target's
-    // and older reads do not.
+    // Reads of the same target at snapshots not known yet wait for the
+    // probe; another target's do not.
     let newer = tokio::spawn({
         let budget = Arc::clone(&budget);
         async move { budget.charge(target(1), 5).await.held() }

@@ -1216,10 +1216,12 @@ async fn a_build_from_a_fresh_snapshot_is_charged_as_read_there() {
         .await
         .unwrap();
     assert_eq!(ids(&read.select(u64::MAX).unwrap()), vec![1]);
-    // What the build read is known at the snapshot it read, not the
-    // search's.
-    let newest = store.resolutions().newest(target()).unwrap();
-    assert!(newest >= later && newest > early.seq());
+    // What the build read is known at the snapshot it read, and what the
+    // search read at its own.
+    let known = store.resolutions().known(target());
+    assert_eq!(known.len(), 2);
+    assert_eq!(known[0], early.seq());
+    assert!(known[1] >= later && known[1] > early.seq());
 }
 
 #[test]
