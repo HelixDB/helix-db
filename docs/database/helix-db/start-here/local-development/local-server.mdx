@@ -57,9 +57,11 @@ so `helix update` alone does not upgrade an existing project. Set `tag = "v0.0.1
 its `[local.dev]` block before starting it.
 
 <Warning>
-The first time v0.0.10 or later opens a persisted database, it upgrades the index storage
-version, and v0.0.9 and earlier then refuse to open that database. Back up the data
-before changing the tag if you may need to roll back.
+A newer image can upgrade a persisted database's index storage version the first time it
+opens it, and older images then refuse to open that database. v0.0.19 moves it to version 8,
+which v0.0.18 and earlier refuse, and v0.0.10 moved it past what v0.0.9 and earlier read.
+Back up the data before changing the tag if you may need to roll back, and when several
+servers share the storage, upgrade readers before the writer.
 </Warning>
 
 ```bash

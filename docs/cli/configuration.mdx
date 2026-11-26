@@ -156,7 +156,9 @@ To move an instance to the image the current CLI ships with:
    helix start dev --image-version v0.0.19 --persist
    ```
 
-   `helix start` replaces the container, so an in-memory instance starts empty.
+   `helix start` replaces the container, so an in-memory instance starts empty. A newer image
+   can upgrade persisted data so older images can no longer open it, so back up first: see
+   [Start with the CLI](/database/helix-db/start-here/local-development/local-server#start-with-the-cli).
 
 ## Helix home
 

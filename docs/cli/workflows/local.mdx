@@ -171,7 +171,9 @@ Each instance is isolated by container name and host port. `helix add local` alw
 
 `helix update` updates the CLI, not your instances' server image. `helix doctor <instance>` names
 the new CLI's tag; then run `helix start dev --image-version v0.0.19 --persist` (an in-memory
-instance starts empty). See [Image pinning](/cli/configuration#image-pinning).
+instance starts empty). See [Image pinning](/cli/configuration#image-pinning). A newer image can
+upgrade persisted data so older images can no longer open it; back up first, see
+[Start with the CLI](/database/helix-db/start-here/local-development/local-server#start-with-the-cli).
 
 ## Browsing the graph
 

@@ -4625,9 +4625,11 @@ The standalone server accepts queries at `http://localhost:6969/v2/query`.
 so `helix update` alone does not upgrade an existing project. Set `tag = "v0.0.19"` in
 its `[local.dev]` block before starting it.
 
-The first time v0.0.10 or later opens a persisted database, it upgrades the index storage
-version, and v0.0.9 and earlier then refuse to open that database. Back up the data
-before changing the tag if you may need to roll back.
+A newer image can upgrade a persisted database's index storage version the first time it
+opens it, and older images then refuse to open that database. v0.0.19 moves it to version 8,
+which v0.0.18 and earlier refuse, and v0.0.10 moved it past what v0.0.9 and earlier read.
+Back up the data before changing the tag if you may need to roll back, and when several
+servers share the storage, upgrade readers before the writer.
 ```bash
 helix query dev \
   -e 'readBatch().varAs("count", g().nWithLabel("User").count()).returning(["count"])'
@@ -15979,7 +15981,9 @@ Each instance is isolated by container name and host port. `helix add local` alw
 
 `helix update` updates the CLI, not your instances' server image. `helix doctor <instance>` names
 the new CLI's tag; then run `helix start dev --image-version v0.0.19 --persist` (an in-memory
-instance starts empty). See [Image pinning](/cli/configuration#image-pinning).
+instance starts empty). See [Image pinning](/cli/configuration#image-pinning). A newer image can
+upgrade persisted data so older images can no longer open it; back up first, see
+[Start with the CLI](/database/helix-db/start-here/local-development/local-server#start-with-the-cli).
 
 ## Browsing the graph
 
@@ -16301,7 +16305,9 @@ To move an instance to the image the current CLI ships with:
    helix start dev --image-version v0.0.19 --persist
    ```
 
-   `helix start` replaces the container, so an in-memory instance starts empty.
+   `helix start` replaces the container, so an in-memory instance starts empty. A newer image
+   can upgrade persisted data so older images can no longer open it, so back up first: see
+   [Start with the CLI](/database/helix-db/start-here/local-development/local-server#start-with-the-cli).
 
 ## Helix home
 
