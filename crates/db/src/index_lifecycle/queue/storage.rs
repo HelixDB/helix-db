@@ -39,7 +39,7 @@ use crate::error::{HelixDbError, Result};
 
 use super::backlog::{charged_bytes, Admission, IndexOperationBacklog, Remainder};
 use super::resolutions::{Charge, ResolutionBudget};
-use super::shared::{Plan, PreparedView, QueueChanges, SharedQueues, SharedRead};
+use super::shared::{Plan, PreparedView, QueueChanges, SharedQueues, SharedRead, ViewLease};
 use super::{OutputBudget, QueueTarget};
 
 /// The write one acknowledgement staged for its queue
@@ -433,6 +433,16 @@ pub(crate) enum PendingRead {
 }
 
 impl PendingRead {
+    /// The lease on the shared view a shared read selects from, which
+    /// whatever keeps its selected payloads holds as long as it keeps them
+    /// (see [`super::shared`]); `None` for a storage read.
+    pub(crate) fn lease(&self) -> Option<ViewLease> {
+        match self {
+            Self::Shared(shared) => Some(shared.lease()),
+            Self::Stored { .. } => None,
+        }
+    }
+
     /// Selects each entity at its latest outstanding operation within
     /// `budget` (see [`PendingQueueBytes::decode_latest`] and
     /// [`SharedRead::select`]); `None` when nothing is pending.

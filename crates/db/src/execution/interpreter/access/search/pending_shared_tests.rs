@@ -1163,3 +1163,58 @@ async fn a_retired_generation_frees_its_view_on_its_next_attempt() {
     pinned.close_request_read_view().unwrap();
     db.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_view_a_request_selected_from_is_kept_and_shared_until_the_request_ends() {
+    let db = open(
+        "shared-leased",
+        Arc::new(InMemory::new()),
+        QueueLayout::Map,
+        true,
+    )
+    .await;
+    for position in 0..4 {
+        insert_at(&db, position as f32).await;
+    }
+    let vector = crate::index_lifecycle::queue::tests::target(&db, QueueFamily::Vector).await;
+    let shared = Arc::clone(db.index_queue_store().shared());
+    let mut holding = read_context(&db).await;
+    let (actual, reference) =
+        selections(&mut holding, QueueFamily::Vector, SearchConsistency::Strong).await;
+    assert_eq!((actual.len(), &actual), (4, &reference));
+    // The request keeps the payloads it selected, and with them the view,
+    // after its search returned: eviction cannot free it.
+    assert_eq!(shared.leases(vector), (1, 0));
+    shared.evict_idle();
+    assert!(shared.holds_view(vector));
+    // Another request shares that view instead of decoding a second copy.
+    let builds = shared.builds();
+    let mut next = read_context(&db).await;
+    let (actual, reference) =
+        selections(&mut next, QueueFamily::Vector, SearchConsistency::Strong).await;
+    assert_eq!((actual.len(), &actual), (4, &reference));
+    assert_eq!(shared.builds(), builds);
+    assert_eq!(shared.leases(vector), (2, 0));
+    // An empty selection keeps no lease.
+    let text = crate::index_lifecycle::queue::tests::target(&db, QueueFamily::Text).await;
+    while matches!(
+        publish(&db, QueueFamily::Text).await,
+        PublicationOutcome::Published { .. }
+    ) {}
+    let mut drained = read_context(&db).await;
+    let (actual, _) = selections(&mut drained, QueueFamily::Text, SearchConsistency::Strong).await;
+    assert!(actual.is_empty());
+    assert_eq!(shared.leases(text), (0, 0));
+    // Each request lets go when it ends; then the view can be evicted.
+    for context in [next, drained] {
+        let mut context = context;
+        context.close_request_read_view().unwrap();
+    }
+    assert_eq!(shared.leases(vector), (1, 0));
+    holding.close_request_read_view().unwrap();
+    drop(holding);
+    assert_eq!(shared.leases(vector), (0, 0));
+    shared.evict_idle();
+    assert!(!shared.holds_view(vector));
+    db.close().await.unwrap();
+}

@@ -1239,7 +1239,7 @@ fn a_storage_read_resolves_its_value_or_every_row() {
 }
 
 #[test]
-fn an_installed_view_serves_its_builder_even_when_evicted_before_it_selects() {
+fn an_installed_view_is_never_evicted_while_its_builder_holds_it() {
     let one = operation(1, 1, 64);
     let weight = charged_bytes(one.retained_bytes()) + VIEW_OVERHEAD_BYTES;
     // One view fits.
@@ -1251,18 +1251,129 @@ fn an_installed_view_serves_its_builder_even_when_evicted_before_it_selects() {
     let own = shared
         .install(builder, prepared(1, std::slice::from_ref(&one)))
         .expect("the view serves its builder's snapshot");
-    // Another target's install evicts it before the builder selects.
+    // Another target's install would evict it, but its builder holds it.
     build(&shared, other(), 1, &[operation(2, 2, 64)]);
-    assert!(!tracked(&shared, target()));
+    assert!(ready(&shared, target()));
     assert_eq!(ids(&own.select(u64::MAX)), vec![1]);
+    // Letting go evicts the other view back down to the budget.
+    drop(own);
+    assert!(ready(&shared, target()));
+    assert!(!tracked(&shared, other()));
+    assert_eq!(shared.state.lock().held, weight);
     // A view whose fresh base is above its builder's snapshot cannot serve
     // it; the builder reads storage.
+    shared.free(target());
     let Plan::Build(builder) = plan_now(&shared, target(), 1) else {
-        panic!("evicted");
+        panic!("freed");
     };
     shared.base_chosen(&builder, 3);
     assert!(shared.install(builder, prepared(3, &[])).is_none());
     assert!(ready(&shared, target()));
+}
+
+#[test]
+fn a_view_searches_hold_is_shared_never_evicted_and_never_built_twice() {
+    let one = operation(1, 1, 64);
+    let weight = charged_bytes(one.retained_bytes()) + VIEW_OVERHEAD_BYTES;
+    // One view fits.
+    let shared = Arc::new(SharedQueues::new(weight));
+    build(&shared, target(), 1, std::slice::from_ref(&one));
+    let held = shared_read(&shared, target(), 1);
+    // Other targets' installs and growth would evict it, but a search
+    // holds it, and it stays charged.
+    build(&shared, other(), 1, &[operation(2, 2, 64)]);
+    shared
+        .begin_commit(enqueue(other(), &[operation(3, 3, 64)]))
+        .applied(2);
+    assert!(ready(&shared, target()));
+    assert!(shared.state.lock().held >= 2 * weight);
+    // A later search shares it instead of decoding a second copy.
+    let builds = shared.builds();
+    let again = shared_read(&shared, target(), 2);
+    assert_eq!(shared.builds(), builds);
+    assert_eq!(ids(&again.select(u64::MAX)), vec![1]);
+    assert_eq!(ids(&held.select(u64::MAX)), vec![1]);
+    // Clones share one lease, which keeps the view after the reads.
+    let lease = held.lease();
+    let copy = again.clone();
+    drop((held, again));
+    assert_eq!(shared.leases(target()), (2, 0));
+    drop(copy);
+    assert_eq!(shared.leases(target()), (1, 0));
+    assert!(ready(&shared, target()) && ready(&shared, other()));
+    // The last lease ending evicts the others down to the budget, never the
+    // view it held.
+    drop(lease);
+    assert_eq!(shared.leases(target()), (0, 0));
+    assert!(ready(&shared, target()));
+    assert!(!tracked(&shared, other()));
+    assert_eq!(shared.state.lock().held, weight);
+    // A lease on a view freed since never touches a later view.
+    let stale = shared_read(&shared, target(), 2);
+    shared
+        .begin_commit(acknowledge(target(), &[one.id()]))
+        .applied(3);
+    assert!(!tracked(&shared, target()), "drained while leased");
+    build(&shared, target(), 3, &[]);
+    let fresh = shared_read(&shared, target(), 3);
+    drop(stale);
+    assert_eq!(shared.leases(target()), (1, 0));
+    shared.retire(target());
+    drop(fresh);
+    assert!(!tracked(&shared, target()));
+}
+
+#[test]
+fn a_view_reset_while_held_stays_charged_and_is_not_rebuilt_until_let_go() {
+    let shared = Arc::new(SharedQueues::default());
+    let one = operation(1, 1, 64);
+    build(&shared, target(), 1, std::slice::from_ref(&one));
+    let weight = shared.state.lock().held;
+    let read = shared_read(&shared, target(), 1);
+    let second = shared_read(&shared, target(), 1);
+    // An uncertain commit resets the view; the searches holding it keep
+    // their copy, which stays charged.
+    shared
+        .begin_commit(enqueue(target(), &[operation(2, 2, 4)]))
+        .uncertain();
+    assert_eq!(shared.leases(target()), (0, 2));
+    assert_eq!(shared.state.lock().held, weight);
+    assert_eq!(ids(&read.select(u64::MAX)), vec![1]);
+    // Settled, its searches read storage rather than build a second copy.
+    shared.settle(target(), shared.settlement());
+    assert!(matches!(plan_now(&shared, target(), 3), Plan::Fallback));
+    drop(read);
+    assert!(matches!(plan_now(&shared, target(), 3), Plan::Fallback));
+    drop(second);
+    assert_eq!(shared.leases(target()), (0, 0));
+    assert_eq!(shared.state.lock().held, 0);
+    let Plan::Build(builder) = plan_now(&shared, target(), 3) else {
+        panic!("built once no search holds the old view");
+    };
+    assert!(
+        !builder.own_snapshot(),
+        "an uncertain commit's fate is unknown"
+    );
+    drop(builder);
+    // An orphan keeps its target tracked until its last lease ends.
+    let shared = Arc::new(SharedQueues::default());
+    build(&shared, target(), 1, &[]);
+    let read = shared_read(&shared, target(), 1);
+    shared
+        .begin_commit(enqueue(target(), &[operation(3, 3, 4)]))
+        .uncertain();
+    shared.settle(target(), shared.settlement());
+    shared
+        .state
+        .lock()
+        .targets
+        .get_mut(&target())
+        .unwrap()
+        .recorded = Recorded::Through(1);
+    shared.state.lock().prune(target());
+    assert!(tracked(&shared, target()));
+    drop(read);
+    assert!(!tracked(&shared, target()));
 }
 
 #[tokio::test]

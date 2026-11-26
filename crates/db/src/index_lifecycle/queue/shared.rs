@@ -97,10 +97,26 @@
 //! budget: the same ceiling as the queues publication retains between
 //! attempts, one logical index's retained-byte limit per publication task.
 //! Each view is charged [`VIEW_OVERHEAD_BYTES`] beside its operations, so
-//! many small views are bounded too. The view a search is using is never
-//! evicted for it, so the views can exceed the budget by at most that one
-//! view. A target that holds no view, no commit in flight, and nothing unknown
-//! about its commits is not tracked at all.
+//! many small views are bounded too.
+//!
+//! A search leases the view it reads ([`ViewLease`]) from its plan until it
+//! no longer holds anything it captured or selected from it: its request
+//! keeps the selected operations' payloads, which the view shares, until it
+//! ends. A leased view is never evicted, and stays the view its target's
+//! searches share, so no target ever has a second copy of its operations
+//! decoded while a search holds the first, and what searches hold of views
+//! stays charged to the budget. Eviction never frees the view whose growth
+//! (a commit), install (a build), or last lease ending started it, so the
+//! views exceed the budget only by leased views (at most one per target)
+//! and by that one view; the last lease of a view ending evicts the others
+//! down to the budget again. A view that drains or retires
+//! while leased is freed anyway: a pinned snapshot sees none of a drained
+//! view's operations, so its searches selected none, and no view of a
+//! retired generation is built again. A view reset while leased (an
+//! uncertain commit, or an inconsistent record) stays charged, and its
+//! target's searches read storage instead of building, until its last lease
+//! ends. A target that holds no view, no commit in flight, no reset view
+//! still leased, and nothing unknown about its commits is not tracked at all.
 //!
 //! Freeing a view and compaction's rebuild of what it keeps run after the
 //! shared lock is released; only bookkeeping proportional to what changed
@@ -155,7 +171,9 @@
 //!   acknowledged operations or 4 MiB of their charged bytes, or once they
 //!   reach half the live operations.
 //! - Evicting a view to stay within the budget scans the tracked targets for
-//!   the least recently searched view.
+//!   the least recently searched view no search leases. Searches that keep
+//!   leasing every view hold the views above the budget for as long as they
+//!   run; each holds what it selected from them anyway.
 //! - A target tracked anew assumes the latest commit of every untracked
 //!   target, so while other queues take writes, the first search of a target
 //!   after its view was freed usually builds from a fresh snapshot, and reads
@@ -317,6 +335,8 @@ struct View {
     compacting: bool,
     /// When a search last read it, for eviction.
     used: u64,
+    /// Live [`ViewLease`]s on it; it is not evicted while any are.
+    leases: usize,
 }
 
 /// Why a record left a view unusable.
@@ -350,6 +370,7 @@ impl View {
             charged: 0,
             compacting: false,
             used: 0,
+            leases: 0,
         };
         if let Some((_, operations)) = queue {
             view.insert_chunk(base, operations);
@@ -499,8 +520,15 @@ impl View {
         }
     }
 
-    /// Every chunk, in storage order, for a search at `snapshot`.
-    fn capture(&self, snapshot: u64) -> SharedRead {
+    /// Every chunk, in storage order, for a search at `snapshot` of
+    /// `target`, leasing the view until the search lets go of it.
+    fn capture(
+        &mut self,
+        shared: &Arc<SharedQueues>,
+        target: QueueTarget,
+        snapshot: u64,
+    ) -> SharedRead {
+        self.leases += 1;
         SharedRead {
             family: self.family,
             chunks: self
@@ -509,6 +537,13 @@ impl View {
                 .map(|(_, chunk)| Arc::clone(chunk))
                 .collect(),
             snapshot,
+            lease: ViewLease {
+                _lease: Arc::new(Lease {
+                    shared: Arc::clone(shared),
+                    target,
+                    build: self.build,
+                }),
+            },
         }
     }
 }
@@ -561,6 +596,18 @@ struct TargetState {
     /// [`State::unsettlements`] when the view last became unsettled, so a
     /// settlement read before an unsettling commit never ends it.
     unsettled_at: u64,
+    /// A view reset while leased, until its last lease ends: the target
+    /// builds no view meanwhile, so `view` is never ready or building.
+    orphan: Option<Orphan>,
+}
+
+/// A view reset while searches leased it.
+#[derive(Debug)]
+struct Orphan {
+    build: u64,
+    leases: usize,
+    /// Its [`ViewState::weight`], still in [`State::held`].
+    weight: u64,
 }
 
 /// Work a change under the shared lock leaves for after it: compactions to
@@ -623,7 +670,8 @@ struct State {
     /// recorded at: a target tracked anew starts there, so a build never
     /// takes a base below a commit recorded before it was untracked.
     untracked: u64,
-    /// [`ViewState::weight`] of every view.
+    /// [`ViewState::weight`] of every view and [`Orphan::weight`] of every
+    /// orphan.
     held: u64,
     /// Ready views compaction waits on a higher floor for.
     blocked: HashSet<QueueTarget>,
@@ -654,6 +702,7 @@ impl State {
             recorded: Recorded::Through(untracked),
             view: ViewState::Absent,
             unsettled_at: 0,
+            orphan: None,
         })
     }
 
@@ -671,9 +720,10 @@ impl State {
         old
     }
 
-    /// Makes `target`'s view unsettled; its old view is freed after the lock.
+    /// Makes `target`'s view unsettled; its old view is freed after the lock,
+    /// and stays charged as an [`Orphan`] while leased.
     fn reset(&mut self, target: QueueTarget, after: &mut After) {
-        after.views.push(self.replace(target, ViewState::Unsettled));
+        let old = self.replace(target, ViewState::Unsettled);
         self.unsettlements += 1;
         let tracked = self
             .targets
@@ -681,18 +731,39 @@ impl State {
             .expect("a reset target is tracked");
         tracked.recorded = Recorded::Unknown;
         tracked.unsettled_at = self.unsettlements;
+        match &old {
+            ViewState::Ready(view) if view.leases > 0 => {
+                assert!(
+                    tracked.orphan.is_none(),
+                    "an orphan's target builds no view"
+                );
+                let weight = old.weight();
+                tracked.orphan = Some(Orphan {
+                    build: view.build,
+                    leases: view.leases,
+                    weight,
+                });
+                self.held += weight;
+            }
+            ViewState::Ready(_)
+            | ViewState::Absent
+            | ViewState::Building { .. }
+            | ViewState::Unsettled => {}
+        }
+        after.views.push(old);
     }
 
     /// Stops tracking `target` when it holds nothing: no view, no commit in
-    /// flight, and no unknown commit sequence.
+    /// flight, no orphan, and no unknown commit sequence.
     fn prune(&mut self, target: QueueTarget) {
         let hash_map::Entry::Occupied(entry) = self.targets.entry(target) else {
             return;
         };
         let tracked = entry.get();
-        let (ViewState::Absent, true, Recorded::Through(through)) = (
+        let (ViewState::Absent, true, None, Recorded::Through(through)) = (
             &tracked.view,
             tracked.in_flight.is_empty(),
+            &tracked.orphan,
             tracked.recorded,
         ) else {
             return;
@@ -800,15 +871,17 @@ impl State {
         self.maintain(target, after);
     }
 
-    /// Frees the least recently searched views other than `keep`'s while the
-    /// views exceed `budget`.
-    fn evict(&mut self, budget: u64, keep: QueueTarget, after: &mut After) {
+    /// Frees the least recently searched views that no search leases, other
+    /// than `keep`'s, while the views exceed `budget`.
+    fn evict(&mut self, budget: u64, keep: Option<QueueTarget>, after: &mut After) {
         while self.held > budget {
             let Some((_, idle)) = self
                 .targets
                 .iter()
                 .filter_map(|(target, tracked)| match &tracked.view {
-                    ViewState::Ready(view) if *target != keep => Some((view.used, *target)),
+                    ViewState::Ready(view) if view.leases == 0 && Some(*target) != keep => {
+                        Some((view.used, *target))
+                    }
                     ViewState::Ready(_)
                     | ViewState::Absent
                     | ViewState::Building { .. }
@@ -1024,7 +1097,7 @@ impl CommittingQueue {
                 continue;
             }
             if grown > 0 {
-                state.evict(self.shared.budget, target, &mut after);
+                state.evict(self.shared.budget, Some(target), &mut after);
             }
             // The commit left the floor, so it may have risen.
             state.maintain(target, &mut after);
@@ -1050,9 +1123,76 @@ pub(crate) struct SharedRead {
     family: Option<QueueFamily>,
     chunks: Vec<Arc<Chunk>>,
     snapshot: u64,
+    lease: ViewLease,
+}
+
+/// Keeps a view from eviction while a search holds what it captured or
+/// selected from it; see the module documentation. Clones share one lease,
+/// which ends when the last is dropped.
+#[derive(Debug, Clone)]
+pub(crate) struct ViewLease {
+    _lease: Arc<Lease>,
+}
+
+/// One lease on `target`'s view of `build`.
+#[derive(Debug)]
+struct Lease {
+    shared: Arc<SharedQueues>,
+    target: QueueTarget,
+    build: u64,
+}
+
+impl Drop for Lease {
+    /// Ends the lease on the view or orphan it was taken on, if that still
+    /// exists. The last lease of a view ending evicts the other views no
+    /// search leases down to the budget, since they may have exceeded it
+    /// only because the view was leased.
+    fn drop(&mut self) {
+        let mut after = After::default();
+        let mut guard = self.shared.state.lock();
+        let state = &mut *guard;
+        let Some(tracked) = state.targets.get_mut(&self.target) else {
+            // Its view drained or retired and the target was untracked.
+            return;
+        };
+        let released = match (&mut tracked.view, &mut tracked.orphan) {
+            (ViewState::Ready(view), _) if view.build == self.build => {
+                view.leases -= 1;
+                view.leases == 0
+            }
+            (_, Some(orphan)) if orphan.build == self.build => {
+                orphan.leases -= 1;
+                if orphan.leases == 0 {
+                    state.held -= orphan.weight;
+                    tracked.orphan = None;
+                    state.prune(self.target);
+                }
+                false
+            }
+            // Its view drained or retired; another may be leased now.
+            (
+                ViewState::Ready(_)
+                | ViewState::Absent
+                | ViewState::Building { .. }
+                | ViewState::Unsettled,
+                _,
+            ) => false,
+        };
+        if released && state.held > self.shared.budget {
+            state.evict(self.shared.budget, Some(self.target), &mut after);
+        }
+        drop(guard);
+        self.shared.run(after);
+    }
 }
 
 impl SharedRead {
+    /// The lease this read holds on its view, for whatever keeps payloads
+    /// it selects beyond the read.
+    pub(crate) fn lease(&self) -> ViewLease {
+        self.lease.clone()
+    }
+
     /// Selects each entity visible at the snapshot at its latest operation,
     /// in the order of its oldest, while their retained bytes fit `budget`,
     /// exactly as [`LatestOperations::decode`] selects from the value storage
@@ -1168,7 +1308,7 @@ impl Drop for Builder {
 
 impl SharedQueues {
     /// Views of one writer holding at most `budget` bytes together beside
-    /// the one in use (see the module documentation).
+    /// those in use (see the module documentation).
     pub(crate) fn new(budget: u64) -> Self {
         Self {
             state: Mutex::new(State::default()),
@@ -1213,6 +1353,32 @@ impl SharedQueues {
     #[cfg(test)]
     pub(crate) fn builds(&self) -> u64 {
         self.state.lock().next_build
+    }
+
+    /// Leases on `target`'s ready view, and on its orphan.
+    #[cfg(test)]
+    pub(crate) fn leases(&self, target: QueueTarget) -> (usize, usize) {
+        self.state
+            .lock()
+            .targets
+            .get(&target)
+            .map_or((0, 0), |tracked| {
+                (
+                    match &tracked.view {
+                        ViewState::Ready(view) => view.leases,
+                        ViewState::Absent | ViewState::Building { .. } | ViewState::Unsettled => 0,
+                    },
+                    tracked.orphan.as_ref().map_or(0, |orphan| orphan.leases),
+                )
+            })
+    }
+
+    /// Evicts every view no search leases, as a budget of nothing would.
+    #[cfg(test)]
+    pub(crate) fn evict_idle(self: &Arc<Self>) {
+        let mut after = After::default();
+        self.state.lock().evict(0, None, &mut after);
+        self.run(after);
     }
 
     /// Whether `target` has a ready view.
@@ -1331,7 +1497,7 @@ impl SharedQueues {
                     match &mut tracked.view {
                         ViewState::Ready(view) if snapshot >= view.served_from => {
                             view.used = clock;
-                            return Plan::Shared(view.capture(snapshot));
+                            return Plan::Shared(view.capture(self, target, snapshot));
                         }
                         ViewState::Building {
                             base: Some(base), ..
@@ -1339,6 +1505,7 @@ impl SharedQueues {
                             return Plan::Fallback;
                         }
                         ViewState::Ready(_) | ViewState::Unsettled => return Plan::Fallback,
+                        ViewState::Absent if tracked.orphan.is_some() => return Plan::Fallback,
                         ViewState::Building { .. } => {}
                         ViewState::Absent => {
                             let own_snapshot = matches!(tracked.recorded, Recorded::Through(through) if through <= snapshot);
@@ -1432,9 +1599,10 @@ impl SharedQueues {
                 state.clock += 1;
                 view.build = builder.build;
                 view.used = state.clock;
-                // Captured before anything below can compact or evict it.
-                let own =
-                    (builder.snapshot >= view.served_from).then(|| view.capture(builder.snapshot));
+                // Captured, and so leased, before anything below can compact
+                // or evict it.
+                let own = (builder.snapshot >= view.served_from)
+                    .then(|| view.capture(&builder.shared, target, builder.snapshot));
                 state
                     .targets
                     .get_mut(&target)
@@ -1444,7 +1612,7 @@ impl SharedQueues {
                     .views
                     .push(state.replace(target, ViewState::Ready(view)));
                 state.maintain(target, &mut after);
-                state.evict(self.budget, target, &mut after);
+                state.evict(self.budget, Some(target), &mut after);
                 own
             }
             Err(Inconsistent) => {

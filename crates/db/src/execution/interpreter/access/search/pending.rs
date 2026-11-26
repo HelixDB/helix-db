@@ -35,6 +35,7 @@ use crate::encoding::v2::values::indexes::operation_queue::{
 };
 use crate::execution::interpreter::read_view::StableRequestReadView;
 use crate::index_lifecycle::queue::producer::PendingEntityState;
+use crate::index_lifecycle::queue::shared::ViewLease;
 use crate::index_lifecycle::queue::QueueTarget;
 use crate::index_lifecycle::work::TextPartition;
 use crate::index_lifecycle::IndexIdentity;
@@ -106,6 +107,9 @@ struct CommittedPending {
     /// text search caches nothing for a target forgotten since
     /// ([`PendingTextAnalyses::replace`]).
     read: CacheInstant,
+    /// The lease on the shared view whose payloads `entities` share, so the
+    /// view is never evicted, and decoded again, while they are held.
+    _lease: Option<ViewLease>,
 }
 
 impl CommittedPending {
@@ -123,6 +127,7 @@ impl CommittedPending {
             entities: Arc::from(entities),
             superseded: Arc::new(superseded),
             read,
+            _lease: None,
         }
     }
 }
@@ -232,6 +237,8 @@ struct LocalChanges {
 #[derive(Debug, Clone)]
 pub(super) struct PendingEntities {
     committed: Arc<[CommittedEntity]>,
+    /// The lease `committed` was selected under ([`CommittedPending`]).
+    _lease: Option<ViewLease>,
     /// Length of the selected prefix of `committed`.
     selected: usize,
     /// Empty for read requests.
@@ -308,6 +315,7 @@ impl PendingSelection {
             entities: PendingEntities {
                 selected: committed.entities.len(),
                 committed: committed.entities,
+                _lease: committed._lease,
                 local: Arc::default(),
             },
             superseded: committed.superseded,
@@ -905,20 +913,25 @@ impl<'db> ExecutionContext<'db> {
                     (SearchConsistency::Strong, _, None) | (SearchConsistency::Eventual, _, _) => {}
                 }
                 probe.check()?;
-                Ok(CommittedRead::Selected(CommittedPending::new(
-                    latest
-                        .into_operations()
-                        .into_iter()
-                        .map(|operation| CommittedEntity {
-                            operation: operation.id(),
-                            pending: PendingEntity {
-                                entity: operation.entity(),
-                                latest: latest_value(operation.payload()),
-                            },
-                        })
-                        .collect(),
-                    read_at,
-                )))
+                // The selected payloads are a shared view's: they keep its
+                // lease for as long as the request holds them.
+                Ok(CommittedRead::Selected(CommittedPending {
+                    _lease: pending.lease(),
+                    ..CommittedPending::new(
+                        latest
+                            .into_operations()
+                            .into_iter()
+                            .map(|operation| CommittedEntity {
+                                operation: operation.id(),
+                                pending: PendingEntity {
+                                    entity: operation.entity(),
+                                    latest: latest_value(operation.payload()),
+                                },
+                            })
+                            .collect(),
+                        read_at,
+                    )
+                }))
             })
             .await
         };
