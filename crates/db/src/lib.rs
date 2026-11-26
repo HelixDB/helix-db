@@ -2845,7 +2845,12 @@ impl HelixDB {
                 actual: self.mode().as_str(),
             });
         };
-        let sequence = writer.db().snapshot().await?.seq();
+        let sequence = writer
+            .db()
+            .snapshot()
+            .await
+            .map_err(HelixDbError::from_storage_commit)?
+            .seq();
         transaction::await_durable_through(writer.db(), sequence)
             .await
             .map_err(HelixDbError::from_storage_commit)

@@ -380,6 +380,76 @@ async fn empty_durable_write_stops_at_its_deadline() {
     db.close().await.unwrap();
 }
 
+/// A later definition conflict does not undo the first CREATE. Callers must
+/// see why its durability wait failed rather than treat the batch as unapplied.
+#[tokio::test(flavor = "multi_thread")]
+async fn partial_index_ddl_failure_reports_durability_error() {
+    for close_writer in [false, true] {
+        let store = Arc::new(GatedWalStore::default());
+        let config = db::config::DbConfig::new().with_secondary_index_lifecycle_tuning(
+            db::config::SecondaryIndexLifecycleTuning::default()
+                .with_worker_mode(db::config::SecondaryIndexLifecycleWorkerMode::Disabled),
+        );
+        let db = Arc::new(
+            HelixDB::open_with_object_store_and_config(PATH, Arc::clone(&store) as _, config)
+                .await
+                .expect("writer opens"),
+        );
+        let service = HelixQueryService::new(Arc::clone(&db));
+        let request = QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "first",
+                    traversal::g()
+                        .create_index_if_not_exists(IndexSpec::node_equality("User", "email")),
+                )
+                .var_as(
+                    "second",
+                    traversal::g().create_index_if_not_exists(IndexSpec::node_unique_equality(
+                        "User", "email",
+                    )),
+                ),
+        );
+        let before = db.visible_sequence().await.unwrap();
+        store.hold();
+        let request = service.execute_query_with_mode_scoped_controlled(
+            request,
+            QueryMode::Execute,
+            DataScope::LegacyUnscoped,
+            if close_writer {
+                ExecutionControl::unlimited()
+            } else {
+                ExecutionControl::from_timeout(Duration::from_millis(500))
+            },
+        );
+        let request = assert_pending(Box::pin(request)).await;
+        let after = db.visible_sequence().await.unwrap();
+        if close_writer {
+            store.fail();
+        }
+        let result = tokio::time::timeout(RETURNS, request).await;
+        store.release();
+        if !close_writer {
+            db.close().await.unwrap();
+        }
+
+        assert!(after > before, "the first CREATE is applied");
+        let error = result
+            .expect("the durability wait ends")
+            .expect_err("the first CREATE never became durable");
+        let expected = if close_writer {
+            helix_ast::error_code::QueryErrorCode::StorageError
+        } else {
+            helix_ast::error_code::QueryErrorCode::QueryDeadlineExceeded
+        };
+        assert_eq!(
+            error.error_code(),
+            expected,
+            "durability failure was hidden: {error}"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn no_op_index_ddl_stops_at_its_deadline() {
     let store = Arc::new(GatedWalStore::default());
