@@ -135,6 +135,17 @@ fn reads_at_known_snapshots_are_exact_and_others_probe_expecting_the_nearest() {
         budget.known(target(1)),
         (31 - KNOWN_SIZES as u64..=30).collect::<Vec<_>>()
     );
+    // A probe older than every snapshot kept keeps its own size, so the
+    // reads waiting for it at its snapshot are exact.
+    let mut oldest = charge_now(&budget, target(1), 10);
+    let mut waiting = Box::pin(budget.charge(target(1), 10));
+    assert!((&mut waiting).now_or_never().is_none());
+    resolve_now(&mut oldest, 2 * KIB);
+    drop(oldest);
+    let exact = waiting.now_or_never().expect("charged at once");
+    assert_eq!(exact.held(), Some((true, 4)));
+    assert_eq!(budget.known(target(1))[0], 10);
+    assert_eq!(budget.known(target(1)).len(), KNOWN_SIZES);
     // Another target knows nothing of it.
     assert_eq!(
         charge_now(&budget, target(2), 5).held(),

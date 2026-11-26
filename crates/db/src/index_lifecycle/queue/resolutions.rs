@@ -19,7 +19,8 @@
 //!
 //! - A read at a snapshot its target was read at before is exact: a queue
 //!   resolves the same bytes at one snapshot however often it is read. Each
-//!   target keeps the sizes of its [`KNOWN_SIZES`] newest snapshots read.
+//!   target keeps the sizes of its [`KNOWN_SIZES`] newest snapshots read,
+//!   and always the latest probe's, so the reads waiting for it charge it.
 //! - A read at any other snapshot, older or newer, probes: per target, one
 //!   probe runs at a time, and a read that finds one waits for it, then
 //!   charges what it knows by then. Concurrent searches mostly share a
@@ -44,7 +45,7 @@
 //! target t read at 5 resolved 2 KiB (needs 4 KiB):
 //! read t@5 -> charged 4 KiB (exact)
 //! read t@4 -> probes, charged 4 KiB (nearest: 5); read t@6 waits for it,
-//!             then probes, expecting t@5's size (or t@4's, if larger)
+//!             then probes, expecting t@5's size (the nearest known)
 //! ```
 //!
 //! # Bound
@@ -303,7 +304,13 @@ impl Charge {
             let known = &mut targets.entry(self.target).or_default().known;
             known.insert(self.snapshot, need);
             if known.len() > KNOWN_SIZES {
-                known.pop_first();
+                // The oldest but this read's own, which the reads waiting
+                // for it at its snapshot charge.
+                let oldest = *known
+                    .keys()
+                    .find(|snapshot| **snapshot != self.snapshot)
+                    .expect("more than one size is known");
+                known.remove(&oldest);
             }
         }
         let (lane, mut permit) = self.held.take().expect("a charge holds its lane");

@@ -103,20 +103,27 @@
 //! no longer holds anything it captured or selected from it: its request
 //! keeps the selected operations' payloads, which the view shares, until it
 //! ends. A leased view is never evicted, and stays the view its target's
-//! searches share, so no target ever has a second copy of its operations
-//! decoded while a search holds the first, and what searches hold of views
-//! stays charged to the budget. Eviction never frees the view whose growth
-//! (a commit), install (a build), or last lease ending started it, so the
+//! searches share, so no second view of a target is ever built while a
+//! search holds the first, and what searches hold of a live view stays
+//! charged to the budget. Eviction never frees the view whose growth (a
+//! commit), install (a build), or last lease ending started it, so the
 //! views exceed the budget only by leased views (at most one per target)
 //! and by that one view; the last lease of a view ending evicts the others
-//! down to the budget again. A view that drains or retires
-//! while leased is freed anyway: a pinned snapshot sees none of a drained
+//! down to the budget again.
+//!
+//! A view reset while leased (an uncertain commit, or an inconsistent
+//! record) stays charged, and its target builds no view, until its last
+//! lease ends. A view that drains or retires while leased stops being
+//! charged at once, and what its searches selected lives on, uncharged,
+//! until their requests end: a pinned snapshot sees none of a drained
 //! view's operations, so its searches selected none, and no view of a
-//! retired generation is built again. A view reset while leased (an
-//! uncertain commit, or an inconsistent record) stays charged, and its
-//! target's searches read storage instead of building, until its last lease
-//! ends. A target that holds no view, no commit in flight, no reset view
-//! still leased, and nothing unknown about its commits is not tracked at all.
+//! retired generation is built again. Searches no view serves (below a
+//! view's base, on a target whose reset view is still leased, of a retired
+//! generation, inside a write transaction) decode their own copy from
+//! storage, charged to the resolution budget ([`super::resolutions`]) only
+//! until they have selected. A target that holds no view, no commit in
+//! flight, no reset view still leased, and nothing unknown about its
+//! commits is not tracked at all.
 //!
 //! Freeing a view and compaction's rebuild of what it keeps run after the
 //! shared lock is released; only bookkeeping proportional to what changed
