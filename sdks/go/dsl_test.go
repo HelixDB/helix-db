@@ -250,6 +250,21 @@ func TestReadQueryRejectsWriteTraversal(t *testing.T) {
 	}
 }
 
+func TestAddWithNilPropsSendsEmptyProperties(t *testing.T) {
+	for name, traversal := range map[string]*Traversal{
+		"AddN": G().AddN("Marker", nil),
+		"AddE": G().N(NodeID(1)).AddE("KNOWS", NodeID(2), nil),
+	} {
+		body, err := MarshalRequest(WriteQuery("add").VarAs("x", traversal).Returning("x"))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !strings.Contains(string(body), `"properties":[]`) {
+			t.Fatalf("%s with nil props must send an empty properties list: %s", name, body)
+		}
+	}
+}
+
 func TestReturningEmptySerializesSequence(t *testing.T) {
 	req := ReadQuery("warm_users").VarAs("users", G().NWithLabel("User").Count()).Returning()
 	body, err := MarshalRequest(req)
