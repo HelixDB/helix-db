@@ -4578,7 +4578,7 @@ runtime. See [Embedded database](/database/helix-db/start-here/local-development
 
 Page type: Guide
 
-The `ghcr.io/helixdb/helixdb:v0.0.18` image runs the standalone HelixDB server.
+The `ghcr.io/helixdb/helixdb:v0.0.19` image runs the standalone HelixDB server.
 It supports Linux on amd64 and arm64.
 It exposes the same operation-tree request contract used by Helix Cloud at
 `POST /v2/query`; gateway-only Cloud features are not included.
@@ -4622,7 +4622,7 @@ helix start dev             # add --disk --persist to switch an existing project
 The standalone server accepts queries at `http://localhost:6969/v2/query`.
 
 `helix init` saves the CLI's default image tag in `helix.toml`, and a saved tag wins,
-so `helix update` alone does not upgrade an existing project. Set `tag = "v0.0.18"` in
+so `helix update` alone does not upgrade an existing project. Set `tag = "v0.0.19"` in
 its `[local.dev]` block before starting it.
 
 The first time v0.0.10 or later opens a persisted database, it upgrades the index storage
@@ -4679,7 +4679,7 @@ Memory mode is selected by leaving `HELIX_DATA_DIR`, `S3_BUCKET`, `GCS_BUCKET` a
 ```bash
 docker run --rm --name helixdb \
   -p 127.0.0.1:6969:8080 \
-  ghcr.io/helixdb/helixdb:v0.0.18
+  ghcr.io/helixdb/helixdb:v0.0.19
 ```
 
 The `127.0.0.1:` prefix publishes the port on host loopback only; see
@@ -4752,7 +4752,7 @@ docker run --rm --name helixdb \
   -p 127.0.0.1:6969:8080 \
   -e HELIX_DATA_DIR=/var/lib/helix \
   --mount type=volume,source=helixdb-data,target=/var/lib/helix \
-  ghcr.io/helixdb/helixdb:v0.0.18
+  ghcr.io/helixdb/helixdb:v0.0.19
 ```
 
 Stop the server with `docker stop helixdb`. Starting a new container with the
@@ -4811,7 +4811,7 @@ services:
       retries: 120
 
   helix:
-    image: ghcr.io/helixdb/helixdb:v0.0.18
+    image: ghcr.io/helixdb/helixdb:v0.0.19
     restart: unless-stopped
     depends_on:
       seaweedfs:
@@ -4921,7 +4921,7 @@ docker run --rm --name helixdb \
   -e HELIX_DISK_CACHE_DIR=/var/cache/helix \
   -e HELIX_DISK_CACHE_BYTES=107374182400 \
   -v /data/helix-cache:/var/cache/helix \
-  ghcr.io/helixdb/helixdb:v0.0.18
+  ghcr.io/helixdb/helixdb:v0.0.19
 ```
 
 In Compose, mount a volume at `/var/cache/helix` on the `helix` service, as the
@@ -5768,6 +5768,14 @@ Have a feature request? [Let us know on Discord](https://discord.com/invite/2stg
 # Release notes
 
 Page type: Reference
+
+- **In-memory vector index builds (opt-in).** With `HELIX_VECTOR_BULK_BUILD_MEMORY_BYTES` set (`auto` or a byte count), an unpartitioned vector index is built in memory: 100k 1536-dimension vectors in 34 s instead of 616 s one at a time. Off by default; see [How an index is built](/database/helix-db/query-guides/vector-indexes#how-an-index-is-built) before turning it on.
+- **Dropped indexes are removed by compaction** instead of deleted row by row.
+- **Drained index operation queues are deleted.** Acknowledged operations no longer pile up in storage: on a 75 GB store, cold opens fell from about 27 s to 5 s and search p50 from 0.39 s to 0.03 s. The first open deletes queues that are already empty.
+- **Searches share one copy of pending index work.** During heavy ingest, 32 concurrent searches peaked at 8.1 GB instead of 71.5 GB, and publication stays flat instead of slowing down as the backlog grows.
+- **Vector search finds every row by its own vector** more reliably: inserts seed the bottom graph layer from several entry points, so it no longer splits into unreachable parts.
+- **A fenced writer reports unready.** When another container opens the same storage as writer, `/readyz` turns 503 with `"storage": "fenced"` and background work stops. `/healthz` stays 200.
+- **Upgrading:** this release publishes storage version 8 on first open, and v0.0.18 and earlier then refuse the data (`Unsupported index storage version 8`). Take a backup first, and upgrade readers before the writer. An older image started as writer on upgraded storage fences the running writer before it refuses, so keep older images out of rollbacks and standbys. Turn in-memory builds on only once every server that can become the writer runs v0.0.19.
 
 - **Fix: the datetime string migration no longer stalls on text- or vector-indexed properties.** On v0.0.17, converting an RFC 3339 property that a text or vector index covers failed its batch, and the job retried it forever, so later properties were never converted. Such a property now keeps its strings, and the server logs `datetime string migration leaves a property with RFC3339 strings as stored` with reason `TextIndexed` or `VectorIndexed`. The check runs again before every conversion batch, so an index created after detection is also respected.
 - **A store stuck on v0.0.17 resumes and completes** on upgrade, with the indexed property left as stored and the rest converted. Equality, range and unique indexes accept datetimes, so their properties are converted as before.
@@ -15817,7 +15825,7 @@ live only in the project's `helix.toml`. See
 
 Page type: Guide
 
-Local development runs the prebuilt `ghcr.io/helixdb/helixdb` server container and exposes the standalone server at `POST /v2/query`. Each instance pins its image tag in `helix.toml` (`v0.0.18` for CLI 3.8.0). By default, storage is in-memory. Use `--disk` when you want persistent local data backed by a CLI-managed SeaweedFS volume.
+Local development runs the prebuilt `ghcr.io/helixdb/helixdb` server container and exposes the standalone server at `POST /v2/query`. Each instance pins its image tag in `helix.toml` (`v0.0.19` for CLI 3.8.0). By default, storage is in-memory. Use `--disk` when you want persistent local data backed by a CLI-managed SeaweedFS volume.
 
 ## Prerequisites
 
@@ -15970,7 +15978,7 @@ Each instance is isolated by container name and host port. `helix add local` alw
 ## Upgrading the server image
 
 `helix update` updates the CLI, not your instances' server image. `helix doctor <instance>` names
-the new CLI's tag; then run `helix start dev --image-version v0.0.18 --persist` (an in-memory
+the new CLI's tag; then run `helix start dev --image-version v0.0.19 --persist` (an in-memory
 instance starts empty). See [Image pinning](/cli/configuration#image-pinning).
 
 ## Browsing the graph
@@ -16167,12 +16175,12 @@ workspace_id = "<workspace-id>"
 [local.dev]
 port = 6969
 image = "ghcr.io/helixdb/helixdb"
-tag = "v0.0.18"
+tag = "v0.0.19"
 
 [local.staging]
 port = 7070
 image = "ghcr.io/helixdb/helixdb"
-tag = "v0.0.18"
+tag = "v0.0.19"
 storage = "s3"
 
 [local.staging.s3]
@@ -16222,7 +16230,7 @@ that every `[enterprise.*]` table shares.
 | --- | --- | --- | --- |
 | `port` | integer | `6969` | Host port mapped to the container's port `8080`. `helix add local` and `helix init local` do not check it against other instances. |
 | `image` | string | `"ghcr.io/helixdb/helixdb"` | Server image repository, without a tag. Set it to run a custom build. |
-| `tag` | string | The CLI's default tag (`v0.0.18` for CLI 3.8.0) | 1 to 128 characters (letters, digits, `_`, `.`, `-`; not starting with `.` or `-`), or `sha256:` plus 64 lowercase hex digits to pin a digest. `latest` pulls on every start. See [Image pinning](#image-pinning). |
+| `tag` | string | The CLI's default tag (`v0.0.19` for CLI 3.8.0) | 1 to 128 characters (letters, digits, `_`, `.`, `-`; not starting with `.` or `-`), or `sha256:` plus 64 lowercase hex digits to pin a digest. `latest` pulls on every start. See [Image pinning](#image-pinning). |
 | `pull` | `"always"`, `"missing"`, or `"never"` | `always` for `latest`, else `missing` | When to pull the server image. `always` needs a successful pull; `never` needs a cached image. An explicit value also applies to the disk-mode SeaweedFS image, which otherwise uses `missing`. |
 | `storage` | `"memory"`, `"disk"`, or `"s3"` | `"memory"` | `memory` loses data when the container stops or restarts. `disk` uses a CLI-managed SeaweedFS volume. `s3` uses `[local.<name>.s3]`. |
 
@@ -16290,7 +16298,7 @@ To move an instance to the image the current CLI ships with:
 2. Start on that tag and save it to `[local.dev]`, or edit `tag` by hand and run `helix start dev`:
 
    ```bash
-   helix start dev --image-version v0.0.18 --persist
+   helix start dev --image-version v0.0.19 --persist
    ```
 
    `helix start` replaces the container, so an in-memory instance starts empty.
@@ -18219,7 +18227,7 @@ helix start [INSTANCE] [OPTIONS]
 
 ## Behavior
 
-- Runs the `image` and `tag` pinned in `[local.<instance>]` (`ghcr.io/helixdb/helixdb` and `v0.0.18` for CLI 3.8.0), which stay after `helix update`; see [Image pinning](/cli/configuration#image-pinning). `--image-version` and `--pull` override the tag and pull policy for this run.
+- Runs the `image` and `tag` pinned in `[local.<instance>]` (`ghcr.io/helixdb/helixdb` and `v0.0.19` for CLI 3.8.0), which stay after `helix update`; see [Image pinning](/cli/configuration#image-pinning). `--image-version` and `--pull` override the tag and pull policy for this run.
 - `always` requires a successful pull, `missing` uses a cached image when available, and `never` fails if the image is not cached. A failed pull never silently falls back to an older cached image.
 - All required images are resolved before overrides are saved or containers are replaced, so a failed resolution leaves `helix.toml` unchanged. Helix and disk-mode dependencies start by their resolved immutable image IDs.
 - The disk-mode SeaweedFS image defaults to `missing` unless a pull policy is explicitly configured.
@@ -18261,7 +18269,7 @@ helix start dev --disk
 helix start dev --image-version latest
 
 # Move to the image this CLI ships with and save it to helix.toml
-helix start dev --image-version v0.0.18 --persist
+helix start dev --image-version v0.0.19 --persist
 
 # Start using cached images only
 helix start dev --pull never

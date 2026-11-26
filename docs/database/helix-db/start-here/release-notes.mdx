@@ -10,6 +10,22 @@ pageType: "Reference"
 <Update
   label="November 2026"
   rss={{
+    title: "Docker v0.0.19: in-memory vector builds, index drops through compaction and faster opens and searches under a backlog",
+    description: "Vector indexes can be built in memory, dropped indexes are removed by compaction, drained index queues are deleted, searches share one copy of pending work, and a fenced writer reports unready. Storage version 8"
+  }}
+>
+- **In-memory vector index builds (opt-in).** With `HELIX_VECTOR_BULK_BUILD_MEMORY_BYTES` set (`auto` or a byte count), an unpartitioned vector index is built in memory: 100k 1536-dimension vectors in 34 s instead of 616 s one at a time. Off by default; see [How an index is built](/database/helix-db/query-guides/vector-indexes#how-an-index-is-built) before turning it on.
+- **Dropped indexes are removed by compaction** instead of deleted row by row.
+- **Drained index operation queues are deleted.** Acknowledged operations no longer pile up in storage: on a 75 GB store, cold opens fell from about 27 s to 5 s and search p50 from 0.39 s to 0.03 s. The first open deletes queues that are already empty.
+- **Searches share one copy of pending index work.** During heavy ingest, 32 concurrent searches peaked at 8.1 GB instead of 71.5 GB, and publication stays flat instead of slowing down as the backlog grows.
+- **Vector search finds every row by its own vector** more reliably: inserts seed the bottom graph layer from several entry points, so it no longer splits into unreachable parts.
+- **A fenced writer reports unready.** When another container opens the same storage as writer, `/readyz` turns 503 with `"storage": "fenced"` and background work stops. `/healthz` stays 200.
+- **Upgrading:** this release publishes storage version 8 on first open, and v0.0.18 and earlier then refuse the data (`Unsupported index storage version 8`). Take a backup first, and upgrade readers before the writer. An older image started as writer on upgraded storage fences the running writer before it refuses, so keep older images out of rollbacks and standbys. Turn in-memory builds on only once every server that can become the writer runs v0.0.19.
+</Update>
+
+<Update
+  label="November 2026"
+  rss={{
     title: "Docker v0.0.18: the datetime string migration no longer stalls on text- or vector-indexed properties",
     description: "Properties under a text or vector index keep their RFC 3339 strings, and a store whose conversion stalled on v0.0.17 resumes and completes"
   }}
