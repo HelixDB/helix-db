@@ -1,3 +1,96 @@
+/* Helix Mono (github.com/HelixDB/helix-mono, OFL 1.1, fonts/OFL.txt) sets
+   every piece of the docs' text: body, headings, navigation and code. */
+@font-face {
+    font-family: 'Helix Mono';
+    src: url('/fonts/HelixMono-ExtraLight.woff2') format('woff2');
+    font-weight: 200;
+    font-style: normal;
+    font-display: swap;
+}
+@font-face {
+    font-family: 'Helix Mono';
+    src: url('/fonts/HelixMono-ExtraLightItalic.woff2') format('woff2');
+    font-weight: 200;
+    font-style: italic;
+    font-display: swap;
+}
+@font-face {
+    font-family: 'Helix Mono';
+    src: url('/fonts/HelixMono-Light.woff2') format('woff2');
+    font-weight: 300;
+    font-style: normal;
+    font-display: swap;
+}
+@font-face {
+    font-family: 'Helix Mono';
+    src: url('/fonts/HelixMono-LightItalic.woff2') format('woff2');
+    font-weight: 300;
+    font-style: italic;
+    font-display: swap;
+}
+@font-face {
+    font-family: 'Helix Mono';
+    src: url('/fonts/HelixMono-Regular.woff2') format('woff2');
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+}
+@font-face {
+    font-family: 'Helix Mono';
+    src: url('/fonts/HelixMono-Italic.woff2') format('woff2');
+    font-weight: 400;
+    font-style: italic;
+    font-display: swap;
+}
+@font-face {
+    font-family: 'Helix Mono';
+    src: url('/fonts/HelixMono-Medium.woff2') format('woff2');
+    font-weight: 500;
+    font-style: normal;
+    font-display: swap;
+}
+@font-face {
+    font-family: 'Helix Mono';
+    src: url('/fonts/HelixMono-MediumItalic.woff2') format('woff2');
+    font-weight: 500;
+    font-style: italic;
+    font-display: swap;
+}
+@font-face {
+    font-family: 'Helix Mono';
+    src: url('/fonts/HelixMono-SemiBold.woff2') format('woff2');
+    font-weight: 600;
+    font-style: normal;
+    font-display: swap;
+}
+@font-face {
+    font-family: 'Helix Mono';
+    src: url('/fonts/HelixMono-SemiBoldItalic.woff2') format('woff2');
+    font-weight: 600;
+    font-style: italic;
+    font-display: swap;
+}
+@font-face {
+    font-family: 'Helix Mono';
+    src: url('/fonts/HelixMono-Bold.woff2') format('woff2');
+    font-weight: 700;
+    font-style: normal;
+    font-display: swap;
+}
+@font-face {
+    font-family: 'Helix Mono';
+    src: url('/fonts/HelixMono-BoldItalic.woff2') format('woff2');
+    font-weight: 700;
+    font-style: italic;
+    font-display: swap;
+}
+
+html,
+body,
+body *:not(svg):not(svg *) {
+    font-family: 'Helix Mono', ui-monospace, Menlo, Consolas, monospace !important;
+}
+
 .card {
     border-radius: 0px;
     --corner-size: 8px;
@@ -39,7 +132,7 @@
 
 .card span {
     text-transform: uppercase;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: 'Helix Mono', monospace;
 }
 
 .card:hover {
@@ -108,7 +201,7 @@
 }
 
 #navbar {
-    font-family: 'JetBrains Mono', monospace;
+    font-family: 'Helix Mono', monospace;
 }
 
 .code-block .rounded-xt{
@@ -155,21 +248,21 @@
 
 .eyebrow {
     text-transform: uppercase;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: 'Helix Mono', monospace;
 }
 
 span:not(pre span):not(code span):not(.codeblock-dark span):not(h1 span):not(h2 span):not(h3 span):not(h4 span):not(h5 span):not(h6 span):not(.mdx-content span) {
     text-transform: uppercase;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: 'Helix Mono', monospace;
 }
 
 h5 {
-    font-family: 'JetBrains Mono', monospace;
+    font-family: 'Helix Mono', monospace;
 }
 
 #navigation-items {
     border-radius: 0px;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: 'Helix Mono', monospace;
     line-height: 130%;
 }
 
@@ -376,7 +469,7 @@ h5 {
 .enterprise-diagram code,
 .enterprise-diagram__pre,
 .enterprise-diagram__code {
-    font-family: 'Fira Code', 'Menlo', 'Consolas', 'DejaVu Sans Mono', monospace !important;
+    font-family: 'Helix Mono', 'Menlo', 'Consolas', 'DejaVu Sans Mono', monospace !important;
     font-feature-settings: "liga" 0, "calt" 0 !important;
     font-variant-ligatures: none !important;
     font-variation-settings: normal !important;
