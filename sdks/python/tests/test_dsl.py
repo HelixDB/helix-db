@@ -624,6 +624,27 @@ class DslAstTests(unittest.TestCase):
             DateTime.parse_rfc3339("2026-04-05t12:34:56z").to_rfc3339(),
             "2026-04-05T12:34:56.000Z",
         )
+        # Any fraction length is valid RFC3339 (Go and chrono emit nanoseconds); Python 3.10's
+        # fromisoformat only takes 3 or 6 digits on its own.
+        for text, expected in (
+            ("2024-01-01T00:00:00.5Z", "2024-01-01T00:00:00.500Z"),
+            ("2024-01-01T00:00:00.12Z", "2024-01-01T00:00:00.120Z"),
+            ("2024-01-01T00:00:00.1234Z", "2024-01-01T00:00:00.123Z"),
+            ("2024-01-01T00:00:00.123456789Z", "2024-01-01T00:00:00.123Z"),
+            ("1969-12-31T23:59:59.9999999+00:00", "1969-12-31T23:59:59.999Z"),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(DateTime.parse_rfc3339(text).to_rfc3339(), expected)
+        self.assertEqual(
+            json.loads(
+                QueryRequest.read(read_batch())
+                .with_typed_parameter(
+                    "at", QueryParamType.date_time(), "2024-01-01T00:00:00.123456789Z"
+                )
+                .to_json_string()
+            )["parameters"]["at"],
+            "2024-01-01T00:00:00.123Z",
+        )
         self.assertEqual(
             DateTime.parse_rfc3339("2026-04-05T12:34:56+23:59").to_rfc3339(),
             "2026-04-04T12:35:56.000Z",

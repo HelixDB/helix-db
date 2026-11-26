@@ -235,6 +235,9 @@ class DateTime:
         ):
             raise TypeError(f"invalid RFC3339 datetime: {value}")
         text = value[:-1] + "+00:00" if value.endswith(("Z", "z")) else value
+        # fromisoformat before Python 3.11 only reads exactly 3 or 6 fraction digits. Six
+        # is all a datetime keeps (3.11+ drops the rest too), and millis floor anyway.
+        text = re.sub(r"\.(\d+)", lambda match: "." + match[1][:6].ljust(6, "0"), text, count=1)
         try:
             return cls.from_datetime(datetime.fromisoformat(text))
         except ValueError as exc:
