@@ -132,6 +132,9 @@ pub(crate) enum StableRequestReadView {
     WriterSnapshot {
         snapshot: Arc<DbSnapshot>,
         compatibility: crate::index_lifecycle::repository::ReaderStorageCompatibility,
+        /// Keeps the shared search views serving this snapshot until it
+        /// closes.
+        _pin: crate::index_lifecycle::queue::shared::SnapshotPin,
     },
 }
 
@@ -157,6 +160,9 @@ impl StableRequestReadView {
                 // the snapshot, so its exact rows are complete there. Known only
                 // afterwards, it could follow a snapshot whose exact rows are not.
                 let known = writer.known_label_row_writes();
+                // Pinned before the snapshot opens, so it pins no later
+                // sequence than the snapshot's (see `SnapshotPin`).
+                let pin = db.index_queue_store().shared().pin();
                 let snapshot = writer.db().snapshot().await?;
                 let writes = match known {
                     Some(known) => known,
@@ -169,6 +175,7 @@ impl StableRequestReadView {
                 Self::WriterSnapshot {
                     snapshot,
                     compatibility,
+                    _pin: pin,
                 }
             }
         })
@@ -495,7 +502,9 @@ mod tests {
             .expect("writer opens");
         db.put(b"key", b"before").await.expect("initial value");
         db.put(b"key-2", b"kept").await.expect("second value");
+        let shared = Arc::new(crate::index_lifecycle::queue::shared::SharedQueues::default());
         let view = StableRequestReadView::WriterSnapshot {
+            _pin: shared.pin(),
             snapshot: db.snapshot().await.expect("snapshot opens"),
             compatibility: crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
         };

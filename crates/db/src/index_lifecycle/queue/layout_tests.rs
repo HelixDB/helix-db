@@ -303,18 +303,24 @@ async fn readers_check_the_queue_layout_of_every_tenant_scope() {
             1,
             QueuedPayload::Text(QueuedTextPayload { replacement: None }),
         )];
-        QueueStore::new(layout, writer.index_operand_limit(), 0)
-            .stage_enqueue(
-                &transaction,
-                QueueTarget::new(
-                    DataScope::Tenant(TenantId::from_u128(tenant)),
-                    IndexId::new(3).unwrap(),
-                    IndexGenerationId::new(1).unwrap(),
-                ),
-                QueueOperand::enqueue(&operations).unwrap(),
-                &operations,
-            )
-            .unwrap();
+        QueueStore::new(
+            layout,
+            writer.index_operand_limit(),
+            0,
+            crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+        )
+        .stage_enqueue(
+            &transaction,
+            &mut crate::index_lifecycle::queue::shared::QueueChanges::default(),
+            QueueTarget::new(
+                DataScope::Tenant(TenantId::from_u128(tenant)),
+                IndexId::new(3).unwrap(),
+                IndexGenerationId::new(1).unwrap(),
+            ),
+            QueueOperand::enqueue(&operations).unwrap(),
+            &operations,
+        )
+        .unwrap();
     }
     transaction.commit().await.unwrap();
     writer.close().await.unwrap();
@@ -375,7 +381,12 @@ async fn corrupt_row_queues_fail_closed() {
     install_vector_and_text(&db).await;
     let text = target(&db, QueueFamily::Text).await;
     let storage = db.inner_db();
-    let store = QueueStore::new(QueueLayout::Rows, db.index_operand_limit(), 0);
+    let store = QueueStore::new(
+        QueueLayout::Rows,
+        db.index_operand_limit(),
+        0,
+        crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+    );
     let text_row = deletion(
         1,
         QueuedPayload::Text(QueuedTextPayload { replacement: None }),
@@ -399,6 +410,7 @@ async fn corrupt_row_queues_fail_closed() {
         store.stage_acknowledge(
             &transaction,
             db.index_operation_backlog(),
+            &mut crate::index_lifecycle::queue::shared::QueueChanges::default(),
             text,
             &stored,
             &[unread]

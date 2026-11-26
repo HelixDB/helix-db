@@ -1031,7 +1031,12 @@ async fn retained_queues_share_one_budget_and_keep_only_unacknowledged_operation
         one + super::backlog::charged_bytes(text_operation(1, 1, Some("a")).retained_bytes());
     assert_eq!(both, 2 * one);
     // Room for two whole queues across every target.
-    let store = QueueStore::new(QueueLayout::Map, 1 << 20, 2 * both);
+    let store = QueueStore::new(
+        QueueLayout::Map,
+        1 << 20,
+        2 * both,
+        crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+    );
     let retained = store.retained();
     let stored = || async { store.read(&db, target).await.unwrap().unwrap() };
 
@@ -1093,7 +1098,12 @@ async fn retaining_a_queue_that_was_not_taken_is_an_invariant_violation() {
         IndexId::new(3).unwrap(),
         IndexGenerationId::new(1).unwrap(),
     );
-    let store = QueueStore::new(QueueLayout::Map, 1 << 20, u64::MAX);
+    let store = QueueStore::new(
+        QueueLayout::Map,
+        1 << 20,
+        u64::MAX,
+        crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+    );
     for _ in 0..2 {
         let stored = store.read(&db, target).await.unwrap().unwrap();
         store.retained().retain(target, stored, &[]);
@@ -1118,7 +1128,12 @@ async fn latest_reads_of_rows_decode_only_the_operations_they_select() {
         text_operation(3, 1, Some("c")),
     ];
     let one = operations[0].retained_bytes();
-    let store = QueueStore::new(QueueLayout::Rows, 1 << 20, 0);
+    let store = QueueStore::new(
+        QueueLayout::Rows,
+        1 << 20,
+        0,
+        crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+    );
     let row = |sequence| {
         ManagedIndexKey::Data {
             scope: target.scope,
@@ -1202,7 +1217,12 @@ async fn known_limitation_a_latest_read_merges_the_whole_queue_below_a_pending_o
         IndexId::new(3).unwrap(),
         IndexGenerationId::new(1).unwrap(),
     );
-    let store = QueueStore::new(QueueLayout::Map, 1 << 20, 0);
+    let store = QueueStore::new(
+        QueueLayout::Map,
+        1 << 20,
+        0,
+        crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+    );
     let operations = (1..=BACKLOG)
         .map(|entity| text_operation(u128::from(entity), entity, Some("backlog")))
         .collect::<Vec<_>>();

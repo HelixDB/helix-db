@@ -95,7 +95,7 @@ pub(super) fn text(entity: u64, body: &str) -> QueuedOperation {
     )
 }
 
-pub(super) fn vector(entity: u64, components: &[f32]) -> QueuedOperation {
+pub(crate) fn vector(entity: u64, components: &[f32]) -> QueuedOperation {
     QueuedOperation::new(
         QueuedOperationId::generate(),
         node(entity),
@@ -197,10 +197,19 @@ async fn assert_loads_like_the_reference(
 ) -> (Arc<IndexOperationBacklog>, LoadedQueueSummary) {
     let (expected, expected_summary) = reference(reader, layout).await;
     let backlog = ledger();
-    let summary = load_backlog(reader, &QueueStore::new(layout, u64::MAX, 0), &backlog)
-        .await
-        .unwrap()
-        .summary;
+    let summary = load_backlog(
+        reader,
+        &QueueStore::new(
+            layout,
+            u64::MAX,
+            0,
+            crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+        ),
+        &backlog,
+    )
+    .await
+    .unwrap()
+    .summary;
     assert_eq!(summary, expected_summary);
     assert_same_ledger(&backlog, &expected);
     (backlog, summary)
@@ -234,15 +243,22 @@ pub(super) async fn enqueue(
         .begin(IsolationLevel::SerializableSnapshot)
         .await
         .unwrap();
+    let mut changes = crate::index_lifecycle::queue::shared::QueueChanges::default();
     queues
         .stage_enqueue(
             &transaction,
+            &mut changes,
             target,
             QueueOperand::enqueue(operations).unwrap(),
             operations,
         )
         .unwrap();
-    transaction.commit().await.unwrap();
+    crate::index_lifecycle::queue::shared::commit_recorded(
+        transaction,
+        queues.shared().begin_commit(changes),
+    )
+    .await
+    .unwrap();
 }
 
 /// Acknowledges the first `count` operations of `target`'s queue.
@@ -257,11 +273,17 @@ async fn acknowledge(db: &Db, queues: &QueueStore, target: QueueTarget, count: u
         .begin(IsolationLevel::SerializableSnapshot)
         .await
         .unwrap();
+    let mut changes = crate::index_lifecycle::queue::shared::QueueChanges::default();
     // An empty ledger charges nothing, so this always stages a removal.
     queues
-        .stage_acknowledge(&transaction, &ledger(), target, &stored, &ids)
+        .stage_acknowledge(&transaction, &ledger(), &mut changes, target, &stored, &ids)
         .unwrap();
-    transaction.commit().await.unwrap();
+    crate::index_lifecycle::queue::shared::commit_recorded(
+        transaction,
+        queues.shared().begin_commit(changes),
+    )
+    .await
+    .unwrap();
 }
 
 /// Writes keys of `scope` that sort just below and just above its queue
@@ -316,7 +338,12 @@ async fn map_fixture(
     admin: &slatedb::admin::Admin,
     queueless: std::ops::Range<u128>,
 ) -> BTreeSet<QueueTarget> {
-    let queues = QueueStore::new(QueueLayout::Map, u64::MAX, 0);
+    let queues = QueueStore::new(
+        QueueLayout::Map,
+        u64::MAX,
+        0,
+        crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+    );
     let mut expected = BTreeSet::new();
     for scope in queued_scopes().into_iter().chain(queueless.map(tenant)) {
         surround(db, scope).await;
@@ -460,7 +487,12 @@ fn discovery_completes_map_queues_per_row_and_row_queues_per_generation() {
     };
 
     // Map layout: every row is a whole queue.
-    let map = QueueStore::new(QueueLayout::Map, u64::MAX, 0);
+    let map = QueueStore::new(
+        QueueLayout::Map,
+        u64::MAX,
+        0,
+        crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+    );
     let mut discovery = map.discovery();
     for target in [first, second] {
         let value = QueueOperand::enqueue(&operations).unwrap();
@@ -476,7 +508,12 @@ fn discovery_completes_map_queues_per_row_and_row_queues_per_generation() {
     assert_eq!(discovery.finish(), None);
 
     // Row layout: a generation completes when the next one's first row arrives.
-    let rows = QueueStore::new(QueueLayout::Rows, u64::MAX, 0);
+    let rows = QueueStore::new(
+        QueueLayout::Rows,
+        u64::MAX,
+        0,
+        crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+    );
     let mut discovery = rows.discovery();
     let row = |target: QueueTarget, sequence| {
         ManagedIndexKey::Data {
@@ -570,7 +607,12 @@ async fn one_pass_charges_exactly_what_full_decodes_charged_across_scopes_and_ti
 async fn the_row_layout_groups_each_generation_and_resumes_its_sequence() {
     let store = Arc::new(InMemory::new());
     let db = raw_db(store.clone()).await;
-    let writer = QueueStore::new(QueueLayout::Rows, u64::MAX, 0);
+    let writer = QueueStore::new(
+        QueueLayout::Rows,
+        u64::MAX,
+        0,
+        crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+    );
     let scopes = [DataScope::LegacyUnscoped, tenant(5), tenant(6)];
     for scope in scopes.into_iter().chain([tenant(4), tenant(9)]) {
         surround(&db, scope).await;
@@ -594,7 +636,12 @@ async fn the_row_layout_groups_each_generation_and_resumes_its_sequence() {
     acknowledge(&db, &writer, queue_target(tenant(6), 2, 1), 3).await;
 
     let (expected, expected_summary) = reference(&db, QueueLayout::Rows).await;
-    let loaded = QueueStore::new(QueueLayout::Rows, u64::MAX, 0);
+    let loaded = QueueStore::new(
+        QueueLayout::Rows,
+        u64::MAX,
+        0,
+        crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+    );
     let backlog = ledger();
     let summary = load_backlog(&db, &loaded, &backlog).await.unwrap().summary;
     assert_eq!(summary, expected_summary);
@@ -642,14 +689,24 @@ async fn a_queue_of_the_other_layout_fails_closed_in_every_scope() {
     ] {
         for scope in [DataScope::LegacyUnscoped, tenant(3), tenant(u128::MAX)] {
             let db = raw_db(Arc::new(InMemory::new())).await;
-            let own = QueueStore::new(reader, u64::MAX, 0);
+            let own = QueueStore::new(
+                reader,
+                u64::MAX,
+                0,
+                crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+            );
             // This layout's queues load in every other scope first.
             for other in [DataScope::LegacyUnscoped, tenant(2), tenant(4)] {
                 if other != scope {
                     enqueue(&db, &own, queue_target(other, 1, 1), &[text(1, "own")]).await;
                 }
             }
-            let foreign = QueueStore::new(writer, u64::MAX, 0);
+            let foreign = QueueStore::new(
+                writer,
+                u64::MAX,
+                0,
+                crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+            );
             enqueue(
                 &db,
                 &foreign,
@@ -657,11 +714,18 @@ async fn a_queue_of_the_other_layout_fails_closed_in_every_scope() {
                 &[text(1, "foreign")],
             )
             .await;
-            let Err(HelixDbError::Config(message)) =
-                load_backlog(&db, &QueueStore::new(reader, u64::MAX, 0), &ledger())
-                    .await
-                    .map(|loaded| loaded.summary)
-            else {
+            let Err(HelixDbError::Config(message)) = load_backlog(
+                &db,
+                &QueueStore::new(
+                    reader,
+                    u64::MAX,
+                    0,
+                    crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+                ),
+                &ledger(),
+            )
+            .await
+            .map(|loaded| loaded.summary) else {
                 panic!("{reader:?} must refuse {writer:?} queues in {scope:?}");
             };
             assert!(
@@ -675,7 +739,12 @@ async fn a_queue_of_the_other_layout_fails_closed_in_every_scope() {
 
 #[tokio::test]
 async fn corrupt_keys_values_and_envelopes_fail_closed() {
-    let queues = QueueStore::new(QueueLayout::Map, u64::MAX, 0);
+    let queues = QueueStore::new(
+        QueueLayout::Map,
+        u64::MAX,
+        0,
+        crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+    );
     let scope = tenant(0x51);
     let target = queue_target(scope, 1, 1);
     // A corrupt payload behind valid framing: a stored value no merge
@@ -842,7 +911,12 @@ async fn a_load_interrupted_at_any_read_reloads_the_same_ledger() {
         let partial = ledger();
         let result = load_backlog(
             &db,
-            &QueueStore::new(QueueLayout::Map, u64::MAX, 0),
+            &QueueStore::new(
+                QueueLayout::Map,
+                u64::MAX,
+                0,
+                crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+            ),
             &partial,
         )
         .await
@@ -856,7 +930,12 @@ async fn a_load_interrupted_at_any_read_reloads_the_same_ledger() {
         let backlog = ledger();
         load_backlog(
             &db,
-            &QueueStore::new(QueueLayout::Map, u64::MAX, 0),
+            &QueueStore::new(
+                QueueLayout::Map,
+                u64::MAX,
+                0,
+                crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+            ),
             &backlog,
         )
         .await
@@ -1003,7 +1082,12 @@ async fn a_reopened_writer_reloads_its_ledger_exactly() {
     let orphan = queue_target(tenant(0x52), 999, 1);
     enqueue(
         &db.inner_db(),
-        &QueueStore::new(QueueLayout::Map, u64::MAX, 0),
+        &QueueStore::new(
+            QueueLayout::Map,
+            u64::MAX,
+            0,
+            crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+        ),
         orphan,
         &[vector(1, &[1.0, 1.0]), vector(2, &[2.0, 2.0])],
     )
@@ -1128,7 +1212,12 @@ async fn owner_fixture() -> InMemory {
     }
     enqueue(
         &db.inner_db(),
-        &QueueStore::new(QueueLayout::Map, u64::MAX, 0),
+        &QueueStore::new(
+            QueueLayout::Map,
+            u64::MAX,
+            0,
+            crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+        ),
         queue_target(tenant(0x41), 999, 1),
         &[vector(1, &[1.0, 1.0])],
     )
@@ -1199,7 +1288,12 @@ async fn a_misowned_tenant_queue_fails_the_open_after_other_scopes_queues() {
             );
             enqueue(
                 &db.inner_db(),
-                &QueueStore::new(QueueLayout::Map, u64::MAX, 0),
+                &QueueStore::new(
+                    QueueLayout::Map,
+                    u64::MAX,
+                    0,
+                    crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+                ),
                 target,
                 &[operation],
             )
@@ -1306,7 +1400,12 @@ async fn drained_fixture() -> (InMemory, QueueTarget, QueueTarget, QueueTarget) 
     let (_, shadowed) = scoped_owner(&db, tenant(0x42), is_vector).await;
     db.close().await.unwrap();
     let raw = raw_db_at(OWNERS, Arc::new(fixture.clone())).await;
-    let queues = QueueStore::new(QueueLayout::Map, u64::MAX, 0);
+    let queues = QueueStore::new(
+        QueueLayout::Map,
+        u64::MAX,
+        0,
+        crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+    );
     let drained_operations = [vector(5, &[1.0, 1.0]), vector(6, &[2.0, 2.0])];
     enqueue(&raw, &queues, drained, &drained_operations).await;
     enqueue(&raw, &queues, shadowed, &[vector(7, &[3.0, 3.0])]).await;
@@ -1357,7 +1456,12 @@ async fn a_load_reads_like_the_reference_and_tombstones_only_drained_history() {
     let backlog = ledger();
     let loaded = load_backlog(
         &db,
-        &QueueStore::new(QueueLayout::Map, u64::MAX, 0),
+        &QueueStore::new(
+            QueueLayout::Map,
+            u64::MAX,
+            0,
+            crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+        ),
         &backlog,
     )
     .await
@@ -1381,9 +1485,18 @@ async fn a_load_reads_like_the_reference_and_tombstones_only_drained_history() {
     );
     let before = history(&db, &shadowed.key()).await;
     let again = ledger();
-    let loaded = load_backlog(&db, &QueueStore::new(QueueLayout::Map, u64::MAX, 0), &again)
-        .await
-        .unwrap();
+    let loaded = load_backlog(
+        &db,
+        &QueueStore::new(
+            QueueLayout::Map,
+            u64::MAX,
+            0,
+            crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+        ),
+        &again,
+    )
+    .await
+    .unwrap();
     assert_same_ledger(&again, &expected);
     assert_eq!(
         loaded.tombstone_drained(&db, &again).await.unwrap(),
@@ -1404,7 +1517,12 @@ async fn two_drained_fixture() -> (InMemory, QueueTarget, QueueTarget) {
     let operations = [vector(12, &[1.0, 2.0])];
     enqueue(
         &raw,
-        &QueueStore::new(QueueLayout::Map, u64::MAX, 0),
+        &QueueStore::new(
+            QueueLayout::Map,
+            u64::MAX,
+            0,
+            crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+        ),
         orphan,
         &operations,
     )
@@ -1428,7 +1546,12 @@ async fn two_drained_fixture() -> (InMemory, QueueTarget, QueueTarget) {
 #[tokio::test]
 async fn an_enqueue_to_one_drained_queue_aborts_every_tombstone() {
     let (fixture, first, second) = two_drained_fixture().await;
-    let queues = QueueStore::new(QueueLayout::Map, u64::MAX, 0);
+    let queues = QueueStore::new(
+        QueueLayout::Map,
+        u64::MAX,
+        0,
+        crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+    );
     for (written, untouched) in [(first, second), (second, first)] {
         let db = raw_db_at(OWNERS, Arc::new(fixture.fork())).await;
         let backlog = ledger();
@@ -1474,7 +1597,12 @@ async fn an_enqueue_to_one_drained_queue_aborts_every_tombstone() {
 #[tokio::test]
 async fn an_enqueue_before_the_tombstones_began_keeps_only_its_queue() {
     let (fixture, first, second) = two_drained_fixture().await;
-    let queues = QueueStore::new(QueueLayout::Map, u64::MAX, 0);
+    let queues = QueueStore::new(
+        QueueLayout::Map,
+        u64::MAX,
+        0,
+        crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+    );
     for (written, untouched) in [(first, second), (second, first)] {
         let db = raw_db_at(OWNERS, Arc::new(fixture.fork())).await;
         let backlog = ledger();
@@ -1506,7 +1634,12 @@ async fn an_enqueue_before_the_tombstones_began_keeps_only_its_queue() {
 async fn only_writes_to_a_drained_key_or_charges_of_its_target_keep_it() {
     let (fixture, drained, _, _) = drained_fixture().await;
     let db = raw_db_at(OWNERS, Arc::new(fixture.fork())).await;
-    let queues = QueueStore::new(QueueLayout::Map, u64::MAX, 0);
+    let queues = QueueStore::new(
+        QueueLayout::Map,
+        u64::MAX,
+        0,
+        crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+    );
     let backlog = ledger();
     let loaded = load_backlog(&db, &queues, &backlog).await.unwrap();
     let staged = loaded
@@ -1566,7 +1699,12 @@ async fn a_crash_during_the_tombstones_leaves_them_to_the_next_load() {
         let gate = Arc::new(GatedWalStore::from_memory(fixture.fork()));
         gates.push(Arc::clone(&gate));
         let db = raw_db_at(OWNERS, Arc::clone(&gate) as Arc<dyn ObjectStore>).await;
-        let queues = QueueStore::new(QueueLayout::Map, u64::MAX, 0);
+        let queues = QueueStore::new(
+            QueueLayout::Map,
+            u64::MAX,
+            0,
+            crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+        );
         let backlog = ledger();
         let loaded = load_backlog(&db, &queues, &backlog).await.unwrap();
         gate.uploads.send_replace(uploads);
@@ -1621,7 +1759,12 @@ async fn a_crash_during_the_tombstones_leaves_them_to_the_next_load() {
 #[tokio::test]
 async fn only_the_observed_reads_empty_resolutions_are_reported() {
     let db = raw_db(Arc::new(InMemory::new())).await;
-    let queues = QueueStore::new(QueueLayout::Map, u64::MAX, 0);
+    let queues = QueueStore::new(
+        QueueLayout::Map,
+        u64::MAX,
+        0,
+        crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+    );
     let [drained, tombstoned, working, absent] =
         [1, 2, 3, 4].map(|index| queue_target(DataScope::LegacyUnscoped, index, 1));
     for target in [drained, tombstoned, working] {
@@ -1670,7 +1813,12 @@ async fn keys_beside_queue_keys_fail_closed() {
     let (fixture, drained, shadowed, _) = drained_fixture().await;
     let mut extended = shadowed.key().to_vec();
     extended.push(0);
-    let rows = QueueStore::new(QueueLayout::Rows, u64::MAX, 0);
+    let rows = QueueStore::new(
+        QueueLayout::Rows,
+        u64::MAX,
+        0,
+        crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+    );
     for (name, case) in [("row", 0_u8), ("extension", 1), ("before", 2)] {
         let db = raw_db_at(OWNERS, Arc::new(fixture.fork())).await;
         match case {
@@ -1687,7 +1835,12 @@ async fn keys_beside_queue_keys_fail_closed() {
         }
         let error = load_backlog(
             &db,
-            &QueueStore::new(QueueLayout::Map, u64::MAX, 0),
+            &QueueStore::new(
+                QueueLayout::Map,
+                u64::MAX,
+                0,
+                crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+            ),
             &ledger(),
         )
         .await
@@ -1714,7 +1867,12 @@ async fn keys_beside_queue_keys_fail_closed() {
 #[tokio::test]
 async fn every_tenant_first_row_reads_like_the_reference() {
     let db = raw_db(Arc::new(InMemory::new())).await;
-    let queues = QueueStore::new(QueueLayout::Map, u64::MAX, 0);
+    let queues = QueueStore::new(
+        QueueLayout::Map,
+        u64::MAX,
+        0,
+        crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+    );
     let past = tenant(0x60);
     let mut above = discovery_range(past).end.to_vec();
     above.push(0x01);

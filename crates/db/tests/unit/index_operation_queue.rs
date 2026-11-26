@@ -1519,15 +1519,22 @@ async fn commit_operation(db: &HelixDB, target: QueueTarget, operation: &codec::
         .begin(IsolationLevel::SerializableSnapshot)
         .await
         .expect("transaction begins");
+    let mut changes = crate::index_lifecycle::queue::shared::QueueChanges::default();
     db.index_queue_store()
         .stage_enqueue(
             &transaction,
+            &mut changes,
             target,
             codec::QueueOperand::enqueue(std::slice::from_ref(operation)).expect("operand encodes"),
             std::slice::from_ref(operation),
         )
         .expect("enqueue stages");
-    transaction.commit().await.expect("enqueue commits");
+    crate::index_lifecycle::queue::shared::commit_recorded(
+        transaction,
+        db.index_queue_store().shared().begin_commit(changes),
+    )
+    .await
+    .expect("enqueue commits");
 }
 
 /// Commits the exact acknowledgement publication stages for `id`.
@@ -1543,16 +1550,23 @@ async fn acknowledge_in_storage(db: &HelixDB, target: QueueTarget, id: codec::Qu
         .begin(IsolationLevel::SerializableSnapshot)
         .await
         .expect("transaction begins");
+    let mut changes = crate::index_lifecycle::queue::shared::QueueChanges::default();
     db.index_queue_store()
         .stage_acknowledge(
             &transaction,
             db.index_operation_backlog(),
+            &mut changes,
             target,
             &stored,
             &[id],
         )
         .expect("acknowledgement stages");
-    transaction.commit().await.expect("acknowledgement commits");
+    crate::index_lifecycle::queue::shared::commit_recorded(
+        transaction,
+        db.index_queue_store().shared().begin_commit(changes),
+    )
+    .await
+    .expect("acknowledgement commits");
 }
 
 async fn add_document(db: &HelixDB, embedding: [f32; 2]) -> u64 {

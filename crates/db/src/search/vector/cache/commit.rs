@@ -34,14 +34,20 @@ use crate::search::vector::{PlannedVectorMutation, ValidatedVectorGenerationHand
 /// snapshot for that long. The caller still returns only once the write is
 /// durable, and a durability failure after the fences resolved is reported
 /// like any other post-apply error, whose rows were already evicted.
+///
+/// `on_applied` sees the apply outcome right after the fences resolve and
+/// before the durability wait, on the same task, so the publisher records its
+/// acknowledgement in the shared search views
+/// ([`crate::index_lifecycle::queue::shared`]) at the moment snapshots can
+/// see it. A commit without fences runs it inline; dropping that commit
+/// future drops it unrun.
 pub(crate) async fn commit_fenced(
     transaction: slatedb::DbTransaction,
     fences: Vec<VectorCachePendingCommit>,
+    on_applied: impl FnOnce(&Result<Option<slatedb::WriteHandle>, slatedb::Error>) + Send + 'static,
 ) -> Result<Option<slatedb::WriteHandle>, slatedb::Error> {
-    if fences.is_empty() {
-        return transaction.commit().await;
-    }
-    let commit = tokio::spawn(async move {
+    let fenced = !fences.is_empty();
+    let commit = async move {
         let applied = transaction
             .commit_with_options(&slatedb::config::WriteOptions {
                 await_durable: false,
@@ -59,11 +65,16 @@ pub(crate) async fn commit_fenced(
         for fence in fences {
             fence.resolve(outcome).await;
         }
+        on_applied(&applied);
         let Ok(Some(handle)) = applied else {
             return applied;
         };
         handle.await_durable().await.map(|()| Some(handle))
-    });
+    };
+    if !fenced {
+        return commit.await;
+    }
+    let commit = tokio::spawn(commit);
     match commit.await {
         Ok(committed) => committed,
         Err(error) => match error.try_into_panic() {
@@ -630,7 +641,7 @@ mod tests {
             .put(b"inline-key", Bytes::from_static(b"value"))
             .unwrap();
 
-        assert!(commit_fenced(transaction, Vec::new())
+        assert!(commit_fenced(transaction, Vec::new(), |_| {})
             .await
             .unwrap()
             .is_some());
@@ -643,7 +654,7 @@ mod tests {
         let writer = FencedWriter::open("fenced-commit-durable").await;
         let (transaction, fences) = writer.fenced_transaction().await;
         writer.gate.uploads.send_replace(WalUploads::Held);
-        let mut commit = Box::pin(commit_fenced(transaction, fences));
+        let mut commit = Box::pin(commit_fenced(transaction, fences, |_| {}));
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 tokio::select! {
@@ -685,7 +696,7 @@ mod tests {
         let writer = FencedWriter::open("fenced-commit-cancelled").await;
         let (transaction, fences) = writer.fenced_transaction().await;
         writer.gate.uploads.send_replace(WalUploads::Held);
-        let mut commit = Box::pin(commit_fenced(transaction, fences));
+        let mut commit = Box::pin(commit_fenced(transaction, fences, |_| {}));
         assert!(futures::poll!(commit.as_mut()).is_pending());
         drop(commit);
 
@@ -715,7 +726,9 @@ mod tests {
         let (transaction, fences) = writer.fenced_transaction().await;
         writer.gate.uploads.send_replace(WalUploads::Failing);
 
-        let error = commit_fenced(transaction, fences).await.unwrap_err();
+        let error = commit_fenced(transaction, fences, |_| {})
+            .await
+            .unwrap_err();
 
         assert_ne!(error.kind(), slatedb::ErrorKind::Transaction);
         assert!(!writer.commit_pending());
@@ -740,7 +753,9 @@ mod tests {
             .await
             .unwrap();
 
-        let error = commit_fenced(transaction, fences).await.unwrap_err();
+        let error = commit_fenced(transaction, fences, |_| {})
+            .await
+            .unwrap_err();
 
         assert_eq!(error.kind(), slatedb::ErrorKind::Transaction);
         assert!(!writer.commit_pending());

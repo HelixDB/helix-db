@@ -738,22 +738,24 @@ async fn queued_writes_to_a_building_generation_leave_the_retained_session_sound
         crate::config::QueueLayout::Rows,
         1 << 20,
         1 << 20,
+        crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
     ));
     let transaction = build
         .db
         .begin(IsolationLevel::SerializableSnapshot)
         .await
         .expect("enqueue transaction opens");
+    let mut changes = queue::shared::QueueChanges::default();
     store
         .stage_enqueue(
             &transaction,
+            &mut changes,
             target,
             operation_queue::QueueOperand::enqueue(&operations).expect("fixture operand encodes"),
             &operations,
         )
         .expect("fixture operations stage");
-    transaction
-        .commit()
+    queue::shared::commit_recorded(transaction, store.shared().begin_commit(changes))
         .await
         .expect("fixture operations commit");
 
@@ -2484,24 +2486,26 @@ async fn publication_shares_the_planning_budget_with_a_retained_build() {
         crate::config::QueueLayout::Rows,
         1 << 20,
         1 << 20,
+        crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
     ));
     let transaction = active
         .db
         .begin(IsolationLevel::SerializableSnapshot)
         .await
         .expect("enqueue transaction opens");
+    let mut changes = queue::shared::QueueChanges::default();
     store
         .stage_enqueue(
             &transaction,
+            &mut changes,
             target,
             operation_queue::QueueOperand::enqueue(&operations).expect("fixture operand encodes"),
             &operations,
         )
         .expect("fixture operation stages");
-    transaction
-        .commit()
+    queue::shared::commit_recorded(transaction, store.shared().begin_commit(changes))
         .await
-        .expect("fixture operation commits");
+        .expect("fixture operations commit");
     let publisher = publication::QueuePublisher::new(
         Arc::new(active.db.clone()),
         backlog::IndexOperationBacklog::new(

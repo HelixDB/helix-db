@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroUsize;
 use std::ops::Bound;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use parking_lot::Mutex;
@@ -37,6 +38,8 @@ use crate::encoding::v2::values::indexes::operation_queue::{
 use crate::error::{HelixDbError, Result};
 
 use super::backlog::{charged_bytes, Admission, IndexOperationBacklog, Remainder};
+use super::resolutions::{Charge, ResolutionBudget};
+use super::shared::{Plan, PreparedView, QueueChanges, SharedQueues, SharedRead, ViewLease};
 use super::{OutputBudget, QueueTarget};
 
 /// The write one acknowledgement staged for its queue
@@ -350,6 +353,47 @@ pub(crate) enum PendingQueueBytes {
 }
 
 impl PendingQueueBytes {
+    /// Bytes storage resolved: the value, or every row's.
+    pub(crate) fn resolved_bytes(&self) -> u64 {
+        match self {
+            Self::Map(value) => value.len() as u64,
+            Self::Rows(values) => values.iter().map(|value| value.len() as u64).sum(),
+        }
+    }
+
+    /// Decodes every operation, in storage order, with the queue's family;
+    /// the queue must decode completely and hold one family, as a
+    /// publication read requires.
+    pub(crate) fn decode_all(self) -> Result<(QueueFamily, Vec<QueuedOperation>)> {
+        match self {
+            Self::Map(value) => {
+                let queue = OperationQueue::decode(&value)?;
+                Ok((queue.family(), queue.into_operations()))
+            }
+            Self::Rows(values) => {
+                let mut family = None;
+                let operations = values
+                    .iter()
+                    .map(|value| {
+                        let (row_family, operation) = QueueRow::decode(value)?;
+                        if *family.get_or_insert(row_family) != row_family {
+                            return Err(HelixDbError::IndexCatalogCorruption(
+                                "operation rows of one generation mix families".to_string(),
+                            ));
+                        }
+                        Ok(operation)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let Some(family) = family else {
+                    return Err(HelixDbError::InvariantViolation(
+                        "a search read an empty operation row set".to_string(),
+                    ));
+                };
+                Ok((family, operations))
+            }
+        }
+    }
+
     /// Decodes each entity at its latest outstanding operation, selecting
     /// entities in the order of their oldest operation while their latest
     /// operations' retained bytes fit `budget` (see [`LatestOperations`]).
@@ -369,6 +413,46 @@ impl PendingQueueBytes {
                     },
                 )
             }
+        }
+    }
+}
+
+/// One search's pending operations of one target, not yet selected.
+#[derive(Debug)]
+pub(crate) enum PendingRead {
+    /// The shared view at the search's snapshot.
+    Shared(SharedRead),
+    /// Stored bytes the search read itself; `None` when the queue is absent.
+    /// Holds their charge against the resolution budget
+    /// ([`super::resolutions`]) until dropped, which covers the bytes and
+    /// their decode.
+    Stored {
+        bytes: Option<PendingQueueBytes>,
+        _charge: Charge,
+    },
+}
+
+impl PendingRead {
+    /// The lease on the shared view a shared read selects from, which
+    /// whatever keeps its selected payloads holds as long as it keeps them
+    /// (see [`super::shared`]); `None` for a storage read.
+    pub(crate) fn lease(&self) -> Option<ViewLease> {
+        match self {
+            Self::Shared(shared) => Some(shared.lease()),
+            Self::Stored { .. } => None,
+        }
+    }
+
+    /// Selects each entity at its latest outstanding operation within
+    /// `budget` (see [`PendingQueueBytes::decode_latest`] and
+    /// [`SharedRead::select`]); `None` when nothing is pending.
+    pub(crate) fn select(&self, budget: u64) -> Result<Option<LatestOperations>> {
+        match self {
+            Self::Shared(shared) => Ok(shared.select(budget)),
+            Self::Stored { bytes, .. } => bytes
+                .as_ref()
+                .map(|bytes| bytes.decode_latest(budget))
+                .transpose(),
         }
     }
 }
@@ -483,25 +567,49 @@ pub(crate) struct QueueStore {
     next_sequence: AtomicU64,
     /// Queues every publisher of this writer retains between attempts.
     retained: RetainedQueues,
+    /// What read-request searches of this writer select pending work from.
+    shared: Arc<SharedQueues>,
+    /// What searches' storage reads of queues are charged against.
+    resolutions: Arc<ResolutionBudget>,
 }
 
 impl QueueStore {
     /// Creates storage for `layout` whose operands stay within
-    /// `max_operand_bytes` and whose publishers retain at most
-    /// `retained_budget` charged bytes of queued operations between attempts;
-    /// recovery raises the row sequence past every retained row before the
-    /// first write.
-    pub(crate) fn new(layout: QueueLayout, max_operand_bytes: u64, retained_budget: u64) -> Self {
+    /// `max_operand_bytes`, whose publishers retain at most
+    /// `retained_budget` charged bytes of queued operations between attempts,
+    /// whose shared search views stay within the same budget beside the one
+    /// in use (see [`super::shared`]), and whose searches' storage reads of
+    /// queues are charged against `resolutions`; recovery raises the row
+    /// sequence past every retained row before the first write.
+    pub(crate) fn new(
+        layout: QueueLayout,
+        max_operand_bytes: u64,
+        retained_budget: u64,
+        resolutions: ResolutionBudget,
+    ) -> Self {
         Self {
             layout,
             max_operand_bytes,
             next_sequence: AtomicU64::new(0),
             retained: RetainedQueues::new(retained_budget),
+            shared: Arc::new(SharedQueues::new(retained_budget)),
+            resolutions: Arc::new(resolutions),
         }
     }
 
+    /// Returns the views read-request searches select pending work from.
+    pub(crate) const fn shared(&self) -> &Arc<SharedQueues> {
+        &self.shared
+    }
+
+    /// Returns what searches' storage reads of queues are charged against.
+    #[cfg(test)]
+    pub(crate) const fn resolutions(&self) -> &Arc<ResolutionBudget> {
+        &self.resolutions
+    }
+
     /// Returns the queues publication retains between attempts. Searches
-    /// never read them: they read storage.
+    /// never read them: they read [`Self::shared`] or storage.
     pub(crate) const fn retained(&self) -> &RetainedQueues {
         &self.retained
     }
@@ -596,7 +704,113 @@ impl QueueStore {
         }
     }
 
-    /// Stages one transaction's operations for `target`.
+    /// Reads, for a read-request search at `snapshot` through `read` on the
+    /// writer `db`, the pending operations of `target`: from the shared view
+    /// when it serves the snapshot, building it first when absent, and
+    /// otherwise from storage like [`Self::read_pending_stored`] (see
+    /// [`super::shared`]).
+    ///
+    /// A build's base read is charged against the resolution budget until
+    /// its view is installed. The base read stops when the search is dropped,
+    /// which abandons the build; the decode and install run on the blocking
+    /// pool and finish without the search, so the next search finds the view
+    /// installed rather than starting another decode. A search that built
+    /// selects from the view it installed when that serves its snapshot, and
+    /// otherwise reads storage: it never builds twice.
+    pub(crate) async fn read_pending(
+        &self,
+        db: &slatedb::Db,
+        read: &(impl DbReadOps + Sync),
+        snapshot: u64,
+        target: QueueTarget,
+    ) -> Result<PendingRead> {
+        // Rows sort in the order their operations were staged, which two
+        // transactions can commit in the other order, while a view keeps
+        // commit order: a budget that leaves entities out would select
+        // differently from each, so the row layout always reads storage.
+        if self.layout == QueueLayout::Rows {
+            return self.read_pending_stored(read, snapshot, target).await;
+        }
+        let builder = match self.shared.plan(target, snapshot).await {
+            Plan::Shared(shared) => return Ok(PendingRead::Shared(shared)),
+            Plan::Fallback => return self.read_pending_stored(read, snapshot, target).await,
+            Plan::Build(builder) => builder,
+        };
+        let (base, fresh) = if builder.own_snapshot() {
+            (snapshot, None)
+        } else {
+            let fresh = db.snapshot().await?;
+            (fresh.seq(), Some(fresh))
+        };
+        self.shared.base_chosen(&builder, base);
+        let mut charge = self.resolutions.charge(target, base).await;
+        let bytes = match &fresh {
+            None => self.read_latest(read, target).await?,
+            Some(fresh) => self.read_latest(fresh.as_ref(), target).await?,
+        };
+        drop(fresh);
+        charge
+            .resolved(bytes.as_ref().map_or(0, PendingQueueBytes::resolved_bytes))
+            .await;
+        let shared = Arc::clone(&self.shared);
+        let built = tokio::task::spawn_blocking(move || {
+            let _charge = charge;
+            #[cfg(test)]
+            shared.before_decode();
+            match bytes.map(PendingQueueBytes::decode_all).transpose() {
+                Ok(queue) => Ok(shared.install(builder, PreparedView::new(base, queue))),
+                Err(error) => {
+                    shared.abandon(builder);
+                    Err(error)
+                }
+            }
+        })
+        .await
+        .map_err(|error| {
+            HelixDbError::InvariantViolation(format!("building a queue view failed: {error}"))
+        })?;
+        match built {
+            Ok(Some(own)) => Ok(PendingRead::Shared(own)),
+            Ok(None) => self.read_pending_stored(read, snapshot, target).await,
+            // A queue that does not decode completely holds no view: its
+            // searches read storage and decode only what their budgets
+            // select, failing closed exactly as before on what they select.
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    index_id = target.index_id.get(),
+                    generation = target.generation.get(),
+                    "an index operation queue does not decode; its searches read storage"
+                );
+                self.read_pending_stored(read, snapshot, target).await
+            }
+        }
+    }
+
+    /// Reads, for a search at `snapshot` that cannot use the shared view, the
+    /// stored bytes of `target` through `read`, charged against the
+    /// resolution budget ([`super::resolutions`]) until the result is
+    /// dropped.
+    pub(crate) async fn read_pending_stored(
+        &self,
+        read: &(impl DbReadOps + Sync),
+        snapshot: u64,
+        target: QueueTarget,
+    ) -> Result<PendingRead> {
+        self.shared.fallback();
+        let mut charge = self.resolutions.charge(target, snapshot).await;
+        let bytes = self.read_latest(read, target).await?;
+        charge
+            .resolved(bytes.as_ref().map_or(0, PendingQueueBytes::resolved_bytes))
+            .await;
+        Ok(PendingRead::Stored {
+            bytes,
+            _charge: charge,
+        })
+    }
+
+    /// Stages one transaction's operations for `target`, and in `changes`,
+    /// which the commit records in [`Self::shared`].
     ///
     /// Map operands are blind merges; rows are fresh keys. Neither reads the
     /// queue, so concurrent producers never conflict on it, nor with an
@@ -605,6 +819,7 @@ impl QueueStore {
     pub(crate) fn stage_enqueue(
         &self,
         transaction: &impl crate::transaction::Mutation,
+        changes: &mut QueueChanges,
         target: QueueTarget,
         operand: QueueOperand,
         operations: &[QueuedOperation],
@@ -627,12 +842,14 @@ impl QueueStore {
                 }
             }
         }
+        changes.enqueue(target, operations);
         Ok(())
     }
 
     /// Stages, in `transaction`, the acknowledgement of exact operation IDs
     /// read in `stored`, each of `stored`'s oldest outstanding operations of
-    /// its entity, and returns the write it staged.
+    /// its entity, records it in `changes`, which the commit records in
+    /// [`Self::shared`], and returns the write it staged.
     ///
     /// # Delete on drain
     ///
@@ -645,11 +862,16 @@ impl QueueStore {
     /// `transaction` began aborts it, so nothing of the attempt commits (see
     /// [`stage_queue_delete`] and [`IndexOperationBacklog::remainder`]); an
     /// enqueue that commits after it lands above the tombstone. Absence is
-    /// the empty queue, so
-    /// a committed delete releases exactly the acknowledged operations, as
-    /// the removal would, and reconciliation reads an uncertain one the same
-    /// way. A queue read before a later enqueue committed (a retained queue)
-    /// never deletes it: the ledger still charges that enqueue.
+    /// the empty queue, so a committed delete releases exactly the
+    /// acknowledged operations, as the removal would, and reconciliation
+    /// reads an uncertain one the same way. A queue read before a later
+    /// enqueue committed (a retained queue) never deletes it: the ledger
+    /// still charges that enqueue.
+    ///
+    /// Whatever it stages, `changes` records the acknowledgement of exactly
+    /// `ids`: the delete removes exactly those operations, so the shared
+    /// views (see [`super::shared`], "Deleting a queue key") show none of them
+    /// at or above the delete's sequence and every later enqueue above it.
     ///
     /// The delete writes the key alone, never more than the removal operand
     /// [`Self::acknowledgement_output`] budgets.
@@ -657,24 +879,25 @@ impl QueueStore {
         &self,
         transaction: &DbTransaction,
         backlog: &IndexOperationBacklog,
+        changes: &mut QueueChanges,
         target: QueueTarget,
         stored: &StoredQueue,
         ids: &[QueuedOperationId],
     ) -> Result<StagedAcknowledgement> {
-        match self.layout {
+        let staged = match self.layout {
             QueueLayout::Map
                 if ids.len() == stored.outstanding.get()
                     && backlog.remainder(target, ids) == Remainder::Drained =>
             {
                 stage_queue_delete(transaction, target)?;
-                Ok(StagedAcknowledgement::QueueDelete)
+                StagedAcknowledgement::QueueDelete
             }
             QueueLayout::Map => {
                 let (bytes, tokens) = QueueOperand::acknowledge(stored.family, ids.iter().copied())
                     .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?
                     .into_parts();
                 transaction.merge_disjoint_tokens(target.key(), tokens, bytes)?;
-                Ok(StagedAcknowledgement::Removal)
+                StagedAcknowledgement::Removal
             }
             QueueLayout::Rows => {
                 for id in ids {
@@ -685,9 +908,11 @@ impl QueueStore {
                     };
                     transaction.delete(key)?;
                 }
-                Ok(StagedAcknowledgement::RowDeletes)
+                StagedAcknowledgement::RowDeletes
             }
-        }
+        };
+        changes.acknowledge(target, ids);
+        Ok(staged)
     }
 
     /// Returns the exact writes one acknowledgement of `ids` stages, so

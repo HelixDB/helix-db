@@ -340,7 +340,8 @@ async fn commit_outcome_contracts() {
     let empty = db.begin(slatedb::IsolationLevel::Snapshot).await.unwrap();
     assert!(super::super::commit::commit_fenced(
         empty,
-        vec![prepare_commit_for(&registry, &handle)]
+        vec![prepare_commit_for(&registry, &handle)],
+        |_| {}
     )
     .await
     .unwrap()
@@ -359,6 +360,7 @@ async fn commit_outcome_contracts() {
     let error = super::super::commit::commit_fenced(
         conflicted,
         vec![prepare_commit_for(&registry, &handle)],
+        |_| {},
     )
     .await
     .unwrap_err();
@@ -378,7 +380,7 @@ async fn commit_outcome_contracts() {
             .enable_all()
             .build()
             .unwrap();
-        let mut commit = Box::pin(super::super::commit::commit_fenced(stopped, fences));
+        let mut commit = Box::pin(super::super::commit::commit_fenced(stopped, fences, |_| {}));
         assert!(runtime
             .block_on(async { futures::poll!(commit.as_mut()) })
             .is_pending());
@@ -408,6 +410,7 @@ async fn commit_outcome_contracts() {
     let error = super::super::commit::commit_fenced(
         after_close,
         vec![prepare_commit_for(&registry, &handle)],
+        |_| {},
     )
     .await
     .unwrap_err();

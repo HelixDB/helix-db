@@ -42,6 +42,8 @@ pub(crate) mod lag;
 pub(crate) mod producer;
 pub(crate) mod publication;
 pub(crate) mod recovery;
+pub(crate) mod resolutions;
+pub(crate) mod shared;
 pub(crate) mod storage;
 
 use bytes::Bytes;
@@ -156,6 +158,14 @@ pub struct IndexOperationQueueStats {
     pub publication_error_retries: u64,
     /// Attempts deferred because a hidden build owns the generation.
     pub deferred_attempts: u64,
+    /// Charged bytes of the operations the writer's shared search views hold
+    /// right now (a gauge): every view is charged once, however many
+    /// searches read it.
+    pub shared_view_bytes: u64,
+    /// Searches that read a queue from storage because no shared view could
+    /// serve them: below a view's base or what it dropped, while it is
+    /// unsettled, inside a write transaction, or on a reader.
+    pub search_queue_reads: u64,
     /// Strong text searches refused with retryable `index_backpressure`
     /// (`pending_text_analysis_bytes`) because the unpublished text of their
     /// partition exceeded
@@ -283,7 +293,7 @@ mod admission_memory_tests;
 #[cfg(test)]
 mod codec_storage_tests;
 #[cfg(test)]
-mod drain_delete_tests;
+pub(crate) mod drain_delete_tests;
 #[cfg(test)]
 mod drain_tests;
 #[cfg(test)]
@@ -308,7 +318,7 @@ mod presearch_tests;
 #[cfg(test)]
 mod publication_tests;
 #[cfg(test)]
-mod recovery_tests;
+pub(crate) mod recovery_tests;
 #[cfg(test)]
 mod soak_tests;
 #[cfg(test)]

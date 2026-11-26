@@ -46,23 +46,25 @@ const DEFAULT_TEXT_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 const VECTOR_BUILD_CACHE_MEMORY_DIVISOR: u64 = 8;
 /// Smallest default build cache, kept even on the smallest hosts.
 const MIN_DEFAULT_VECTOR_BUILD_CACHE_BYTES: u64 = 64 * 1024 * 1024;
-/// Largest default build cache, reached from a 16 GiB memory ceiling.
-const MAX_DEFAULT_VECTOR_BUILD_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Default build cache when no memory ceiling is readable: a 2 GiB host's share.
 const FALLBACK_VECTOR_BUILD_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Sizes the default vector build planning cache from a memory ceiling.
 ///
-/// One eighth of the ceiling, clamped to 64 MiB..=2 GiB, keeps the retained
-/// cache a minority of a small container's memory while letting a large host
-/// keep the planning working set of about half a million 768-dimensional
-/// vectors resident.
+/// One eighth of the ceiling, at least 64 MiB, keeps the retained cache a
+/// minority of any host's memory while letting a larger host keep a larger
+/// graph's planning working set resident, about 1.2 million 1536-dimensional
+/// vectors at a 64 GiB ceiling.
+///
+/// It has no fixed maximum: past its budget, planning re-reads each insert's
+/// evicted rows from storage, about 375 point reads per 1536-dimensional
+/// insert. Sustained queue publication of 1536-dimensional vectors on a
+/// 123 GiB host fell from 400 to under 100 operations a second once a former
+/// 2 GiB maximum was outgrown, at about 240,000 vectors, while an eighth of
+/// that host kept 310 to 400 a second through 670,000.
 fn default_vector_build_cache_bytes(memory_ceiling: Option<u64>) -> NonZeroU64 {
     let bytes = memory_ceiling.map_or(FALLBACK_VECTOR_BUILD_CACHE_BYTES, |ceiling| {
-        (ceiling / VECTOR_BUILD_CACHE_MEMORY_DIVISOR).clamp(
-            MIN_DEFAULT_VECTOR_BUILD_CACHE_BYTES,
-            MAX_DEFAULT_VECTOR_BUILD_CACHE_BYTES,
-        )
+        (ceiling / VECTOR_BUILD_CACHE_MEMORY_DIVISOR).max(MIN_DEFAULT_VECTOR_BUILD_CACHE_BYTES)
     });
     NonZeroU64::new(bytes).expect("default vector build cache bytes are positive")
 }
@@ -403,12 +405,13 @@ impl SearchIndexBackfillLimits {
     /// estimated bookkeeping, and caps each entry class at one entry per KiB.
     /// The cache is process-local and never persisted.
     ///
-    /// The default is one eighth of the process memory ceiling, clamped to
-    /// 64 MiB..=2 GiB. The ceiling is the tightest cgroup (v2 or v1) memory
-    /// limit of the process, capped by physical memory, and 256 MiB is used
-    /// when neither is readable. A host with 16 GiB or more keeps the planning
-    /// working set of roughly half a million 768-dimensional vectors resident;
-    /// once a build outgrows the budget, evicted rows are re-read and decoded
+    /// The default is one eighth of the process memory ceiling, at least
+    /// 64 MiB. The ceiling is the tightest cgroup (v2 or v1) memory limit of
+    /// the process, capped by physical memory, and 256 MiB is used when
+    /// neither is readable. A host with 16 GiB keeps the planning working set
+    /// of roughly half a million 768-dimensional vectors resident, and a
+    /// larger host proportionally more; once a build outgrows the budget,
+    /// evicted rows are re-read and decoded
     /// from storage on every insert and throughput falls steeply. Queue
     /// publication into an Active index falls the same way once that graph
     /// outgrows its share: about 7 KiB per node at 1536 dimensions and 4 KiB at
@@ -422,7 +425,7 @@ impl SearchIndexBackfillLimits {
     /// use db::config::SearchIndexBackfillLimits;
     ///
     /// let default = SearchIndexBackfillLimits::default().vector_build_cache_bytes();
-    /// assert!((64 << 20..=2 << 30).contains(&default.get()));
+    /// assert!(default.get() >= 64 << 20);
     ///
     /// let budget = NonZeroU64::new(64 * 1024 * 1024).unwrap();
     /// let limits = SearchIndexBackfillLimits::default().with_vector_build_cache_bytes(budget);
@@ -734,8 +737,9 @@ mod tests {
             (Some(2 * GIB), 256 * MIB),
             (Some(3 * GIB), 384 * MIB),
             (Some(16 * GIB), 2 * GIB),
-            (Some(256 * GIB), 2 * GIB),
-            (Some(u64::MAX), 2 * GIB),
+            (Some(123 * GIB), 15 * GIB + 384 * MIB),
+            (Some(256 * GIB), 32 * GIB),
+            (Some(u64::MAX), u64::MAX / 8),
             (None, 256 * MIB),
         ] {
             assert_eq!(

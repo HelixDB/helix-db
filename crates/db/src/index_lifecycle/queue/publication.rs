@@ -76,6 +76,7 @@ use crate::index_lifecycle::{
 use crate::search::vector::{self, SimHasherRegistry, VectorCacheRegistry};
 
 use super::backlog::{Admission, IndexOperationBacklog};
+use super::shared::{self, QueueChanges};
 use super::storage::{QueueStore, StagedAcknowledgement, StoredQueue};
 use super::{OutputBudget, QueueTarget};
 
@@ -901,12 +902,24 @@ impl QueuePublisher {
                 .await?
                 .as_ref(),
         );
+        // Read before reconciling, so an uncertain commit after it keeps the
+        // shared view unsettled (see `SharedQueues::settle`).
+        let settlement = self.store.shared().settlement();
         if self.backlog.has_uncertain(target) {
             self.reconcile(target).await?;
         }
+        if !self.backlog.has_uncertain(target) {
+            self.store.shared().settle(target, settlement);
+        }
         match owner {
             GenerationOwner::Building => return Ok(PublicationOutcome::Deferred),
-            GenerationOwner::Retired => return self.discard(target, retained, admitted).await,
+            GenerationOwner::Retired => {
+                // Searches read the generation that replaced it, so its
+                // shared view is freed rather than kept until it drains, and
+                // none is built again.
+                self.store.shared().retire(target);
+                return self.discard(target, retained, admitted).await;
+            }
             GenerationOwner::Active => {}
         }
         // Retirement while awaiting ownership is caught by the publication
@@ -1026,14 +1039,17 @@ impl QueuePublisher {
             .map(QueuedOperation::id)
             .collect::<Vec<_>>();
         let transaction = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+        let mut changes = QueueChanges::default();
         let staged = self.store.stage_acknowledge(
             &transaction,
             &self.backlog,
+            &mut changes,
             target,
             &stored,
             &discarded,
         )?;
-        match transaction.commit().await {
+        let queue = self.store.shared().begin_commit(changes);
+        match shared::commit_recorded(transaction, queue).await {
             Ok(_) => {}
             // A definite conflict committed nothing.
             Err(error) if error.kind() == slatedb::ErrorKind::Transaction => {
@@ -1295,9 +1311,11 @@ impl QueuePublisher {
             .iter()
             .flat_map(|selected| selected.operations.iter().map(|operation| operation.id()))
             .collect::<Vec<_>>();
+        let mut changes = QueueChanges::default();
         let staged = self.store.stage_acknowledge(
             &transaction,
             &self.backlog,
+            &mut changes,
             target,
             &stored,
             &acknowledged,
@@ -1337,7 +1355,12 @@ impl QueuePublisher {
             .filter_map(|write| self.vector.cache_registry.prepare_commit(write))
             .collect::<Vec<_>>();
         let fenced = !pending_cache.is_empty();
-        let committed = match vector::commit_fenced(transaction, pending_cache).await {
+        let queue = self.store.shared().begin_commit(changes);
+        let committed = match vector::commit_fenced(transaction, pending_cache, move |applied| {
+            shared::record_applied(queue, applied)
+        })
+        .await
+        {
             Ok(committed) => {
                 self.metrics.drained_queue_deletes.fetch_add(
                     u64::from(staged == StagedAcknowledgement::QueueDelete),
@@ -1888,9 +1911,11 @@ impl QueuePublisher {
             &transaction,
             &published,
         )?;
+        let mut changes = QueueChanges::default();
         let staged = self.store.stage_acknowledge(
             &transaction,
             &self.backlog,
+            &mut changes,
             target,
             &stored,
             &acknowledged,
@@ -1913,11 +1938,15 @@ impl QueuePublisher {
                 .swap(false, Ordering::SeqCst)
             {
                 drop(transaction);
+                // As an unknown commit outcome would, the shared view is
+                // unsettled until reconciliation.
+                self.store.shared().begin_commit(changes).uncertain();
                 self.record_uncertain_commit(target, &selection, &acknowledged, staged);
                 return Ok(PublicationOutcome::Retry);
             }
         }
-        match transaction.commit().await {
+        let queue = self.store.shared().begin_commit(changes);
+        match shared::commit_recorded(transaction, queue).await {
             Ok(_) => {}
             // A definite conflict committed nothing.
             Err(error) if error.kind() == slatedb::ErrorKind::Transaction => {

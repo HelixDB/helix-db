@@ -763,7 +763,7 @@ mod tests {
         transaction
             .put(upper_vector(2), Bytes::from_static(b"second"))
             .unwrap();
-        super::super::commit::commit_fenced(transaction, fences)
+        super::super::commit::commit_fenced(transaction, fences, |_| {})
             .await
             .unwrap();
         hydrate().await.unwrap();

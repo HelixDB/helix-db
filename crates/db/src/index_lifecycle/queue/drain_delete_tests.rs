@@ -29,7 +29,7 @@ use crate::HelixDB;
 
 /// The kind of one stored entry of a key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Stored {
+pub(crate) enum Stored {
     Value,
     Merge,
     Tombstone,
@@ -37,12 +37,12 @@ pub(super) enum Stored {
 
 /// Returns the kind of `key`'s newest stored entry across every source, or
 /// `None` when no source holds the key.
-pub(super) async fn newest(db: &slatedb::Db, key: &[u8]) -> Option<Stored> {
+pub(crate) async fn newest(db: &slatedb::Db, key: &[u8]) -> Option<Stored> {
     history(db, key).await.first().copied()
 }
 
 /// Every stored entry of `key` across every source, newest first.
-pub(super) async fn history(db: &slatedb::Db, key: &[u8]) -> Vec<Stored> {
+pub(crate) async fn history(db: &slatedb::Db, key: &[u8]) -> Vec<Stored> {
     let mut found = Vec::new();
     let mut entries = db.scan_prefix_by_recency(key).await.unwrap();
     while let Some(entry) = entries.next_entry().await.unwrap() {
@@ -331,14 +331,20 @@ async fn an_enqueue_begun_before_the_delete_committed_still_commits_above_it() {
         .await
         .unwrap();
     let late = vector(first + 1_000, &[3.0, 3.0]);
-    QueueStore::new(QueueLayout::Map, u64::MAX, 0)
-        .stage_enqueue(
-            &producer,
-            target,
-            QueueOperand::enqueue(std::slice::from_ref(&late)).unwrap(),
-            std::slice::from_ref(&late),
-        )
-        .unwrap();
+    QueueStore::new(
+        QueueLayout::Map,
+        u64::MAX,
+        0,
+        crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+    )
+    .stage_enqueue(
+        &producer,
+        &mut crate::index_lifecycle::queue::shared::QueueChanges::default(),
+        target,
+        QueueOperand::enqueue(std::slice::from_ref(&late)).unwrap(),
+        std::slice::from_ref(&late),
+    )
+    .unwrap();
     assert_eq!(
         publisher(&db).publish_once(target).await.unwrap(),
         published(1)
@@ -688,7 +694,12 @@ async fn a_crash_before_the_delete_is_durable_reloads_the_whole_queue() {
 #[tokio::test]
 async fn storage_deletes_only_when_the_read_and_the_ledger_both_drain() {
     let db = raw_db(Arc::new(InMemory::new())).await;
-    let map = QueueStore::new(QueueLayout::Map, u64::MAX, 0);
+    let map = QueueStore::new(
+        QueueLayout::Map,
+        u64::MAX,
+        0,
+        crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+    );
     let target = queue_target(DataScope::LegacyUnscoped, 1, 1);
     let operations = [text(1, "a"), text(2, "b")];
     enqueue(&db, &map, target, &operations).await;
@@ -720,8 +731,15 @@ async fn storage_deletes_only_when_the_read_and_the_ledger_both_drain() {
                 .begin(IsolationLevel::SerializableSnapshot)
                 .await
                 .unwrap();
-            map.stage_acknowledge(&transaction, &backlog, target, stored, &ids)
-                .unwrap()
+            map.stage_acknowledge(
+                &transaction,
+                &backlog,
+                &mut crate::index_lifecycle::queue::shared::QueueChanges::default(),
+                target,
+                stored,
+                &ids,
+            )
+            .unwrap()
         }
     };
     // Both read operations named, both charged: drained.
@@ -760,8 +778,15 @@ async fn storage_deletes_only_when_the_read_and_the_ledger_both_drain() {
         .await
         .unwrap();
     assert_eq!(
-        map.stage_acknowledge(&transaction, &both, target, &stored, &ids)
-            .unwrap(),
+        map.stage_acknowledge(
+            &transaction,
+            &both,
+            &mut crate::index_lifecycle::queue::shared::QueueChanges::default(),
+            target,
+            &stored,
+            &ids
+        )
+        .unwrap(),
         StagedAcknowledgement::QueueDelete
     );
     transaction.commit().await.unwrap();
@@ -769,7 +794,12 @@ async fn storage_deletes_only_when_the_read_and_the_ledger_both_drain() {
     assert!(map.read(&db, target).await.unwrap().is_none());
 
     // The row layout deletes rows whatever the ledger says.
-    let rows = QueueStore::new(QueueLayout::Rows, u64::MAX, 0);
+    let rows = QueueStore::new(
+        QueueLayout::Rows,
+        u64::MAX,
+        0,
+        crate::index_lifecycle::queue::resolutions::ResolutionBudget::default(),
+    );
     let row_target = queue_target(DataScope::LegacyUnscoped, 2, 1);
     let row_operations = [text(4, "d")];
     enqueue(&db, &rows, row_target, &row_operations).await;
@@ -784,6 +814,7 @@ async fn storage_deletes_only_when_the_read_and_the_ledger_both_drain() {
         rows.stage_acknowledge(
             &transaction,
             &drained,
+            &mut crate::index_lifecycle::queue::shared::QueueChanges::default(),
             row_target,
             &stored,
             &[row_operations[0].id()]
