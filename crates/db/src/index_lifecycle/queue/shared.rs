@@ -64,7 +64,8 @@
 //! its snapshot: below the view's base or below what compaction dropped,
 //! while the view is unsettled, and inside a write transaction, whose queue
 //! read must stay a serializable read dependency. Readers have no views, so
-//! all of their searches read storage. Those reads and every build's base
+//! all of their searches read storage, and neither has the row layout, whose
+//! rows sort in staging order rather than commit order. Those reads and every build's base
 //! read are charged against one byte budget for what they resolve
 //! ([`super::resolutions`]).
 //!
@@ -197,7 +198,7 @@ use parking_lot::Mutex;
 
 use crate::encoding::v2::keys::IndexEntity;
 use crate::encoding::v2::values::indexes::operation_queue::{
-    LatestOperations, QueueFamily, QueuedOperation, QueuedOperationId,
+    LatestOperations, QueueFamily, QueuedOperation, QueuedOperationId, MIN_RETAINED_RECORD_LEN,
 };
 
 use super::backlog::{charged_bytes, OPERATION_OVERHEAD_BYTES};
@@ -1205,10 +1206,13 @@ impl SharedRead {
     /// exactly as [`LatestOperations::decode`] selects from the value storage
     /// resolves at the snapshot; `None` when nothing is visible.
     ///
-    /// The reach it reports when the budget leaves an entity out is exact,
-    /// where a decode's may be a lower bound (see
-    /// [`LatestOperations::refused`]).
+    /// Like the decode, it tracks at most `budget / MIN_RETAINED_RECORD_LEN`
+    /// entities, so what a search allocates follows its budget, not the
+    /// backlog, and the reach it reports is the decode's, a lower bound when
+    /// untracked entities are left out (see [`LatestOperations::refused`]).
     pub(crate) fn select(&self, budget: u64) -> Option<LatestOperations> {
+        let trackable =
+            usize::try_from(budget / MIN_RETAINED_RECORD_LEN as u64).unwrap_or(usize::MAX);
         let visible = self
             .chunks
             .iter()
@@ -1217,17 +1221,19 @@ impl SharedRead {
             .map(|slot| &slot.operation);
         let mut order = Vec::<&QueuedOperation>::new();
         let mut positions = HashMap::<IndexEntity, usize>::new();
+        let mut untracked = false;
         for operation in visible {
             match positions.entry(operation.entity()) {
                 Entry::Occupied(position) => order[*position.get()] = operation,
-                Entry::Vacant(position) => {
+                Entry::Vacant(position) if order.len() < trackable => {
                     position.insert(order.len());
                     order.push(operation);
                 }
+                Entry::Vacant(_) => untracked = true,
             }
         }
         let family = self.family?;
-        if order.is_empty() {
+        if order.is_empty() && !untracked {
             return None;
         }
         let mut charged = 0_u64;
@@ -1240,7 +1246,12 @@ impl SharedRead {
             charged = reached;
             selected.push(operation.clone());
         }
-        Some(LatestOperations::new(family, selected, None))
+        let refused = untracked.then(|| {
+            charged
+                .saturating_add(MIN_RETAINED_RECORD_LEN as u64)
+                .max(budget.saturating_add(1))
+        });
+        Some(LatestOperations::new(family, selected, refused))
     }
 }
 

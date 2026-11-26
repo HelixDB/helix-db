@@ -189,6 +189,24 @@ fn budget_ends_the_selection_at_the_first_entity_that_does_not_fit() {
 }
 
 #[test]
+fn a_selection_tracks_only_the_entities_its_budget_could_hold_like_a_decode() {
+    let shared = Arc::new(SharedQueues::default());
+    let operations: Vec<_> = (1..=64).map(|of| operation(u128::from(of), of, 8)).collect();
+    build(&shared, target(), 1, &operations);
+    let read = shared_read(&shared, target(), 1);
+    let operands = [QueueOperand::enqueue(&operations).unwrap().into_parts().0];
+    let min = MIN_RETAINED_RECORD_LEN as u64;
+    for budget in [0, min - 1, min, 3 * min, operations[0].retained_bytes(), 1 << 20] {
+        let actual = read.select(budget).expect("a pending queue selects");
+        let expected = reference(&operands, budget).expect("a pending queue decodes");
+        assert_eq!(ids(&Some(actual.clone())), ids(&Some(expected.clone())), "budget {budget}");
+        // Past `budget / MIN_RETAINED_RECORD_LEN` entities neither tracks
+        // more, so both report the same lower bound, not the exact reach.
+        assert_eq!(actual.refused(), expected.refused(), "budget {budget}");
+    }
+}
+
+#[test]
 fn selections_share_payloads_and_the_view_is_charged_once() {
     let shared = Arc::new(SharedQueues::default());
     let operations = [operation(1, 1, 64), operation(2, 2, 64)];
@@ -1061,6 +1079,15 @@ async fn store_holding(
     name: &str,
     operations: &[QueuedOperation],
 ) -> (Arc<slatedb::Db>, Arc<super::super::storage::QueueStore>) {
+    store_holding_in(name, crate::config::QueueLayout::Map, operations).await
+}
+
+/// [`store_holding`] in `layout`.
+async fn store_holding_in(
+    name: &str,
+    layout: crate::config::QueueLayout,
+    operations: &[QueuedOperation],
+) -> (Arc<slatedb::Db>, Arc<super::super::storage::QueueStore>) {
     let db = slatedb::Db::builder(
         name,
         Arc::new(slatedb::object_store::memory::InMemory::new()),
@@ -1070,13 +1097,37 @@ async fn store_holding(
     .await
     .unwrap();
     let store = super::super::storage::QueueStore::new(
-        crate::config::QueueLayout::Map,
+        layout,
         1 << 20,
         u64::MAX,
         super::super::resolutions::ResolutionBudget::default(),
     );
     enqueue_recorded(&db, &store, operations).await;
     (Arc::new(db), Arc::new(store))
+}
+
+#[tokio::test]
+async fn row_layout_searches_read_storage_and_never_build_a_view() {
+    // Rows sort in staging order, which commits can invert; a view keeps
+    // commit order, so a budget that leaves entities out could select
+    // differently from storage.
+    let (db, store) = store_holding_in(
+        "shared-rows-read-storage",
+        crate::config::QueueLayout::Rows,
+        &[operation(1, 1, 8), operation(2, 2, 8)],
+    )
+    .await;
+    for _ in 0..2 {
+        let snapshot = db.snapshot().await.unwrap();
+        let read = store
+            .read_pending(&db, snapshot.as_ref(), snapshot.seq(), target())
+            .await
+            .unwrap();
+        let super::super::storage::PendingRead::Stored { bytes: Some(_), .. } = read else {
+            panic!("a row-layout search reads its pending rows from storage");
+        };
+    }
+    assert!(!store.shared().searched());
 }
 
 /// Commits `operations` to `target()`'s queue, recorded, and returns where.
@@ -1849,9 +1900,7 @@ fn check_selection(
         let refused =
             |latest: &Option<LatestOperations>| latest.as_ref().and_then(LatestOperations::refused);
         prop_assert_eq!(refused(&actual).is_some(), refused(&expected).is_some());
-        if let (Some(actual), Some(expected)) = (refused(&actual), refused(&expected)) {
-            prop_assert!(actual >= expected && actual > budget);
-        }
+        prop_assert_eq!(refused(&actual), refused(&expected));
     }
     Ok(())
 }

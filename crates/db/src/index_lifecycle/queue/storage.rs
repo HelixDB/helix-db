@@ -724,6 +724,13 @@ impl QueueStore {
         snapshot: u64,
         target: QueueTarget,
     ) -> Result<PendingRead> {
+        // Rows sort in the order their operations were staged, which two
+        // transactions can commit in the other order, while a view keeps
+        // commit order: a budget that leaves entities out would select
+        // differently from each, so the row layout always reads storage.
+        if self.layout == QueueLayout::Rows {
+            return self.read_pending_stored(read, snapshot, target).await;
+        }
         let builder = match self.shared.plan(target, snapshot).await {
             Plan::Shared(shared) => return Ok(PendingRead::Shared(shared)),
             Plan::Fallback => return self.read_pending_stored(read, snapshot, target).await,
