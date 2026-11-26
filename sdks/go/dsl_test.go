@@ -250,6 +250,25 @@ func TestReadQueryRejectsWriteTraversal(t *testing.T) {
 	}
 }
 
+func TestForEachParamKeepsBodyErrors(t *testing.T) {
+	writeInRead := Read().VarAs("created", G().AddN("User", Props{Prop("name", "Ada")}))
+	if err := Read().ForEachParam("rows", writeInRead).Validate(); !errors.Is(err, ErrWriteTraversalInReadBatch) {
+		t.Fatalf("read batch: got %v, want ErrWriteTraversalInReadBatch", err)
+	}
+	if err := ReadQuery("q").ForEachParam("rows", writeInRead).Returning().Validate(); !errors.Is(err, ErrWriteTraversalInReadBatch) {
+		t.Fatalf("read query: got %v, want ErrWriteTraversalInReadBatch", err)
+	}
+
+	var missing *Traversal
+	partial := Write().VarAs("a", G().AddN("A", Props{Prop("k", 1)})).VarAs("b", missing)
+	if err := Write().ForEachParam("rows", partial).Validate(); err == nil {
+		t.Fatal("write batch: a nil traversal in the body must not be dropped silently")
+	}
+	if body, err := MarshalRequest(WriteQuery("q").ForEachParam("rows", partial).Returning()); err == nil {
+		t.Fatalf("write query: a nil traversal in the body must not be dropped silently: %s", body)
+	}
+}
+
 func TestReturningEmptySerializesSequence(t *testing.T) {
 	req := ReadQuery("warm_users").VarAs("users", G().NWithLabel("User").Count()).Returning()
 	body, err := MarshalRequest(req)

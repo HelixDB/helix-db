@@ -2388,6 +2388,10 @@ func (b *ReadBatch) VarAsIf(name string, condition BatchCondition, traversal *Tr
 }
 func (b *ReadBatch) ForEachParam(param string, body *ReadBatch) *ReadBatch {
 	if body != nil {
+		// The body's VarAs calls record their errors on the body, not on b.
+		if body.err != nil && b.err == nil {
+			b.err = body.err
+		}
 		b.queries = append(b.queries, forEachParamEntry(param, body.queries))
 	}
 	return b
@@ -2439,6 +2443,9 @@ func (b *WriteBatch) VarAsIf(name string, condition BatchCondition, traversal *T
 }
 func (b *WriteBatch) ForEachParam(param string, body *WriteBatch) *WriteBatch {
 	if body != nil {
+		if body.err != nil && b.err == nil {
+			b.err = body.err
+		}
 		b.queries = append(b.queries, forEachParamEntry(param, body.queries))
 	}
 	return b
@@ -2998,6 +3005,9 @@ func (q *ReadQueryBuilder) VarAsIf(name string, condition BatchCondition, traver
 }
 func (q *ReadQueryBuilder) ForEachParam(param string, body *ReadBatch) *ReadQueryBuilder {
 	if body != nil {
+		if body.err != nil && q.err == nil {
+			q.err = body.err
+		}
 		q.batch.queries = append(q.batch.queries, forEachParamEntry(param, body.queries))
 	}
 	return q
@@ -3073,6 +3083,9 @@ func (q *WriteQueryBuilder) VarAsIf(name string, condition BatchCondition, trave
 }
 func (q *WriteQueryBuilder) ForEachParam(param string, body *WriteBatch) *WriteQueryBuilder {
 	if body != nil {
+		if body.err != nil && q.err == nil {
+			q.err = body.err
+		}
 		q.batch.queries = append(q.batch.queries, forEachParamEntry(param, body.queries))
 	}
 	return q
