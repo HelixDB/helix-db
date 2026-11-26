@@ -229,9 +229,18 @@ fn fallbacks(db: &HelixDB) -> u64 {
     db.index_operation_queue_stats().search_queue_reads
 }
 
+/// Asserts the row layout's searches all read storage and never planned a
+/// view (see `QueueStore::read_pending`).
+fn assert_rows_read_storage(db: &HelixDB) {
+    assert!(fallbacks(db) > 0);
+    assert!(!db.index_queue_store().shared().searched());
+    assert_eq!(db.index_operation_queue_stats().shared_view_bytes, 0);
+}
+
 #[tokio::test]
 async fn read_views_at_different_snapshots_select_exactly_their_own_pending_work() {
     for layout in [QueueLayout::Map, QueueLayout::Rows] {
+        let views = layout == QueueLayout::Map;
         let name = format!("shared-snapshots-{layout:?}");
         let db = open(&name, Arc::new(InMemory::new()), layout, true).await;
         insert_at(&db, 0.0).await;
@@ -241,7 +250,9 @@ async fn read_views_at_different_snapshots_select_exactly_their_own_pending_work
         // its targets was recorded above it.
         let mut first = read_context(&db).await;
         check(&mut first, "first").await;
-        assert_eq!(fallbacks(&db), 0, "{layout:?}");
+        if views {
+            assert_eq!(fallbacks(&db), 0);
+        }
         // Enqueues, acknowledgements, and a drain after the build.
         insert_at(&db, 2.0).await;
         let mut second = read_context(&db).await;
@@ -277,15 +288,17 @@ async fn read_views_at_different_snapshots_select_exactly_their_own_pending_work
             .map(|(context, label)| async move { check(context, label).await }),
         )
         .await;
-        assert_eq!(
-            fallbacks(&db),
-            0,
-            "{layout:?}: no later snapshot read storage"
-        );
+        if views {
+            assert_eq!(fallbacks(&db), 0, "no later snapshot read storage");
+        }
         // A snapshot below the views' bases reads storage, exactly as before:
         // once per queue and consistency.
         check(&mut older, "older").await;
-        assert_eq!(fallbacks(&db), 4, "{layout:?}");
+        if views {
+            assert_eq!(fallbacks(&db), 4);
+        } else {
+            assert_rows_read_storage(&db);
+        }
         for context in [older, first, second, third, fourth, drained, dropped] {
             let mut context = context;
             context.close_request_read_view().unwrap();
@@ -820,11 +833,11 @@ async fn a_draining_delete_leaves_older_snapshots_their_operations_and_later_one
             .map(|(context, label)| async move { check(context, label).await }),
         )
         .await;
-        assert_eq!(
-            fallbacks(&db),
-            0,
-            "{layout:?}: the views served every search"
-        );
+        if deletes {
+            assert_eq!(fallbacks(&db), 0, "the views served every search");
+        } else {
+            assert_rows_read_storage(&db);
+        }
         for context in [before, staged, drained, later] {
             let mut context = context;
             context.close_request_read_view().unwrap();
@@ -842,7 +855,7 @@ async fn a_draining_delete_leaves_older_snapshots_their_operations_and_later_one
         assert!(charged > 0);
         assert_eq!(
             db.index_operation_queue_stats().shared_view_bytes,
-            charged,
+            if deletes { charged } else { 0 },
             "{layout:?}"
         );
         Arc::into_inner(db).unwrap().close().await.unwrap();

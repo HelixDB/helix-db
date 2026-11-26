@@ -191,15 +191,28 @@ fn budget_ends_the_selection_at_the_first_entity_that_does_not_fit() {
 #[test]
 fn a_selection_tracks_only_the_entities_its_budget_could_hold_like_a_decode() {
     let shared = Arc::new(SharedQueues::default());
-    let operations: Vec<_> = (1..=64).map(|of| operation(u128::from(of), of, 8)).collect();
+    let operations: Vec<_> = (1..=64)
+        .map(|of| operation(u128::from(of), of, 8))
+        .collect();
     build(&shared, target(), 1, &operations);
     let read = shared_read(&shared, target(), 1);
     let operands = [QueueOperand::enqueue(&operations).unwrap().into_parts().0];
     let min = MIN_RETAINED_RECORD_LEN as u64;
-    for budget in [0, min - 1, min, 3 * min, operations[0].retained_bytes(), 1 << 20] {
+    for budget in [
+        0,
+        min - 1,
+        min,
+        3 * min,
+        operations[0].retained_bytes(),
+        1 << 20,
+    ] {
         let actual = read.select(budget).expect("a pending queue selects");
         let expected = reference(&operands, budget).expect("a pending queue decodes");
-        assert_eq!(ids(&Some(actual.clone())), ids(&Some(expected.clone())), "budget {budget}");
+        assert_eq!(
+            ids(&Some(actual.clone())),
+            ids(&Some(expected.clone())),
+            "budget {budget}"
+        );
         // Past `budget / MIN_RETAINED_RECORD_LEN` entities neither tracks
         // more, so both report the same lower bound, not the exact reach.
         assert_eq!(actual.refused(), expected.refused(), "budget {budget}");

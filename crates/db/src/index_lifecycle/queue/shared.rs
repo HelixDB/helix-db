@@ -63,11 +63,11 @@
 //! A search reads storage itself, as before, whenever the view cannot serve
 //! its snapshot: below the view's base or below what compaction dropped,
 //! while the view is unsettled, and inside a write transaction, whose queue
-//! read must stay a serializable read dependency. Readers have no views, so
-//! all of their searches read storage, and neither has the row layout, whose
-//! rows sort in staging order rather than commit order. Those reads and every build's base
-//! read are charged against one byte budget for what they resolve
-//! ([`super::resolutions`]).
+//! read must stay a serializable read dependency. Readers have no views, nor
+//! does the row layout, whose rows sort in staging order rather than commit
+//! order, so all of their searches read storage. Those reads and every
+//! build's base read are charged against one byte budget for what they
+//! resolve ([`super::resolutions`]).
 //!
 //! A build serves the search that started it from the view it installs,
 //! captured at that search's snapshot before anything can free it; when the
