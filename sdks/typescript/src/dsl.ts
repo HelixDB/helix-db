@@ -3096,7 +3096,8 @@ function normalizeF32(value: number, path: string): number {
 }
 
 function validateJsonValue(value: JsonValue, path: string): JsonValue {
-  if (value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "bigint") return value;
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "bigint") return i64ToJson(value);
   if (typeof value === "number") return finiteNumber(value, path);
   if (Array.isArray(value)) return value.map((entry, index) => validateJsonValue(entry, `${path}[${index}]`));
   if (typeof value !== "object") throw new TypeError(`parameter '${path}' must be JSON-compatible`);

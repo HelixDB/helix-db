@@ -665,6 +665,7 @@ for (const value of [-(1n << 63n), (1n << 63n) - 1n]) {
   assert.doesNotThrow(() => PropertyValue.i64(value));
   assert.doesNotThrow(() => PropertyValue.from(i64(value)));
   assert.doesNotThrow(() => QueryValue.i64(value));
+  assert.doesNotThrow(() => QueryRequest.read(readBatch()).withUntypedParameter("value", value));
 }
 for (const value of [-(1n << 63n) - 1n, 1n << 63n]) {
   assert.throws(() => i64(value), /signed 64-bit range/);
@@ -673,6 +674,13 @@ for (const value of [-(1n << 63n) - 1n, 1n << 63n]) {
   assert.throws(() => QueryValue.i64(value), /signed 64-bit range/);
   assert.throws(() => QueryRequest.read(readBatch()).withTypedParameter("value", QueryParamType.i64(), value), /signed 64-bit range/);
   assert.throws(() => readBatch().toQueryJson(i64Params, { value }), /signed 64-bit range/);
+  // The server reads an integer past i64 as a float, so untyped and JSON-shaped params must refuse it too.
+  assert.throws(() => QueryRequest.read(readBatch()).withUntypedParameter("value", value), /signed 64-bit range/);
+  assert.throws(() => QueryRequest.read(readBatch()).withTypedParameter("value", QueryParamType.value(), value), /signed 64-bit range/);
+  assert.throws(
+    () => QueryRequest.read(readBatch()).withTypedParameter("value", QueryParamType.object(), { nested: [value] }),
+    /signed 64-bit range/,
+  );
 }
 
 assert.deepEqual(parsed(Expr.case([WhenThen(Predicate.isNotNull("email"), Expr.prop("email"))], Expr.val("missing"))), {

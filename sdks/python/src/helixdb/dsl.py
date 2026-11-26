@@ -3995,7 +3995,7 @@ def _validate_json_value(value: JsonValue, path: str) -> JsonValue:
     if value is None or isinstance(value, (bool, str)):
         return value
     if isinstance(value, int):
-        return _int_to_json(value)
+        return _i64_to_json(value)
     if isinstance(value, float):
         return _finite_float(value)
     if isinstance(value, (bytes, bytearray)):
