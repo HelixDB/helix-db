@@ -2,7 +2,7 @@
 //!
 //! Wide nodes (scalar fields, a long text body and an embedding) are read by
 //! queries that need only one or two fields: a filtered count, a filtered
-//! single-field projection and an unfiltered single-field projection. Full
+//! single-field projection and unfiltered single- and multi-field projections. Full
 //! row materialization is measured alongside so that reading every field
 //! cannot regress unnoticed. Graph creation and planning happen once outside
 //! measurement; each sample executes only the planned read.
@@ -42,6 +42,7 @@ struct Fixture {
     filtered_count: ExecutablePlan,
     filtered_project_one: ExecutablePlan,
     project_one: ExecutablePlan,
+    values_many: ExecutablePlan,
     full_rows: ExecutablePlan,
 }
 
@@ -67,19 +68,21 @@ fn fixture(rows: Rows) -> &'static Fixture {
             .build()
             .expect("benchmark runtime starts");
         let fixture = runtime.block_on(seed_and_plan(rows));
-        let (db, [filtered_count, filtered_project_one, project_one, full_rows]) = fixture;
+        let (db, [filtered_count, filtered_project_one, project_one, values_many, full_rows]) =
+            fixture;
         Fixture {
             runtime,
             db,
             filtered_count,
             filtered_project_one,
             project_one,
+            values_many,
             full_rows,
         }
     })
 }
 
-async fn seed_and_plan(rows: Rows) -> (HelixDB, [ExecutablePlan; 4]) {
+async fn seed_and_plan(rows: Rows) -> (HelixDB, [ExecutablePlan; 5]) {
     let token = ProcessLocalDatabaseToken::new("property-row-reads-bench")
         .expect("benchmark database token is valid");
     let source = || HelixDbSource::InMemoryToken {
@@ -170,6 +173,21 @@ async fn seed_and_plan(rows: Rows) -> (HelixDB, [ExecutablePlan; 4]) {
             )
             .returning(["rows"]),
         read_batch()
+            .var_as(
+                "rows",
+                g().n(NodeRef::all()).values(vec![
+                    "external_id",
+                    "status",
+                    "score",
+                    "title",
+                    "attribute_1",
+                    "attribute_2",
+                    "attribute_3",
+                    "attribute_4",
+                ]),
+            )
+            .returning(["rows"]),
+        read_batch()
             .var_as("rows", g().n(NodeRef::all()).limit(100))
             .returning(["rows"]),
     ];
@@ -182,7 +200,7 @@ async fn seed_and_plan(rows: Rows) -> (HelixDB, [ExecutablePlan; 4]) {
             .expect("query warms");
         plans.push(plan);
     }
-    let plans: [ExecutablePlan; 4] = plans.try_into().expect("four plans");
+    let plans: [ExecutablePlan; 5] = plans.try_into().expect("five plans");
     (db, plans)
 }
 
@@ -216,6 +234,11 @@ fn project_one(bencher: divan::Bencher<'_, '_>) {
 }
 
 #[divan::bench(threads = 1)]
+fn values_many(bencher: divan::Bencher<'_, '_>) {
+    run(bencher, Rows::Written, |fixture| &fixture.values_many);
+}
+
+#[divan::bench(threads = 1)]
 fn full_rows(bencher: divan::Bencher<'_, '_>) {
     run(bencher, Rows::Written, |fixture| &fixture.full_rows);
 }
@@ -238,6 +261,11 @@ mod reopened {
     #[divan::bench(threads = 1)]
     fn project_one(bencher: divan::Bencher<'_, '_>) {
         run(bencher, Rows::Reopened, |fixture| &fixture.project_one);
+    }
+
+    #[divan::bench(threads = 1)]
+    fn values_many(bencher: divan::Bencher<'_, '_>) {
+        run(bencher, Rows::Reopened, |fixture| &fixture.values_many);
     }
 
     #[divan::bench(threads = 1)]
