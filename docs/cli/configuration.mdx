@@ -28,12 +28,12 @@ workspace_id = "<workspace-id>"
 [local.dev]
 port = 6969
 image = "ghcr.io/helixdb/helixdb"
-tag = "v0.0.18"
+tag = "v0.0.19"
 
 [local.staging]
 port = 7070
 image = "ghcr.io/helixdb/helixdb"
-tag = "v0.0.18"
+tag = "v0.0.19"
 storage = "s3"
 
 [local.staging.s3]
@@ -83,7 +83,7 @@ that every `[enterprise.*]` table shares.
 | --- | --- | --- | --- |
 | `port` | integer | `6969` | Host port mapped to the container's port `8080`. `helix add local` and `helix init local` do not check it against other instances. |
 | `image` | string | `"ghcr.io/helixdb/helixdb"` | Server image repository, without a tag. Set it to run a custom build. |
-| `tag` | string | The CLI's default tag (`v0.0.18` for CLI 3.8.0) | 1 to 128 characters (letters, digits, `_`, `.`, `-`; not starting with `.` or `-`), or `sha256:` plus 64 lowercase hex digits to pin a digest. `latest` pulls on every start. See [Image pinning](#image-pinning). |
+| `tag` | string | The CLI's default tag (`v0.0.19` for CLI 3.8.0) | 1 to 128 characters (letters, digits, `_`, `.`, `-`; not starting with `.` or `-`), or `sha256:` plus 64 lowercase hex digits to pin a digest. `latest` pulls on every start. See [Image pinning](#image-pinning). |
 | `pull` | `"always"`, `"missing"`, or `"never"` | `always` for `latest`, else `missing` | When to pull the server image. `always` needs a successful pull; `never` needs a cached image. An explicit value also applies to the disk-mode SeaweedFS image, which otherwise uses `missing`. |
 | `storage` | `"memory"`, `"disk"`, or `"s3"` | `"memory"` | `memory` loses data when the container stops or restarts. `disk` uses a CLI-managed SeaweedFS volume. `s3` uses `[local.<name>.s3]`. |
 
@@ -153,10 +153,12 @@ To move an instance to the image the current CLI ships with:
 2. Start on that tag and save it to `[local.dev]`, or edit `tag` by hand and run `helix start dev`:
 
    ```bash
-   helix start dev --image-version v0.0.18 --persist
+   helix start dev --image-version v0.0.19 --persist
    ```
 
-   `helix start` replaces the container, so an in-memory instance starts empty.
+   `helix start` replaces the container, so an in-memory instance starts empty. A newer image
+   can upgrade persisted data so older images can no longer open it, so back up first: see
+   [Start with the CLI](/database/helix-db/start-here/local-development/local-server#start-with-the-cli).
 
 ## Helix home
 
